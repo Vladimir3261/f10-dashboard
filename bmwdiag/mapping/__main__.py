@@ -283,6 +283,9 @@ def cmd_request(args) -> int:
 
     bound = build_request(request, targets)
 
+    for i, frame in enumerate(request.setup):
+        print(f"setup[{i}]      {bytes(frame).hex(' ')}")
+
     print(bound.describe())
     print(f"expect prefix {bound.expect_prefix.hex(' ') or '(none)'}")
     print(f"min length    {bound.min_length}")

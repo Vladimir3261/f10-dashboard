@@ -1,0 +1,432 @@
+# Source manifest - every external source the research pipeline may
+# reference. A research record naming a source_id absent from this file
+# fails validation (tests/research/test_license_manifest.py).
+#
+# Pins were taken 2026-08-25. license.id records what was actually
+# determined at the pinned revision; "unknown" is a determination, not a
+# gap. commercial_runtime_copy_allowed refers to copying IMPLEMENTATION
+# into a potentially commercial runtime - extracting individual factual
+# protocol observations with citation is a separate question tracked in
+# research/reports/legal-and-license-notes.md.
+
+sources:
+
+  klartext:
+    name: Klartext
+    type: git_repository
+    url: "https://github.com/HadiCherkaoui/klartext"
+    commit: "04c9ee520c3c33cbc933377ae57321c82e191319"
+    retrieved_at: "2026-08-25"
+    license:
+      id: AGPL-3.0-or-later
+      url: "https://github.com/HadiCherkaoui/klartext/blob/04c9ee520c3c33cbc933377ae57321c82e191319/LICENSE"
+      commercial_runtime_copy_allowed: false
+      notes: "Research/reference oracle. No code copied; facts cited by file."
+    trust:
+      tier: A
+      primary_evidence: [on_car_capture, source_code, sgbd_analysis]
+    applicability:
+      engine_family: [N47]
+      source_chassis: [F20, F25]
+    used_files:
+      - path: docs/sgbd-findings.md
+        purpose: sgbd_structure
+        sha256: "fe0d75b129db7386f91ea74538c14a9800dd00e79fac8cf47e82ac133e7644d6"
+      - path: docs/car-session-1-results.md
+        purpose: live_wire_validation
+        sha256: "95dc6cd1ca39c9b8a2a12ef7720aa4a19d66d13552d551439ea4a7889c5cdd4a"
+      - path: crates/best/tests/differential.rs
+        purpose: itoel_scale_constants
+        sha256: "262f39890e5955d2f56a95a5aa4f3c43e1675fc8b524eb35c552129a742c4ed5"
+      - path: crates/semantic/src/measurement.rs
+        purpose: request_builder_reference
+        sha256: "262f39890e5955d2f56a95a5aa4f3c43e1675fc8b524eb35c552129a742c4ed5"
+
+  morguux-d73n47a0:
+    name: "MorGuux D73N47A0 CSV (BMW E90 KCAN Notes gist)"
+    type: gist
+    url: "https://gist.github.com/MorGuux/832054bcbe6c1207b1f3075d5ecf6a4a"
+    revision: "074bac9c7700fdc845bbdf4cd7784dd6be685ba2"
+    retrieved_at: "2026-08-25"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: >
+        No license attached to the gist. Content is a structured export of
+        BMW SGBD measurement data (SG_FUNKTIONEN-shaped) - both the gist
+        license and the underlying database right are unresolved. Treat
+        derived bulk output as non-redistributable until reviewed.
+    trust:
+      tier: B
+      primary_evidence: [sgbd_derived_table]
+    applicability:
+      engine_family: [N47]
+      sgbd: [D73N47A0]
+      source_chassis: [E84]
+    used_files:
+      - path: "D73N47A0 (BMW N47 DDE).csv"
+        purpose: measurement_catalogue
+        sha256: "105fd0efc1f8fadee7987fa86d83626067e9b9eb00ae0a72c19634c26b35746f"
+
+  wican-issue-752:
+    name: "WiCAN firmware issue #752 (DDE7 response validation)"
+    type: github_issue
+    url: "https://github.com/meatpiHQ/wican-fw/issues/752"
+    retrieved_at: "2026-08-25"
+    revision: "issue open as of retrieval; no fix merged (see #751)"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: "User-contributed issue text in a GPL-3.0 repo; raw capture bytes are factual observations."
+    trust:
+      tier: A
+      primary_evidence: [on_car_capture]
+    applicability:
+      engine_family: [N47]
+      source_chassis: [E90]
+      source_ecu: [DDE7N47]
+
+  ediabaslib:
+    name: EdiabasLib / Deep OBD
+    type: git_repository
+    url: "https://github.com/uholeschak/ediabaslib"
+    commit: "a7cef80490412115b16d700901573ec821f01ec8"
+    retrieved_at: "2026-08-25"
+    license:
+      id: GPL-3.0
+      commercial_runtime_copy_allowed: false
+      notes: "Format reference and behaviour oracle only; never a runtime dependency."
+    trust:
+      tier: C
+      primary_evidence: [implementation, configuration]
+    applicability:
+      engine_family: [N47]
+      source_chassis: [E90]
+    used_files:
+      - path: BmwDeepObd/Xml/E90/Motor.ccpage
+        purpose: result_name_evidence
+        sha256: "computed at import from cached copy"
+
+  ediabasx:
+    name: EdiabasX
+    type: git_repository
+    url: "https://github.com/emdzej/ediabasx"
+    commit: "78a3f5f407a2fb0e2561c61b83a8dd560f3e4214"
+    retrieved_at: "2026-08-25"
+    license:
+      id: PolyForm-Noncommercial-1.0.0
+      commercial_runtime_copy_allowed: false
+      notes: "Offline research oracle only. Never a commercial runtime dependency."
+    trust:
+      tier: B
+      primary_evidence: [prg_parser, disassembler]
+    applicability:
+      engine_family: [N47]
+
+  ediabasx-docs-sgbd:
+    name: "EdiabasX generated SGBD documentation site"
+    type: git_repository
+    url: "https://github.com/emdzej/ediabasx-docs-sgbd"
+    commit: "b644de8fbfbb4b207f57794e3c7894dc1dc58627"
+    retrieved_at: "2026-08-25"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: >
+        Machine-generated from BMW PRG files; the underlying data is BMW
+        proprietary-derived. Used strictly as a lookup oracle for
+        individual cross-checks, never bulk-scraped or redistributed.
+    trust:
+      tier: B
+      primary_evidence: [sgbd_derived_table]
+    applicability:
+      engine_family: [N47]
+      sgbd: [D71N47A0, d72n47a0, d73n47a0]
+    used_files:
+      - path: docs/sgbd/d72n47a0.md
+        purpose: sg_funktionen_row_crosscheck
+        sha256: "161ec6ea9db155b57b27599a4ed79b071120aa9e89418f265459a5186e6a544b"
+      - path: docs/sgbd/D71N47A0.md
+        purpose: messwertetab_variant_comparison
+        sha256: "15b7e66bdb490f2ccd63911387b1bd319a0e63e05abc4c63ac8903809397c137"
+
+  bmw-xdfs-testo:
+    name: "BMW-XDFs TestO Datalogger custom jobs"
+    type: git_repository
+    url: "https://github.com/MotorMouth93/BMW-XDFs"
+    commit: "54a7ce420867452609e1116adc0afb8fe8a395ba"
+    retrieved_at: "2026-08-25"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: >
+        No license. The originally-referenced zarboz/BMW-XDFs repository
+        returns 404 (2026-08-25); this repository carries the same
+        Me7.2/Datalogger path and is not marked as a fork.
+    trust:
+      tier: C
+      primary_evidence: [logger_configuration]
+    applicability:
+      engine_family: [N47]
+      sgbd: [D71N47A0, D71N47C0, D71N47D0]
+    used_files:
+      - path: "Me7.2/Datalogger/TestO Datalogger/config/customjobs.xml"
+        purpose: variant_and_identifier_sets
+        sha256: "17744c477cbf7995c4a6fd65da77a0a9e1712d10b6c08101c3fcece259287886"
+
+  obdb-bmw-5-series:
+    name: "OBDb BMW-5-Series signalset"
+    type: git_repository
+    url: "https://github.com/OBDb/BMW-5-Series"
+    commit: "d634524724470765a16c2867eea515e462336f0e"
+    retrieved_at: "2026-08-25"
+    license:
+      id: CC-BY-SA-4.0
+      commercial_runtime_copy_allowed: false
+      notes: "Data reusable with attribution + share-alike; per-signal provenance not visible."
+    trust:
+      tier: C
+      primary_evidence: [community_signalset]
+    applicability:
+      source_chassis: [F10, F11, G30]
+      target_chassis_status: unverified
+
+  obd-gauge-cluster:
+    name: "obd-gauge-cluster F10 on-car validation (BMW-STATUS.md)"
+    type: git_repository
+    url: "https://github.com/cheeseprince/obd-gauge-cluster"
+    commit: "bb1323960c8e378633138dc46226cf99b8a55859"
+    retrieved_at: "2026-08-25"
+    license:
+      id: MIT
+      commercial_runtime_copy_allowed: true
+      notes: "Methodology reference plus F10 N55 on-car scan evidence."
+    trust:
+      tier: A
+      primary_evidence: [on_car_scan]
+    applicability:
+      source_chassis: [F10]
+      source_engine: [N55]
+    used_files:
+      - path: docs/BMW-STATUS.md
+        purpose: f10_namespace_and_oil_pressure_evidence
+
+  bimmerdis:
+    name: BimmerDis
+    type: git_repository
+    url: "https://github.com/radelbro/BimmerDis"
+    commit: "f4f036b7db6c8c79ffd0e4d5f184434cd96a038f"
+    retrieved_at: "2026-08-25"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: "No license file. Future PRG->B1V extraction path; not yet used for records."
+    trust:
+      tier: C
+      primary_evidence: [prg_disassembler]
+
+  bimmerjson:
+    name: BimmerJson
+    type: git_repository
+    url: "https://github.com/radelbro/BimmerJson"
+    commit: "81b5c19be419eaeb6fb734b7a286f98813fb6fa6"
+    retrieved_at: "2026-08-25"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: "No license file. Not yet used for records."
+    trust:
+      tier: C
+      primary_evidence: [prg_json_export]
+
+  bimmerdaten:
+    name: BimmerDaten
+    type: git_repository
+    url: "https://github.com/zer02dev/BimmerDaten"
+    commit: "006a354ccffbe8b8a7bf5271116d945664cbdb15"
+    retrieved_at: "2026-08-25"
+    license:
+      id: GPL-3.0
+      commercial_runtime_copy_allowed: false
+      notes: "LICENSE file states GPL-3.0 (GitHub API reports NOASSERTION). Human-facing oracle."
+    trust:
+      tier: C
+      primary_evidence: [prg_browser]
+
+  bmw-dash-display:
+    name: bmw-dash-display
+    type: git_repository
+    url: "https://github.com/anejckl/bmw-dash-display"
+    commit: "b25db4ac3f8e4972cfe09b6366adedb6aa387149"
+    retrieved_at: "2026-08-25"
+    license:
+      id: MIT
+      commercial_runtime_copy_allowed: true
+      notes: >
+        E81 N47 DDE7.0. Standard-PID cross-check plus discovery leads;
+        its Mode-22 section is explicitly 'Needs Testing' and its CAN
+        broadcast IDs are E-series - neither imported as mappings.
+    trust:
+      tier: C
+      primary_evidence: [community_pid_list]
+    applicability:
+      engine_family: [N47]
+      source_chassis: [E81]
+
+  govmateai-bmw-pro-diagnostic:
+    name: "GovMateAi bmw-pro-diagnostic"
+    type: git_repository
+    url: "https://github.com/GovMateAi/bmw-pro-diagnostic"
+    commit: "e1f3ea9e3771ade00880d08244d3fc9f3d92cc12"
+    retrieved_at: "2026-08-25"
+    license:
+      id: MIT
+      commercial_runtime_copy_allowed: false
+      notes: >
+        REJECTED as a mapping source (tier D): diagnostic constants are
+        env-overridable placeholders ('RID found from ISTA or log'),
+        strong indicators of generated filler; the codebase includes
+        RoutineControl/WriteDataByIdentifier service operations. Recorded
+        so nobody re-proposes it.
+    trust:
+      tier: D
+      primary_evidence: []
+
+  dieslg8:
+    name: "dieslg8 (D73N57C0 measured-values reference)"
+    type: git_repository
+    url: "https://github.com/kmalinich/dieslg8"
+    commit: "a90d16415a8a30725fa738faf9129f0ee914f148"
+    retrieved_at: "2026-08-25"
+    license:
+      id: MIT
+      commercial_runtime_copy_allowed: true
+      notes: >
+        Independently discovered (code search for PFltLd_mSotSimCont).
+        Carries ref/D73N57C0-MESSWERT.csv - the N57 sibling of the same
+        D73 export family; useful for ancestry comparison, not yet
+        imported.
+    trust:
+      tier: B
+      primary_evidence: [sgbd_derived_table]
+
+  deepobd-configs:
+    name: "kmalinich deepobd-configs"
+    type: git_repository
+    url: "https://github.com/kmalinich/deepobd-configs"
+    commit: "2f0455670b0d70a844781aa6af8d7dae14732e6a"
+    retrieved_at: "2026-08-25"
+    license:
+      id: MIT
+      commercial_runtime_copy_allowed: true
+      notes: "Independently discovered; E90 DDE ccpages. Likely derived from ediabaslib samples - ancestry recorded below."
+    trust:
+      tier: C
+      primary_evidence: [configuration]
+
+  freecarly-decompiled:
+    name: "zoxknez/freecarly (decompiled Carly app)"
+    type: git_repository
+    url: "https://github.com/zoxknez/freecarly"
+    retrieved_at: "2026-08-25"
+    revision: "not pinned - rejected"
+    license:
+      id: unknown
+      commercial_runtime_copy_allowed: false
+      notes: >
+        REJECTED: decompiled proprietary application. Its smali contains
+        the '2C 01 F3 03' sequence - noted as existence-evidence in the
+        audit report ONLY; nothing is extracted from this source.
+    trust:
+      tier: D
+      primary_evidence: []
+
+  beemuu:
+    name: BeeEmUu
+    type: git_repository
+    url: "https://github.com/ohgeeceee/beemuu"
+    commit: "b782d8446ec3fb4581b89df9720ea7384c2ddbce"
+    retrieved_at: "2026-08-25"
+    license: {id: GPL-3.0, commercial_runtime_copy_allowed: false, notes: "architecture reference only"}
+    trust: {tier: C, primary_evidence: []}
+
+  bimmerz-box:
+    name: "Bimmerz Box"
+    type: git_repository
+    url: "https://github.com/emdzej/bimmerz-box"
+    commit: "2b2810975e5602a304c9972aabb1aa179c7880a1"
+    retrieved_at: "2026-08-25"
+    license: {id: PolyForm-Noncommercial-1.0.0, commercial_runtime_copy_allowed: false, notes: "architecture reference only"}
+    trust: {tier: C, primary_evidence: []}
+
+  pydiabas:
+    name: PyDIABAS
+    type: git_repository
+    url: "https://github.com/BembelBytes/pydiabas"
+    commit: "73eb0ed966699dfed39caa60f2104801c5c3649a"
+    retrieved_at: "2026-08-25"
+    license: {id: MIT, commercial_runtime_copy_allowed: true, notes: "future Tool32/EDIABAS oracle automation"}
+    trust: {tier: C, primary_evidence: []}
+
+  bmw-best2-disassembler:
+    name: "BEST2 Disassembler"
+    type: git_repository
+    url: "https://github.com/lpcvoid/bmw-best2-disassembler"
+    commit: "69f96b61b450d9691cea8858c28191b9b1a08440"
+    retrieved_at: "2026-08-25"
+    license: {id: GPL-3.0, commercial_runtime_copy_allowed: false, notes: "secondary opcode cross-check"}
+    trust: {tier: C, primary_evidence: []}
+
+  awesome-automotive-can-id:
+    name: "Awesome Automotive CAN ID"
+    type: git_repository
+    url: "https://github.com/iDoka/awesome-automotive-can-id"
+    commit: "8eff640cd49984df4b37d996da46deaf81e53b52"
+    retrieved_at: "2026-08-25"
+    license: {id: CC0-1.0, commercial_runtime_copy_allowed: true, notes: "discovery index only - never evidence"}
+    trust: {tier: D, primary_evidence: []}
+
+  bmw-enet-tool:
+    name: "kaiwen-z bmw-enet-tool (wenz77 F10 ENET reference)"
+    type: git_repository
+    url: "https://github.com/kaiwen-z/bmw-enet-tool-public-wenz77-on-bimmerforums"
+    commit: "c18456e51f93bc27e1e6d213b5e5cc081f070038"
+    retrieved_at: "2026-08-25"
+    license: {id: MIT, commercial_runtime_copy_allowed: true, notes: "F10 ENET/HSFZ behaviour comparison; N55 mappings are NOT N47 mappings"}
+    trust: {tier: C, primary_evidence: []}
+
+# How evidence hangs together. Two exports of the same BMW table are the
+# same primary source: their agreement validates parsers, not vehicles.
+relationships:
+  - a: klartext
+    b: ediabasx-docs-sgbd
+    type: same_primary_source
+    notes: "both derive d72n47a0 facts from BMW's d72n47a0.prg"
+  - a: morguux-d73n47a0
+    b: ediabasx-docs-sgbd
+    type: same_primary_source
+    notes: "the CSV is an SG_FUNKTIONEN/MESSWERTETAB-shaped export of BMW's D73N47A0 SGBD"
+  - a: morguux-d73n47a0
+    b: klartext
+    type: same_primary_source
+    notes: "same BMW SGBD table family (different variant files of one catalogue)"
+  - a: deepobd-configs
+    b: ediabaslib
+    type: derived_from
+    notes: "ccpage configs following ediabaslib's Deep OBD samples"
+  - a: dieslg8
+    b: morguux-d73n47a0
+    type: same_primary_source
+    notes: "sibling D73 exports (N57 vs N47 variant of the same catalogue)"
+  - a: wican-issue-752
+    b: klartext
+    type: independent
+    notes: "different car, chassis generation, protocol and tooling"
+  - a: wican-issue-752
+    b: morguux-d73n47a0
+    type: independent
+    notes: "capture vs table export; no shared ancestry demonstrated, though both ultimately describe Bosch DDE data"
+  - a: obd-gauge-cluster
+    b: obdb-bmw-5-series
+    type: independent
+    notes: "on-car scan explicitly contradicts parts of the community signalset"

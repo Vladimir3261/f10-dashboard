@@ -1,0 +1,20 @@
+Title,ID,Result Name,Data Type,Unit,MUL Factor,ADD Factor,Label,Description
+OBD_PID05_CEngDsT_tSens,0x0005,STAT_CEngDsT_tSens_WERT,unsigned char,degC,1.000000,-40.000000,OBD_PID05_CEngDsT_tSens,Coolant temperature (sensor value before correction)
+OBD_PID0C_Epm_nEngRaw,0x000C,STAT_Epm_nEngRaw_WERT,unsigned int,rpm,0.250000,0.000000,OBD_PID0C_Epm_nEngRaw,Engine speed - raw value before correction for OBD tester
+IMRUP,0x03EA,STAT_RUSSMASSE_IM_PARTIKELFILTER_WERT,unsigned int,g,0.015259,0.000000,PFltLd_mSot,Soot mass
+IMPAS,0x03ED,STAT_PARTIKELMASSE_SIMULIERT_WERT,unsigned int,g,0.010000,0.000000,PFltLd_mSotSim,Simulated rest mass
+PFltLd_mSotMeas,0x0405,STAT_PFltLd_mSotMeas_WERT,unsigned int,g,0.010000,0.000000,PFltLd_mSotMeas,Particulate matter corrected additively
+PFltLd_mSotSimCont,0x0406,STAT_PFltLd_mSotSimCont_WERT,unsigned int,g,0.010000,0.000000,PFltLd_mSotSimCont,Continuously simulated particulate mass
+PFltRgn_ctRgnSucEEP_mp,0x0407,STAT_PFltRgn_ctRgnSucEEP_mp_WERT,unsigned int,-,1.000000,0.000000,PFltRgn_ctRgnSucEEP_mp,Number of successful DPF regenerations
+PFltRgn_tiSnceRgn,0x0408,STAT_PFltRgn_tiSnceRgn_WERT,unsigned long,s,1.000000,0.000000,PFltRgn_tiSnceRgn,Operating time since last successful regeneration
+PFlt_mSotSumMeasFlt_mp,0x040A,STAT_PFlt_mSotSumMeasFlt_mp_WERT,unsigned int,g,0.010000,0.000000,PFlt_mSotSumMeasFlt_mp,digitally filtered value of the measured soot mass
+ITOEL,0x0458,STAT_MOTOROEL_TEMPERATUR_WERT,unsigned int,degC,0.010000,-100.000000,Oz_tempf,Filtered oil temperature
+ITKUM,0x0547,STAT_KUEHLMITTELTEMPERATUR_WERT,unsigned int,degC,0.010000,-100.000000,CEngDsT_t,Coolant temperature
+Com_nTSC,0x0604,STAT_Com_nTSC_WERT,unsigned int,rpm,0.500000,0.000000,Com_nTSC,Transmission turbine speed
+Com_tGbxOil,0x0607,STAT_Com_tGbxOil_WERT,unsigned char,degC,1.000000,-40.000000,Com_tGbxOil,Transmission oil temperature (1 byte)
+Twandler_sim,0x0609,STAT_Twandler_sim_WERT,unsigned char,degC,1.529412,-40.000000,Twandler_sim,Modelled temperature at gearbox output layer (1 byte)
+ITMOT,0x0AF1,STAT_MOTORTEMPERATUR_WERT,unsigned int,degC,0.100000,-273.140000,EngDa_tEng,Engine temperature
+Tra_numGear,0x0EA6,STAT_Tra_numGear_WERT,unsigned char,-,1.000000,0.000000,Tra_numGear,Current gear
+Tra_tOil,0x0EA7,STAT_Tra_tOil_WERT,unsigned char,degC,1.000000,-40.000000,Tra_tOil,Transmission oil temperature
+AirCtl_dmEGRDes_r32,0x0796,STAT_AirCtl_dmEGRDes_r32_WERT,motorola float,kg/h,1.000000,0.000000,AirCtl_dmEGRDes_r32,Setpoint mass flow via exhaust gas recirculation valve
+FBC_DXSl_mp_2,0x14C6,STAT_FBC_DXSl_mp_2_WERT,unsigned int,%,0.003052,-100.000000,FBC_DXSl_mp_2,"Encoder gear learning set â€"" tooth pitch error 2"

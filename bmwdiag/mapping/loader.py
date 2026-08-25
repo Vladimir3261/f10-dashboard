@@ -603,6 +603,35 @@ def _request(
         None if payload is None else _byte_seq(payload, source, f"{path}.payload")
     )
 
+    #
+    # `setup:` is an ordered list of payloads sent once per session before
+    # the request itself is first polled - the representation for a
+    # define-then-read sequence such as the F-series dynamic measurement
+    # (`2C 03 F3 03`, `2C 01 F3 03 ...`, then poll `22 F3 03`).
+    #
+    setup_raw = data.get("setup")
+    setup: Tuple[Tuple[int, ...], ...] = ()
+
+    if setup_raw is not None:
+        if not isinstance(setup_raw, (list, tuple)):
+            raise InvalidFieldError(
+                "setup must be a list of payloads", source, f"{path}.setup"
+            )
+
+        frames: List[Tuple[int, ...]] = []
+
+        for i, frame in enumerate(setup_raw):
+            frame_bytes = _byte_seq(frame, source, f"{path}.setup[{i}]")
+
+            if not frame_bytes:
+                raise InvalidFieldError(
+                    "a setup payload cannot be empty", source, f"{path}.setup[{i}]"
+                )
+
+            frames.append(frame_bytes)
+
+        setup = tuple(frames)
+
     if payload is None and service is None:
         raise MissingFieldError(
             "a request needs a service byte or an explicit payload", source, path
@@ -727,6 +756,7 @@ def _request(
         pid=pid,
         did=did,
         payload=payload,
+        setup=setup,
         polling_class=polling_class,
         requires=requires,
         timeout=None if timeout is None else _as_float(

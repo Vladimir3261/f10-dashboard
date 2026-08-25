@@ -1,0 +1,78 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# NOT an F10 mapping. production: false. Source vehicle: BMW E90 320d
+# (N47D20C, ECU DDE7N47) - the E-series KWP-heritage DDE family, whose
+# D71N47A0 SGBD describes this read style as "KWP2000: $2C
+# DefineDataByLocalIdentifier $10 RecordLocalIdentifier".
+#
+# The one raw exchange this file encodes was captured on-bus and posted
+# in meatpiHQ/wican-fw issue #752 (retrieved 2026-08-25):
+#
+#   TX 2C 10 04 06        (read local id 0x0406)
+#   RX 6C 10 0E D7        (0x0ED7 = 3799 -> /100 -> 37.99 g)
+#
+# The reply does NOT echo the identifier - the declared `prefix` is the
+# whole positive-response validation this protocol permits, which is
+# exactly why `response.prefix` is per-request data in this format and
+# not a global default.
+# ======================================================================
+
+mapping:
+  id: candidate-n47-dde7-kwp
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - E-series DDE7 KWP-style local-identifier read, from the
+    raw capture in WiCAN issue #752 (E90 N47D20C). Not verified on the
+    target F10, whose DDE speaks a different protocol family.
+
+source:
+  type: trace
+  file: "https://github.com/meatpiHQ/wican-fw/issues/752"
+  notes: >
+    Raw CAN capture quoted in the issue body (7DF request, 7E8 reply,
+    ISO 15765-4). Full transcription with citation:
+    research/evidence/n47/wican_752/exchange.yaml.
+
+verification:
+  status: candidate
+  method: >
+    externally verified on the source E90 (raw capture + ISTA
+    cross-reference claimed by the reporter). NOT verified on
+    F10-520d-dev, and the protocol family likely does not apply to an
+    F-series UDS DDE at all - kept as the non-echoing-response
+    reference case.
+  vehicle: E90-320d-N47D20C (source), F10-520d-dev (target, PENDING)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      # Unknown capability kind - resolves to nothing until a
+      # variant-aware provider confirms a KWP-family DDE7.
+      sgbd_variant: dde7-kwp-family
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: raw
+    target: discovered_engine
+
+requests:
+
+  n47.dde7.local.0406:
+    payload: "2C 10 04 06"
+    polling: {class: slow}
+    response:
+      # service+sub only; the identifier is deliberately absent.
+      prefix: "6C 10"
+      data_length: 2
+    signals:
+      dde7_soot:
+        label: DPF soot (DDE7)
+        unit: g
+        display: {digits: 2, min: 0, max: 80}
+        decode: {type: uint16_be, divide: 100.0, round: 2}

@@ -264,6 +264,12 @@ class RequestDef:
     pid: Optional[int] = None
     did: Optional[int] = None
     payload: Optional[Tuple[int, ...]] = None
+    #: Payloads sent once per session before this request is first polled.
+    #: This is how a BMW F-series dynamic measurement is represented: the
+    #: `2C 03 F3 03` clear and the `2C 01 F3 03 <src> <pos> <width>` define
+    #: are setup frames, and the polled request is the plain `22 F3 03`.
+    #: A sequence is data, never one fabricated identifier.
+    setup: Tuple[Tuple[int, ...], ...] = ()
     polling_class: str = "slow"
     requires: Tuple[Capability, ...] = ()
     timeout: Optional[float] = None

@@ -33,11 +33,18 @@ bmwdiag/             the diagnostic mapping subsystem
   obd/               OBD Mode 01 capability discovery, isolated
 mappings/            versioned mapping data
   obd/engine.yaml    standard SAE Mode 01 channels (production)
+  candidates/        source-backed candidates, production: false,
+                     capability-gated - never polled until verified
+  verified/          empty until something is verified on the car
   examples/          synthetic fixtures, excluded from the runtime
-tests/               161 tests; no car and no network required
+research/            the N47 evidence/import pipeline (offline only):
+                     pinned source manifest, importers, normalized
+                     records, conflict detection, reports
+tests/               259 tests; no car and no network required
 tools/               read-only research and analysis tools
 docs/                architecture and research-process documentation
-local/               gitignored; scratch, captures, notes, exports
+local/               gitignored; scratch, captures, notes, exports,
+                     and the research source cache
 ```
 
 ## Diagnostic mappings
@@ -83,6 +90,28 @@ provenance it has to carry.
 only production mapping is standard, published SAE J1979 Mode 01.
 Anything invented is marked `production: false`, uses obviously fake
 identifiers, and is excluded from the vehicle runtime.
+
+## N47 research pipeline
+
+`research/` turns pinned public sources into normalized, provenance-
+carrying research records and gates which of them may become candidate
+mappings. Every fact is labelled (wire observation / SGBD-derived /
+source claim / inference), every source is pinned and licensed in
+`research/manifests/sources.yaml`, partial knowledge stays partial, and
+Tier-D (untraceable) claims never generate anything executable.
+
+```
+python3 -m research.build       # re-import, regenerate normalized data + reports
+```
+
+The current candidates under `mappings/candidates/` encode three
+source-backed request families - the F-series dynamic `0xF303` sequence
+(wire-verified on an F25 X3), the E-series DDE7 non-echoing
+local-identifier read (raw E90 capture), and an F10 static Mode-22 read
+(on-car, N55) - all `production: false` and additionally disabled by an
+unknown capability kind until the car's DDE variant is resolved. See
+`research/reports/` for the source audit, coverage, conflicts, license
+notes and the on-car validation plan.
 
 ## Tests
 

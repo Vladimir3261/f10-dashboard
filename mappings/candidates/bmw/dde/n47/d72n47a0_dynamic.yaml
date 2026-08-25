@@ -1,0 +1,141 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# NOT verified on the target F10. production: false - live.py never
+# loads this file; it exists so the CLI, the tests and a future
+# supervised on-car validation session can exercise real, source-backed
+# request definitions.
+#
+# ECU variant: d72n47a0 - "SGBD fuer N47TUe/N57TUe (DDE7.21/7.01/7.41)
+# verwendet in F0x, F1x, F2x, F3x (UDS, MV, FlexRay)" per the SGBD's own
+# comment. Wire-verified on a BMW F25 X3 N47 (klartext car-session-1
+# pcap); the F10 development car's exact DDE variant is UNRESOLVED.
+#
+# !! ONE REQUEST AT A TIME !!
+# All four requests below read the same dynamic DID 0xF303, and the
+# evidence covers one define at a time only (each observed read
+# re-armed the define). The runtime arms `setup:` once per session, so
+# enabling more than one of these simultaneously would decode one
+# measurement's bytes as another's. On-car validation must enable them
+# one by one. Multi-source defines on F303 are an open question - see
+# research/reports/n47-unresolved-questions.md.
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-dynamic
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - F-series N47 dynamic (0xF303) measurements from the
+    d72n47a0 SG_FUNKTIONEN table, wire-verified on an F25 X3, not
+    verified on the target F10. One request may be active at a time.
+
+source:
+  type: trace
+  file: klartext car-session-1 pcap (F25 X3) + d72n47a0 SG_FUNKTIONEN
+  notes: >
+    HadiCherkaoui/klartext @ 04c9ee520c3c33cbc933377ae57321c82e191319,
+    docs/car-session-1-results.md (wire exchange, finding 1) and
+    crates/best/tests/differential.rs:41 (ITOEL scale). Rows
+    cross-checked against emdzej/ediabasx-docs-sgbd @ b644de8f
+    docs/sgbd/d72n47a0.md (same primary source). Full provenance:
+    research/evidence/n47/klartext_f25/.
+
+verification:
+  status: candidate
+  method: >
+    externally verified on F25-X3-N47 (source vehicle, pcap); ITMOT is
+    disassembly-derived only. Nothing here is verified on F10-520d-dev.
+  vehicle: F25-X3-N47 (source), F10-520d-dev (target, PENDING)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      # A deliberately unknown capability kind: the OBD capability
+      # provider refuses kinds it does not understand, so even with
+      # production: true this file would resolve to zero requests until
+      # a variant-aware capability provider exists and confirms the
+      # DDE variant on the car. Address is never evidence.
+      sgbd_variant: d72n47a0
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    target: discovered_engine
+
+requests:
+
+  # -- oil temperature - the pcap-verified exchange -------------------
+  #
+  #   TX 2C 03 F3 03                  (clear dynamic define)
+  #   TX 2C 01 F3 03 45 17 01 02      (define F303 := source 0x4517, u16)
+  #   TX 22 F3 03
+  #   RX 62 F3 03 39 08               -> 14600 * 0.01 - 100 = 46.0 degC
+  #
+  n47.d72.dyn.4517:
+    did: 0xF303
+    setup:
+      - "2C 03 F3 03"
+      - "2C 01 F3 03 45 17 01 02"
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_oil_temp:
+        label: Oil temperature (DDE)
+        unit: °C
+        display: {digits: 1, min: -40, max: 160}
+        decode: {type: uint16_be, scale: 0.01, add: -100.0, round: 2}
+
+  # -- DPF soot, measured (IMRUP 0x44BE) - on-car value 15.49 g -------
+  n47.d72.dyn.44BE:
+    did: 0xF303
+    setup:
+      - "2C 03 F3 03"
+      - "2C 01 F3 03 44 BE 01 02"
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_soot_meas:
+        label: DPF soot (measured)
+        unit: g
+        display: {digits: 2, min: 0, max: 80}
+        decode: {type: uint16_be, scale: 0.015259, round: 2}
+
+  # -- DPF soot, simulated (IMPAS 0x44C1) - on-car value 15.5 g -------
+  n47.d72.dyn.44C1:
+    did: 0xF303
+    setup:
+      - "2C 03 F3 03"
+      - "2C 01 F3 03 44 C1 01 02"
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_soot_model:
+        label: DPF soot (modelled)
+        unit: g
+        display: {digits: 2, min: 0, max: 80}
+        decode: {type: uint16_be, scale: 0.01, round: 2}
+
+  # -- engine temperature (ITMOT 0x4BC3) ------------------------------
+  #
+  # Disassembly-derived only (klartext marks it "pending on-car
+  # confirmation"): raw is deci-Kelvin, 0x0E2F -> 89.96 degC.
+  #
+  n47.d72.dyn.4BC3:
+    did: 0xF303
+    setup:
+      - "2C 03 F3 03"
+      - "2C 01 F3 03 4B C3 01 02"
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_engine_temp:
+        label: Engine temperature (DDE)
+        unit: °C
+        display: {digits: 1, min: -40, max: 140}
+        decode: {type: uint16_be, scale: 0.1, add: -273.14, round: 2}

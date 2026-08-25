@@ -1,0 +1,77 @@
+# Source claims: OBDb BMW-5-Series UDS DIDs for EGS and DDE.
+#
+# Extracted from OBDb/BMW-5-Series @
+# d634524724470765a16c2867eea515e462336f0e, signalsets/v3/default.json
+# (retrieved 2026-08-25). License CC-BY-SA-4.0 - attribution required,
+# share-alike on redistribution of the data.
+#
+# These are community-maintained signal definitions with no per-signal
+# provenance visible in the repository: Tier C. The `hdr: 6F1` +
+# `rax: 6xx` + `eax` fields describe ISO-TP extended addressing to a
+# specific ECU - eax 0x18 is the EGS, eax 0x12 the DDE, the same
+# diagnostic addresses our ENET scan observes. Whether these DIDs answer
+# over HSFZ on our F10 is exactly what tools/egs.py can test read-only.
+#
+# Cross-source tension worth noting: cheeseprince's F10 could not reach
+# these eax-addressed DIDs through an ELM327 at all, and OBDb's own
+# `586F` entry disagrees with cheeseprince's on-car decode (len 8
+# "scalar" vs u16 millibar). Both recorded; neither silently resolved.
+
+source_id: obdb-bmw-5-series
+sgbd: unknown
+protocol_claim: "UDS 22 via ISO-TP extended addressing (6F1/6xx)"
+
+claims:
+  - record_id: obdb.5series.DA12
+    ecu_address: 0x18
+    request: "22 DA 12"
+    signal: "Automatic transmission fluid temperature"
+    obdb_id: 5SERIES_ATF_TEMP
+    fmt: "len 8, max 255, unit scalar"
+    decode_complete: false      # no scale/offset/unit -> raw scalar only
+  - record_id: obdb.5series.DA25
+    ecu_address: 0x18
+    request: "22 DA 25"
+    signal: "Engine oil temperature"
+    obdb_id: 5SERIES_EOT
+    fmt: "len 16, signed, add -48, unit celsius"
+    decode_complete: true
+  - record_id: obdb.5series.DA2A
+    ecu_address: 0x18
+    request: "22 DA 2A"
+    signal: "Torque converter speed + output shaft speed"
+    obdb_id: 5SERIES_TQ_CNVRT_RPM
+    fmt: "two s16 fields, unit rpm"
+    decode_complete: true
+  - record_id: obdb.5series.DA2E
+    ecu_address: 0x18
+    request: "22 DA 2E"
+    signal: "Shift gear / drive mode"
+    obdb_id: 5SERIES_GEAR_SHIFT
+    fmt: "len 8 enum map 0=Park 1=Reverse 2=Neutral 3=Drive, second len-8 field at bix 8"
+    decode_complete: true
+  - record_id: obdb.5series.D031
+    ecu_address: 0x63
+    request: "22 D0 31"
+    signal: "Current gear"
+    obdb_id: 5SERIES_GEAR_V2
+    fmt: "len 8, max 255, unit scalar"
+    decode_complete: false
+  - record_id: obdb.5series.586F
+    ecu_address: 0x12
+    request: "22 58 6F"
+    signal: "Engine oil pressure"
+    obdb_id: 5SERIES_EOP
+    fmt: "len 8, max 255, unit scalar"
+    decode_complete: false      # conflicts with cheeseprince u16-millibar on-car decode
+
+evidence_tier: C
+verification: discovered
+safety: read_only_telemetry_candidate
+f10_applicability: unverified
+
+citation:
+  url: "https://github.com/OBDb/BMW-5-Series"
+  commit: "d634524724470765a16c2867eea515e462336f0e"
+  retrieved_at: "2026-08-25"
+  license: CC-BY-SA-4.0

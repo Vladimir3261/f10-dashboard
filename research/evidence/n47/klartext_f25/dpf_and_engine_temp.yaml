@@ -1,0 +1,100 @@
+# Source-backed measurements: F-series DPF soot and engine temperature.
+#
+# Sources, both retrieved 2026-08-25:
+#
+#   HadiCherkaoui/klartext @ 04c9ee520c3c33cbc933377ae57321c82e191319
+#     docs/car-session-1-results.md - pcap addendum: "three 2C 03 / 2C 01
+#     / 22 F303 rounds: sources 4517 oil, 44BE, 44C1 - the latter two the
+#     DPF soot reads"; session values "soot measured 15.49 g vs modelled
+#     15.5 g". The exact define frames for 44BE/44C1 were not quoted
+#     byte-for-byte, so their setup frames below are labelled inference
+#     (template application), not wire_observation.
+#     docs/sgbd-findings.md - the ITMOT worked example: id 0x4BC3,
+#     unsigned int, MUL 0.1, ADD -273.14, raw 0x0E2F -> 89.96 degC, and
+#     the derived define frame `2C 01 F3 03 4B C3 01 02`. Marked by the
+#     source itself as DERIVED FROM DISASSEMBLY, pending on-car
+#     confirmation - hence verification: candidate, not externally_verified.
+#
+#   emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627
+#     docs/sgbd/d72n47a0.md - the SG_FUNKTIONEN rows (same primary
+#     source as klartext's table, i.e. parser validation):
+#       IMRUP | 0x44BE | STAT_RUSSMASSE_IM_PARTIKELFILTER_WERT | Russmasse
+#         | g | PFltLd_mSot | unsigned int | MUL 0.015259 | ADD 0 | 12 | 22;2C
+#       IMPAS | 0x44C1 | STAT_PARTIKELMASSE_SIMULIERT_WERT | simulierte
+#         Russmasse | g | PFltLd_mSotSim | unsigned int | MUL 0.010000 | ADD 0 | 12 | 22;2C
+#       ITMOT | 0x4BC3 | STAT_MOTORTEMPERATUR_WERT | Motortemperatur
+#         | degC | EngDa_tEng | unsigned int | MUL 0.100000 | ADD -273.140000 | 12 | 22;2C
+
+source_id: klartext
+sgbd: d72n47a0
+ecu_address: 0x12
+wire_did: "0xF303"
+
+measurements:
+  - record_id: klartext.d72n47a0.IMRUP
+    arg: IMRUP
+    source_identifier: "0x44BE"
+    result_name: STAT_RUSSMASSE_IM_PARTIKELFILTER_WERT
+    label: PFltLd_mSot
+    raw_type: uint16
+    byte_order: big
+    mul: "0.015259"
+    div: "1"
+    add: "0.0"
+    unit: g
+    on_car_value: 15.49
+    verification: externally_verified
+    evidence_tier: A
+    define_frame: "2C 01 F3 03 44 BE 01 02"
+    define_frame_label: inference    # constructed from the sourced template
+  - record_id: klartext.d72n47a0.IMPAS
+    arg: IMPAS
+    source_identifier: "0x44C1"
+    result_name: STAT_PARTIKELMASSE_SIMULIERT_WERT
+    label: PFltLd_mSotSim
+    raw_type: uint16
+    byte_order: big
+    mul: "0.010000"
+    div: "1"
+    add: "0.0"
+    unit: g
+    on_car_value: 15.5
+    verification: externally_verified
+    evidence_tier: A
+    define_frame: "2C 01 F3 03 44 C1 01 02"
+    define_frame_label: inference
+  - record_id: klartext.d72n47a0.ITMOT
+    arg: ITMOT
+    source_identifier: "0x4BC3"
+    result_name: STAT_MOTORTEMPERATUR_WERT
+    label: EngDa_tEng
+    raw_type: uint16
+    byte_order: big
+    mul: "0.1"
+    div: "1"
+    add: "-273.14"
+    unit: degC
+    worked_example_raw: 0x0E2F
+    worked_example_value: 89.96
+    verification: candidate          # derived from disassembly, no on-car read
+    evidence_tier: B
+    define_frame: "2C 01 F3 03 4B C3 01 02"
+    define_frame_label: sgbd_derived
+
+sequence_template:
+  setup:
+    - "2C 03 F3 03"
+    - "2C 01 F3 03 <id_hi> <id_lo> 01 <width>"
+  poll: "22 F3 03"
+  matcher: echo_full
+  prefix: "62 F3 03"
+  session_requirement: none
+
+verification_defaults:
+  safety: read_only_telemetry_candidate
+  f10_applicability: unverified
+
+citation:
+  klartext_commit: "04c9ee520c3c33cbc933377ae57321c82e191319"
+  docs_sgbd_commit: "b644de8fbfbb4b207f57794e3c7894dc1dc58627"
+  retrieved_at: "2026-08-25"
