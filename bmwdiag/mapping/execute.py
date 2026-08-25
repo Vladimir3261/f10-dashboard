@@ -1,0 +1,187 @@
+"""
+Request execution.
+
+    request definitions -> payloads -> transport -> prefix match -> decode
+                                    -> normalised {signal key: value}
+
+Two dispatch paths exist, and only because standard OBD really does behave
+differently on the wire:
+
+  * `obd` requests are handed to an `ObdPidReader`, which batches PIDs and
+    retires ones the ECU ignores. The reader returns data bytes per PID;
+    this module rebuilds the logical `41 <pid> <data...>` response so that
+    prefix matching and offsets work the same way they do for every other
+    protocol.
+
+  * everything else goes one request at a time through a
+    `DiagnosticTransport`.
+
+Adding a protocol means adding a branch here, not touching the decoder.
+"""
+
+from typing import Any, Dict, List, Optional, Sequence
+
+from ..protocol.request import (
+    DecodedResponse,
+    DiagnosticRequest,
+    build_request,
+)
+from .decoder import decode_response
+from .errors import DecodeError, MappingError
+from .model import RequestDef
+from .registry import ResolvedProfile
+
+__all__ = ["MappingExecutor", "obd_logical_response"]
+
+
+def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
+    """
+    Rebuild the full Mode 01 response for one PID.
+
+    The OBD session hands back only the data bytes because that is what
+    walking a multi-PID reply produces. Putting the `41 <pid>` echo back
+    in front means mapping files describe a real response rather than a
+    session-specific fragment.
+    """
+    prefix = bytes(request.response.prefix)
+
+    if prefix and data[: len(prefix)] == prefix:
+        return bytes(data)
+
+    return prefix + bytes(data)
+
+
+class MappingExecutor:
+    """
+    Runs a set of due requests and returns normalised signal values.
+
+    Decode failures are swallowed per request - a garbled reply costs one
+    channel for one cycle, exactly as before. Transport failures are not:
+    they belong to the application's reconnect logic.
+    """
+
+    def __init__(
+        self,
+        profile: ResolvedProfile,
+        transport: Any = None,
+        obd_reader: Any = None,
+        targets: Optional[Dict[str, int]] = None,
+        on_error: Optional[Any] = None,
+    ):
+        self.profile = profile
+        self.transport = transport
+        self.obd_reader = obd_reader
+        self.targets = dict(targets or profile.targets)
+        self.on_error = on_error
+        self.last_responses: Dict[str, bytes] = {}
+
+    # -- helpers ----------------------------------------------------
+
+    def _note(self, request_id: str, exc: Exception) -> None:
+        if self.on_error is not None:
+            self.on_error(request_id, exc)
+
+    def bind(self, request: RequestDef) -> DiagnosticRequest:
+        return build_request(request, self.targets)
+
+    # -- execution --------------------------------------------------
+
+    def execute(
+        self, requests: Sequence[RequestDef]
+    ) -> Dict[str, Any]:
+        """Run every request and merge the decoded signals."""
+        out: Dict[str, Any] = {}
+
+        for decoded in self.execute_detailed(requests):
+            out.update(decoded.values)
+
+        return out
+
+    def execute_detailed(
+        self, requests: Sequence[RequestDef]
+    ) -> List[DecodedResponse]:
+        """As `execute`, but keeps the raw bytes alongside each result."""
+        obd = [r for r in requests if r.protocol == "obd" and r.payload is None]
+        other = [r for r in requests if r not in obd]
+
+        results: List[DecodedResponse] = []
+        results.extend(self._run_obd(obd))
+        results.extend(self._run_generic(other))
+
+        return results
+
+    def _run_obd(self, requests: Sequence[RequestDef]) -> List[DecodedResponse]:
+        if not requests:
+            return []
+
+        if self.obd_reader is None:
+            raise MappingError("no OBD reader configured for obd requests")
+
+        by_pid: Dict[int, RequestDef] = {}
+        pids: List[int] = []
+
+        for request in requests:
+            if request.pid is None:
+                continue
+
+            #
+            # One request per PID, so a PID never goes on the wire twice
+            # even if two mappings both want a signal out of it.
+            #
+            if request.pid not in by_pid:
+                by_pid[request.pid] = request
+                pids.append(request.pid)
+
+        got = self.obd_reader.read(pids)
+        out: List[DecodedResponse] = []
+
+        for pid, data in got.items():
+            request = by_pid.get(pid)
+
+            if request is None:
+                continue
+
+            response = obd_logical_response(request, data)
+            self.last_responses[request.id] = response
+
+            try:
+                values = decode_response(request, response)
+            except (DecodeError, MappingError) as exc:
+                self._note(request.id, exc)
+                continue
+            except Exception as exc:            # defensive: never kill the loop
+                self._note(request.id, exc)
+                continue
+
+            out.append(DecodedResponse(request.id, response, values))
+
+        return out
+
+    def _run_generic(self, requests: Sequence[RequestDef]) -> List[DecodedResponse]:
+        if not requests:
+            return []
+
+        if self.transport is None:
+            raise MappingError("no diagnostic transport configured")
+
+        out: List[DecodedResponse] = []
+
+        for request in requests:
+            bound = self.bind(request)
+            response = self.transport.request(
+                bound.payload, dst=bound.dst, timeout=bound.timeout
+            )
+            self.last_responses[request.id] = bytes(response)
+
+            try:
+                values = decode_response(request, bytes(response))
+            except (DecodeError, MappingError) as exc:
+                self._note(request.id, exc)
+                continue
+            except Exception as exc:            # defensive: never kill the loop
+                self._note(request.id, exc)
+                continue
+
+            out.append(DecodedResponse(request.id, bytes(response), values))
+
+        return out

@@ -1,0 +1,206 @@
+#
+#  ============================================================
+#   TEST FIXTURE - NOT A REAL BMW MAPPING
+#  ============================================================
+#
+#  Every address, identifier, name and formula in this file is invented.
+#  It exists to exercise mapping-format features that the production OBD
+#  mapping does not use - UDS ReadDataByIdentifier, a raw proprietary
+#  job, grouped signals from one response, enums, bitfields, ASCII and
+#  lookup tables - so those code paths are covered by tests without
+#  guessing at real vehicle data.
+#
+#  `production: false` keeps this file out of the vehicle runtime. It is
+#  still loaded and validated by the mapping CLI and the test suite.
+#
+#  Nothing here was derived from a PRG, GRP, EDIABAS, ISTA or Tool32
+#  source, or from captured traffic. Do not treat any value in this file
+#  as vehicle knowledge, and do not copy it into a production mapping.
+#
+
+schema_version: 1
+
+mapping:
+  id: example-synthetic-uds
+  version: "1"
+  production: false
+  description: >
+    TEST FIXTURE - NOT A REAL BMW MAPPING. Synthetic UDS and raw-job
+    examples used to exercise the mapping format.
+
+source:
+  type: synthetic
+  notes: >
+    Invented for testing. No real diagnostic source of any kind.
+
+verification:
+  status: rejected
+  method: none - fabricated
+  notes: >
+    Deliberately marked rejected so that no importer, report or registry
+    query can ever mistake this file for vehicle knowledge.
+
+ecu:
+  family: example
+  #
+  # 0x7E is used precisely because it is not a plausible claim about any
+  # real ECU on this car.
+  #
+  target: 0x7E
+  sgbd: EXAMPLE_SGBD
+  variant: EXAMPLE_VARIANT
+  hardware: HW_TEST_0000
+  software: SW_TEST_0000
+  match:
+    capability:
+      example_feature: true
+
+defaults:
+  request:
+    transport: diagnostic
+    target: 0x7E
+
+polling_classes:
+  fast: {every: 1, priority: 0}
+  slow: {every: 10, priority: 1}
+  medium_hz: {hz: 5.0, priority: 1}
+  trickle: {seconds: 5.0, priority: 2}
+
+requests:
+
+  #
+  # UDS ReadDataByIdentifier. Three signals out of one 6-byte response,
+  # so one exchange feeds three channels.
+  #
+  example.uds.block:
+    protocol: uds
+    service: 0x22
+    did: 0xF001
+    polling: {class: fast}
+    response: {data_length: 6}
+    requires:
+      capability:
+        example_feature: true
+    signals:
+
+      example_speed:
+        source_name: EXAMPLE_SPEED_VALUE
+        label: Example speed
+        unit: km/h
+        display: {digits: 1, min: 0, max: 300}
+        decode: {type: uint16_be, offset: 0, divide: 10.0}
+
+      example_temp:
+        source_name: EXAMPLE_TEMP_VALUE
+        label: Example temperature
+        unit: °C
+        display: {digits: 1, min: -40, max: 215}
+        decode: {type: int16_be, offset: 2, divide: 2.0}
+
+      example_gear:
+        source_name: EXAMPLE_GEAR_STATE
+        label: Example gear
+        unit: ""
+        display: {digits: 0, min: 0, max: 8}
+        decode:
+          type: bitfield
+          offset: 4
+          length: 1
+          mask: 0x0F
+
+  #
+  # An arbitrary proprietary-shaped job: explicit request bytes, an
+  # explicit expected response prefix, and no service/identifier
+  # convention at all. This is the shape a BMW job would take.
+  #
+  example.raw.job:
+    protocol: raw
+    payload: "31 01 AB CD"
+    polling: {class: trickle}
+    response:
+      prefix: "71 01 AB CD"
+      data_length: 4
+    requires:
+      capability:
+        example_feature: true
+    signals:
+
+      example_state:
+        source_name: EXAMPLE_STATE
+        label: Example state
+        unit: ""
+        display: {digits: 0, min: 0, max: 3}
+        decode:
+          type: uint8
+          offset: 0
+          enum:
+            0: idle
+            1: running
+            2: fault
+          enum_default: unknown
+
+      example_flag:
+        source_name: EXAMPLE_FLAG_BIT
+        label: Example flag
+        unit: ""
+        display: {digits: 0, min: 0, max: 1}
+        decode: {type: bit, offset: 1, length: 1, bit: 3}
+
+      example_curve:
+        source_name: EXAMPLE_CURVE
+        label: Example lookup channel
+        unit: kPa
+        display: {digits: 1, min: 0, max: 400}
+        decode:
+          type: uint8
+          offset: 2
+          lookup:
+            - [0, 0.0]
+            - [128, 100.0]
+            - [255, 400.0]
+
+      example_invalid:
+        source_name: EXAMPLE_SENTINEL
+        label: Example sentinel channel
+        unit: "%"
+        display: {digits: 0, min: 0, max: 100}
+        decode:
+          type: uint8
+          offset: 3
+          invalid: [0xFF]
+          scale: 100.0
+          divide: 254.0
+
+  #
+  # An identification-style read producing text rather than a number.
+  #
+  example.uds.text:
+    protocol: uds
+    service: 0x22
+    did: 0xF002
+    polling: {class: medium_hz}
+    response: {data_length: 8}
+    requires:
+      capability:
+        example_feature: true
+    signals:
+      example_label:
+        source_name: EXAMPLE_TEXT
+        label: Example text field
+        unit: ""
+        decode: {type: ascii, offset: 0, length: 8}
+
+derived:
+
+  example_delta:
+    label: Example delta
+    unit: km/h
+    display: {digits: 1, min: -50, max: 50}
+    operation: subtract_scale
+    inputs:
+      value: example_speed
+      reference: example_curve
+    fallback:
+      reference: 0.0
+    round: 2
+    trigger: [example_speed]

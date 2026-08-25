@@ -1,0 +1,357 @@
+schema_version: 1
+
+mapping:
+  id: sae-obd-engine
+  version: "1"
+  description: >
+    Standard SAE OBD-II Mode 01 current-data telemetry for the engine ECU.
+    Every request and formula here is the one this application has been
+    polling against the vehicle; the refactor that introduced this file
+    moved them out of Python without reinterpreting any of them.
+
+source:
+  type: obd_standard
+  file: SAE J1979 / ISO 15031-5, service 01 (current data)
+  notes: >
+    Standard published PID definitions. No BMW proprietary diagnostic
+    knowledge is used, claimed or implied by this file.
+
+verification:
+  status: verified
+  method: live vehicle - polled continuously and logged to telemetry.db
+  vehicle: F10-520d-dev (BMW F10 520d, N47 diesel)
+  notes: >
+    The engine ECU is identified by capability, never by address: it is
+    whichever ECU advertises PID 0x0C in its Mode 01 support bitmask.
+    `vehicle` is a stable label, not a VIN - see docs/MAPPING_RESEARCH.md.
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      obd_mode01_pid: 0x0C
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: obd
+    service: 0x01
+    target: discovered_engine
+
+#
+# fast runs every poll-loop cycle; slow runs every Nth, where N is
+# --slow-every. Both are cycle-based for compatibility with the existing
+# CLI; the polling model also understands hz and seconds.
+#
+polling_classes:
+  fast: {every: 1, priority: 0}
+  slow: {every: 10, priority: 1}
+
+requests:
+  # -- polled every cycle ---------------------------------------
+
+  obd.mode01.0C:
+    pid: 0x0C
+    polling: {class: fast}
+    response: {data_length: 2}
+    signals:
+      rpm:
+        label: Engine speed
+        unit: rpm
+        display: {digits: 0, min: 0, max: 5000}
+        decode: {type: uint16_be, divide: 4.0}
+
+  obd.mode01.0B:
+    pid: 0x0B
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      map:
+        label: Intake manifold
+        unit: kPa
+        display: {digits: 0, min: 0, max: 300}
+        decode: {type: uint8}
+
+  obd.mode01.04:
+    pid: 0x04
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      load:
+        label: Engine load
+        unit: %
+        display: {digits: 0, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.11:
+    pid: 0x11
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      throttle:
+        label: Throttle / pedal
+        unit: %
+        display: {digits: 0, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.0D:
+    pid: 0x0D
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      speed:
+        label: Vehicle speed
+        unit: km/h
+        display: {digits: 0, min: 0, max: 250}
+        decode: {type: uint8}
+
+  obd.mode01.10:
+    pid: 0x10
+    polling: {class: fast}
+    response: {data_length: 2}
+    signals:
+      maf:
+        label: Air mass flow
+        unit: g/s
+        display: {digits: 1, min: 0, max: 400}
+        decode: {type: uint16_be, divide: 100.0}
+
+  obd.mode01.23:
+    pid: 0x23
+    polling: {class: fast}
+    response: {data_length: 2}
+    signals:
+      rail:
+        label: Fuel rail pressure
+        unit: bar
+        display: {digits: 0, min: 0, max: 2000}
+        decode: {type: uint16_be, scale: 10.0, divide: 100.0}
+
+  obd.mode01.62:
+    pid: 0x62
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      torque:
+        label: Actual torque
+        unit: %
+        display: {digits: 0, min: -25, max: 100}
+        decode: {type: uint8, add: -125.0}
+
+  obd.mode01.49:
+    pid: 0x49
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      pedal:
+        label: Accelerator pedal
+        unit: %
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.45:
+    pid: 0x45
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      relthr:
+        label: Relative throttle
+        unit: %
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.24:
+    pid: 0x24
+    polling: {class: fast}
+    response: {data_length: 4}
+    signals:
+      lambda:
+        label: Lambda (O2 S1)
+        unit: ""
+        display: {digits: 3, min: 0.5, max: 2.0}
+        decode: {type: uint16_be, offset: 0, divide: 32768.0}
+
+  # -- polled every --slow-every cycles -------------------------
+
+  obd.mode01.05:
+    pid: 0x05
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      coolant:
+        label: Coolant temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 130}
+        decode: {type: uint8, add: -40.0}
+
+  obd.mode01.5C:
+    pid: 0x5C
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      oil:
+        label: Oil temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 150}
+        decode: {type: uint8, add: -40.0}
+
+  obd.mode01.0F:
+    pid: 0x0F
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      iat:
+        label: Intake air temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 120}
+        decode: {type: uint8, add: -40.0}
+
+  obd.mode01.46:
+    pid: 0x46
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      ambient:
+        label: Ambient temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 60}
+        decode: {type: uint8, add: -40.0}
+
+  obd.mode01.42:
+    pid: 0x42
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      voltage:
+        label: Module voltage
+        unit: V
+        display: {digits: 2, min: 8, max: 16}
+        decode: {type: uint16_be, divide: 1000.0}
+
+  obd.mode01.33:
+    pid: 0x33
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      baro:
+        label: Barometric
+        unit: kPa
+        display: {digits: 0, min: 0, max: 120}
+        decode: {type: uint8}
+
+  obd.mode01.2F:
+    pid: 0x2F
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      fuel:
+        label: Fuel level
+        unit: %
+        display: {digits: 0, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.5E:
+    pid: 0x5E
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      fuelrate:
+        label: Fuel rate
+        unit: L/h
+        display: {digits: 1, min: 0, max: 60}
+        decode: {type: uint16_be, divide: 20.0}
+
+  obd.mode01.1F:
+    pid: 0x1F
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      runtime:
+        label: Run time
+        unit: s
+        display: {digits: 0, min: 0, max: 7200}
+        decode: {type: uint16_be}
+
+  obd.mode01.3C:
+    pid: 0x3C
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      cattemp:
+        label: Cat / exhaust temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 800}
+        decode: {type: uint16_be, divide: 10.0, add: -40.0}
+
+  obd.mode01.2C:
+    pid: 0x2C
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      egr:
+        label: Commanded EGR
+        unit: %
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.2D:
+    pid: 0x2D
+    polling: {class: slow}
+    response: {data_length: 1}
+    signals:
+      egrerr:
+        label: EGR error
+        unit: %
+        display: {digits: 1, min: -100, max: 100}
+        decode: {type: uint8, pre_add: -128.0, scale: 100.0, divide: 128.0}
+
+  obd.mode01.31:
+    pid: 0x31
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      distance:
+        label: Distance since clear
+        unit: km
+        display: {digits: 0, min: 0, max: 65535}
+        decode: {type: uint16_be}
+
+#
+# Channels computed from other signals rather than read from an ECU.
+# `operation` names one of a fixed set of arithmetic forms - the mapping
+# format has no expression language and never evaluates code.
+#
+derived:
+
+  boost:
+    label: Turbo boost
+    unit: bar
+    display: {digits: 2, min: -0.3, max: 2.2}
+    position: first
+    operation: subtract_scale
+    inputs:
+      value: map
+      reference: baro
+    fallback:
+      #
+      # Barometric pressure is a slow channel, so boost has to be able to
+      # run before the first reading arrives.
+      #
+      reference: 100.0
+    divide: 100.0
+    round: 3
+    trigger: [map]
+
+  fuel_l:
+    label: Fuel remaining
+    unit: L
+    display: {digits: 1, min: 0.0, max: {config: tank, default: 70.0}}
+    position: last
+    operation: divide_scale
+    inputs:
+      value: fuel
+    divide: 100.0
+    scale: {config: tank, default: 70.0}
+    round: 2
+    trigger: [fuel]
