@@ -75,11 +75,14 @@ class MappingExecutor:
         self.on_error = on_error
         self.last_responses: Dict[str, bytes] = {}
         #
-        # Requests whose `setup:` frames have already been sent. An
-        # executor lives for one vehicle connection, so a reconnect gets a
-        # fresh executor and re-arms every dynamic define automatically.
+        # The setup sequence currently armed on each destination. A single
+        # request polled repeatedly arms once; several requests that share
+        # one dynamic DID (the F303 pattern) re-arm as they take turns, so
+        # a define is always the one matching the poll that follows it. An
+        # executor lives for one connection, so a reconnect re-arms
+        # everything automatically.
         #
-        self._setup_done: set = set()
+        self._armed: Dict[int, tuple] = {}
 
     # -- helpers ----------------------------------------------------
 
@@ -177,18 +180,21 @@ class MappingExecutor:
 
             #
             # Setup frames (e.g. the 2C clear+define of a dynamic DID) go
-            # out once per session, in declared order, before the request
-            # itself is ever polled. A transport failure here propagates
-            # like any other: it belongs to the reconnect logic, and the
-            # sequence is re-armed on the next connection.
+            # out in declared order immediately before the poll, but only
+            # when the currently-armed define is not already this
+            # request's - so a repeatedly-polled channel arms once, while
+            # channels sharing one dynamic DID re-arm each time they take
+            # a turn. A transport failure here propagates like any other:
+            # it belongs to the reconnect logic, and the next connection's
+            # fresh executor re-arms from scratch.
             #
-            if request.setup and request.id not in self._setup_done:
+            if request.setup and self._armed.get(bound.dst) != request.setup:
                 for frame in request.setup:
                     self.transport.request(
                         bytes(frame), dst=bound.dst, timeout=bound.timeout
                     )
 
-                self._setup_done.add(request.id)
+                self._armed[bound.dst] = request.setup
 
             response = self.transport.request(
                 bound.payload, dst=bound.dst, timeout=bound.timeout
