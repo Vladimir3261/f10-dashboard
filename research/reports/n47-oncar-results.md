@@ -62,6 +62,28 @@ rail actual must track setpoint under closed-loop control (300.9 vs
 300.0); the two DPF soot estimates must nearly agree (0.09 vs 0.10);
 and three channels match an independent standard PID.
 
+## Throttle sweep — scales hold across the operating range
+
+A 25 s `sweep` of the four load channels while blipping the throttle in
+Neutral (`validation-runs/20260825T195407Z-sweep`, 70 rounds). Every
+channel moved to a physically-correct loaded value:
+
+| channel | idle/min | loaded max | note |
+|---|---|---|---|
+| pedal (0x4232) | 0.0 % | 18.9 % | tracks the foot |
+| rail actual (0x4746) | 264 bar | 648 bar | rises with demand; +0.43 corr. with pedal |
+| air mass/cyl (0x47DD) | 247 mg/hub | 626 mg/hub | airflow ~2.5× |
+| boost actual (0x4841) | 1021 hPa | 1249 hPa | ~0.25 bar built |
+
+This confirms the SG_FUNKTIONEN scales across the range, not just at the
+single idle point. Instantaneous pedal↔boost/MAF correlation is weak,
+which is expected and not a mapping issue: the tool polls the four
+channels round-robin (~270 ms apart, so samples are not co-temporal),
+turbochargers lag pedal, and revving in Neutral builds little boost (no
+engine load demanding air). Rail, which responds fastest to demand,
+shows the clearest positive correlation. The peak *values* are all
+correct; only the timing alignment is washed out by the sampling method.
+
 ## Promotions
 
 `mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml` (4 channels) and
