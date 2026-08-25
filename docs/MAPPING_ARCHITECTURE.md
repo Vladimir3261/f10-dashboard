@@ -114,11 +114,35 @@ is first polled:
 ```
 
 The polled request stays the honest `22 F3 03` - a sequence is data,
-never one fabricated identifier. The executor arms each request's setup
-on first execution and re-arms automatically on reconnect, because a
-reconnect builds a fresh executor. Two requests defining the same
-dynamic identifier must not be enabled together; candidate files that
-carry several say so loudly.
+never one fabricated identifier. The executor tracks which setup is
+currently armed on each ECU and re-arms only when it changes: a channel
+polled repeatedly arms once, while several channels that share one
+dynamic DID (all the F303 reads) re-arm as they take turns, so the
+define in front of a `22 F3 03` always matches the poll that follows it.
+A reconnect builds a fresh executor, which re-arms from scratch. This is
+what lets many proprietary measurements multiplex safely over a single
+dynamic identifier.
+
+### Variant capability
+
+A mapping that reads a proprietary measurement declares which SGBD
+variant it applies to, and the ECU must *earn* that match by answering:
+
+```yaml
+ecu:
+  match:
+    capability:
+      sgbd_variant: d72n47a0
+```
+
+`bmwdiag/variant.py` answers "is this ECU that variant" the same way the
+OBD layer answers "does it support this PID" - by probe, never by
+address or an ident string. `VariantProbe` replays a variant's own
+dynamic read on connect and confirms the variant only if the ECU answers
+in the expected shape; `CombinedCapabilitySet` then lets one ECU satisfy
+both `obd_mode01_pid` and `sgbd_variant` questions from two independent
+providers. On a base (OBD-only) load there are no variant-gated mappings
+and the probe never runs.
 
 Response matching is unchanged: the expected prefix is per-request
 data, which is also how a protocol whose replies do not echo the

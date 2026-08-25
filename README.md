@@ -14,7 +14,17 @@ HSFZ alive-check replies. Nothing is ever written to the vehicle.
 python3 live.py                 # discover the car, serve on :8080
 python3 live.py --ip 169.254.x.x
 python3 live.py --demo          # no car needed, simulated data
+
+# also poll the verified F-series N47 proprietary channels (oil/coolant/
+# engine temp, DPF soot, rail/boost pressure, MAF, ...). They activate
+# only on an ECU that answers their variant probe:
+python3 live.py --extra-mappings mappings/candidates/bmw/dde/n47
 ```
+
+The dashboard has three views, switchable in the header:
+**Drive** (big gauges + live strips for the fun realtime metrics),
+**Detail** (per-channel history graphs), and **All data** (a dense table
+of every channel with running min/max and age).
 
 Requires **Python 3.9+** and nothing else. There are no third-party
 dependencies, deliberately: this runs on a laptop in a car, where
