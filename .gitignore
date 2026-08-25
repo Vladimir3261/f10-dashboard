@@ -21,6 +21,10 @@
 telemetry_export.json
 telemetry_json/
 
+# Unredacted on-car validation artifacts - these carry the VIN read from
+# the gateway. The VIN-redacted copies under validation-runs/ ARE tracked.
+/local/validation-runs-raw/
+
 # ------------------------------------------------------------- python
 __pycache__/
 *.py[cod]
