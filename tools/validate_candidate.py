@@ -393,6 +393,19 @@ class RunArtifacts:
                 lines.append("")
                 continue
 
+            if record.get("kind") == "sweep_channel":
+                lo, hi = record.get("min"), record.get("max")
+                unit = record.get("unit", "")
+                lines.append(
+                    f"- range **{lo} → {hi}** {unit} "
+                    f"(span {record.get('span')}, last {record.get('last')}, "
+                    f"{record.get('samples')} samples)"
+                )
+                lines.append("- [ ] moved as expected under throttle? "
+                             "(boost/rail/MAF rise, pedal tracks foot)")
+                lines.append("")
+                continue
+
             outcome = record.get("outcome", record.get("aborted", "?"))
             lines.append(f"- **ECU:** {record.get('ecu_addr', '?')}")
             lines.append(f"- **Outcome:** `{outcome}`")
@@ -699,6 +712,152 @@ def cmd_run(args) -> int:
     return 0
 
 
+def _poll_value(transport, request, dst) -> Dict:
+    """One setup+poll+decode round, lean - for the sweep loop."""
+    #
+    # Re-arm every round: in a sweep across several F303 channels the
+    # define must precede its own poll, and re-sending it for a single
+    # channel is cheap and keeps the loop correct without shared state.
+    #
+    for frame in request.setup:
+        transport.request(bytes(frame), dst=dst, timeout=2.0)
+
+    response = transport.request(build_payload(request), dst=dst, timeout=2.0)
+
+    try:
+        match_prefix(request, response)
+        values = decode_response(request, response)
+    except Exception:
+        return {}
+
+    return values
+
+
+def cmd_sweep(args) -> int:
+    """
+    Poll a set of requests in a loop for a fixed duration.
+
+    This is the capture to run while you work the throttle: it samples
+    the chosen channels round-robin at a steady cadence and records the
+    whole time series, so a transient (boost building, rail climbing,
+    pedal moving) shows up as a min->max range and a trace, not a single
+    frozen number.
+    """
+    mapping = load_file(args.path)
+
+    if mapping.production:
+        print("[!] refusing: validate candidates only", file=sys.stderr)
+        return 2
+
+    if args.all:
+        requests = list(mapping.requests)
+    elif args.request:
+        requests = [r for r in mapping.requests if r.id in args.request]
+        missing = set(args.request) - {r.id for r in requests}
+
+        if missing:
+            sys.exit(f"no such request(s): {', '.join(sorted(missing))}")
+    else:
+        print("[i] pass request id(s) or --all. requests in this file:")
+
+        for r in mapping.requests:
+            print(f"    {r.id}")
+
+        return 0
+
+    for request in requests:
+        for frame in list(request.setup) + [build_payload(request)]:
+            try:
+                assert_read_only(bytes(frame))
+            except UnsafePayload as exc:
+                sys.exit(f"[!] {request.id}: {exc}")
+
+    artifacts = RunArtifacts("sweep")
+    client, engine = connect_engine(args)
+    dst = engine.addr
+    transport = GatedTransport(live.HsfzTransport(client), [])
+
+    keys = [s.key for r in requests for s in r.signals]
+    series: Dict[str, list] = {k: [] for k in keys}
+    stats: Dict[str, Dict] = {}
+    units = {s.key: s.unit for r in requests for s in r.signals}
+
+    print(f"\n[i] sweeping {len(requests)} request(s) for {args.seconds:.0f}s "
+          f"- WORK THE THROTTLE NOW. Ctrl-C to stop early.\n")
+
+    started = time.monotonic()
+    rounds = 0
+
+    try:
+        while time.monotonic() - started < args.seconds:
+            t = round(time.monotonic() - started, 2)
+
+            for request in requests:
+                values = _poll_value(transport, request, dst)
+
+                for key, value in values.items():
+                    series[key].append([t, value])
+                    st = stats.setdefault(key, {"min": value, "max": value,
+                                                "last": value})
+                    st["min"] = min(st["min"], value)
+                    st["max"] = max(st["max"], value)
+                    st["last"] = value
+
+            rounds += 1
+            line = "  ".join(
+                f"{k}={stats[k]['last']:.1f}" for k in keys if k in stats
+            )
+            print(f"  t={t:5.1f}s  {line}", flush=True)
+
+            if args.interval > 0:
+                time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n[i] stopped early.")
+    finally:
+        client.close()
+
+    for key in keys:
+        st = stats.get(key, {})
+        artifacts.add({
+            "kind": "sweep_channel",
+            "request": key,
+            "signal": key,
+            "unit": units.get(key, ""),
+            "outcome": "swept" if st else "no_answer",
+            "min": st.get("min"),
+            "max": st.get("max"),
+            "last": st.get("last"),
+            "span": (round(st["max"] - st["min"], 3)
+                     if st else None),
+            "samples": len(series[key]),
+            "series": series[key],
+        })
+
+    artifacts.set_environment(
+        gateway=getattr(client, "ip", "?"), ecu=engine.label(),
+        ecu_addr=f"0x{dst:02X}", supported_pid_count=len(engine.supported),
+        mapping_file=os.path.relpath(args.path, _ROOT),
+        seconds=args.seconds, rounds=rounds,
+    )
+    tracked, raw = artifacts.write()
+
+    print(f"\n[+] {rounds} rounds. Ranges (min -> max):")
+
+    for key in keys:
+        st = stats.get(key)
+
+        if st:
+            moved = st["max"] - st["min"]
+            flag = "  <== MOVED" if moved > abs(st["min"]) * 0.05 + 0.5 else ""
+            print(f"    {key:22s} {st['min']:8.1f} -> {st['max']:8.1f} "
+                  f"{units.get(key,''):7s}{flag}")
+
+    print(f"\n[+] artifacts: {tracked}/  (redacted, tracked)")
+    print(f"[+] raw copy:  {raw}/  (gitignored)")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="supervised read-only on-car candidate validation",
@@ -724,6 +883,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--step", action="store_true",
                        help="pause for confirmation between requests")
     p_run.set_defaults(func=cmd_run)
+
+    p_sw = sub.add_parser(
+        "sweep",
+        help="poll request(s) in a loop while you work the throttle",
+    )
+    p_sw.add_argument("path", help="a candidate mapping file")
+    p_sw.add_argument("request", nargs="*",
+                      help="request id(s) to sweep (default: use --all)")
+    p_sw.add_argument("--all", action="store_true",
+                      help="sweep every request in the file")
+    p_sw.add_argument("--seconds", type=float, default=20.0,
+                      help="how long to sweep (default 20)")
+    p_sw.add_argument("--interval", type=float, default=0.0,
+                      help="extra pause between rounds in s (default 0 - "
+                           "poll as fast as the link allows)")
+    p_sw.set_defaults(func=cmd_sweep)
 
     return ap
 
