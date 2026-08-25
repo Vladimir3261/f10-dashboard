@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "kind": "identify",
+    "started_utc": "20260825T192513Z",
+    "tool": "tools/validate_candidate.py",
+    "read_only": true,
+    "allowlist": [
+      "0x1",
+      "0x19",
+      "0x22",
+      "0x2c",
+      "0x3e",
+      "0x9"
+    ],
+    "argv": [
+      "identify"
+    ],
+    "host_time_local": "2026-08-25 22:25:13 +0300",
+    "environment": {
+      "gateway": "169.254.65.67",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "supported_pid_count": 30
+    }
+  },
+  "records": [
+    {
+      "kind": "identify",
+      "request": "identify",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "supported_pids": [
+        "0x01",
+        "0x04",
+        "0x05",
+        "0x0B",
+        "0x0C",
+        "0x0D",
+        "0x0F",
+        "0x10",
+        "0x11",
+        "0x13",
+        "0x1C",
+        "0x1F",
+        "0x20",
+        "0x21",
+        "0x23",
+        "0x24",
+        "0x2C",
+        "0x2D",
+        "0x30",
+        "0x31",
+        "0x33",
+        "0x3C",
+        "0x40",
+        "0x41",
+        "0x42",
+        "0x45",
+        "0x46",
+        "0x49",
+        "0x4A",
+        "0x4C"
+      ],
+      "ident": {
+        "vin": "<redacted: recorded in local/ only>",
+        "sysname_f197": "<redacted: recorded in local/ only>",
+        "hw_f191": "(NRC/negative response to 0x22: NRC 0x31)",
+        "sw_f194": "(NRC/negative response to 0x22: NRC 0x31)",
+        "supplier_f18a": "<redacted: recorded in local/ only>",
+        "ecu_name_0900": "ECM-EngineControl"
+      },
+      "note": "compare hw/sw/supplier against the d_motor IDENT results in an offline EDIABAS/ediabasx oracle to resolve the exact DDE SGBD variant"
+    }
+  ]
+}

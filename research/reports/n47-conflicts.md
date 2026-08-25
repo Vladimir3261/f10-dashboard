@@ -30,6 +30,23 @@ Note also the alias tension INSIDE `D73N47A0`: `IMRUP` (PFltLd_mSot,
 0.015259 g/bit) vs `PFltLd_mSotMeas` (0.01 g/bit) are subtly different
 soot estimates at different scales - imported unmerged, surfaced below.
 
+## The 0x03EB / 0x0AF1 cross-family touchpoints (WiCAN claims vs D73 table)
+
+The WiCAN issue's two UNcaptured claims land differently against the
+D73 table:
+
+* `0x03EB` - WiCAN claims distance-since-regen, 4 data bytes, `/1000`
+  km. D73's `IDSLRE` is `0x03EB`, `unsigned long`, unit **metres**,
+  MUL 1 - u32 metres IS /1000 km. **Full agreement** (identity, width,
+  scale), but the sources are not proven independent of Bosch's shared
+  DDE numbering, so this stays corroboration, not confirmation.
+* `0x0AF1` - WiCAN claims engine temperature at `x0.01969` with no
+  offset; D73's `ITMOT` is `0x0AF1` at `0.1*raw - 273.14` (deci-Kelvin,
+  the same formula d72n47a0 uses for its `0x4BC3`). **Same identifier,
+  same semantic, irreconcilable scales.** At a warm-engine raw ~3630
+  they differ by ~18 degC - one real capture on an E-series DDE7 car
+  settles it. Until then neither scale is promoted.
+
 **Validation experiment:** resolve the F10's DDE SGBD on-car (d_motor
 IDENT); then read `0x44BE`/`0x44C1` via the F303 sequence and, only if
 the variant proves KWP-family, try `2C 10 04 06`. Compare against ISTA.

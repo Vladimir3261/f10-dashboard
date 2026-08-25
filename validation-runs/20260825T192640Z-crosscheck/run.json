@@ -1,0 +1,27 @@
+{
+  "kind": "crosscheck",
+  "utc": "20260825T192640Z",
+  "note": "DDE dynamic F303 vs standard OBD Mode 01, same engine ECU 0x12, warm idle",
+  "rows": [
+    {
+      "quantity": "coolant degC",
+      "obd_standard": 82,
+      "dde_f303": 82.4
+    },
+    {
+      "quantity": "baro/ambient kPa",
+      "obd_standard": 99,
+      "dde_f303": 99.9
+    },
+    {
+      "quantity": "manifold kPa",
+      "obd_standard": 103,
+      "dde_f303": 103.7
+    },
+    {
+      "quantity": "rpm (OBD only)",
+      "obd_standard": 779,
+      "dde_f303": "-"
+    }
+  ]
+}
