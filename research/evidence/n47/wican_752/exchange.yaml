@@ -1,0 +1,63 @@
+# Source-backed raw exchange: BMW E90 DDE7 local-identifier read.
+#
+# Transcribed from the body of meatpiHQ/wican-fw issue #752
+# ("Bug: AutoPID response validator rejects BMW DDE7 responses"),
+# opened 2026-04-24 by paynekw, retrieved 2026-08-25. The issue is open;
+# no fix is merged (maintainer comment 2026-04-26 points at #751,
+# preferring to disable validation).
+#
+# Every byte below is quoted from the issue's CAN monitor capture.
+# Nothing is inferred. The response does NOT echo the local identifier -
+# that absence is the protocol fact this fixture exists to pin.
+
+source_id: wican-issue-752
+record_id: wican752.dde7.0x0406
+
+vehicle:
+  description: BMW E90 320d
+  engine: N47D20C
+  ecu: DDE7N47
+  bus: "ISO 15765-4, 11-bit, 500 kbaud"
+  request_can_id: "7DF"        # functional; issue header says 7E0 <-> 7E8 observed
+  response_can_id: "7E8"
+
+exchange:
+  request: "2C 10 04 06"
+  response: "6C 10 0E D7"
+  identifier_echo: false
+  matcher: service_sub_only
+  prefix: "6C 10"
+
+decode:
+  raw: 0x0ED7
+  raw_decimal: 3799
+  scale_expression: "[B2:B3]/100"
+  value: 37.99
+  unit: g
+  signal: "DPF soot mass"       # the issue's own label; see conflicts report
+  byte_order: big               # wire_observation - 0E D7 read high-first gives 3799
+
+verification: externally_verified
+evidence_tier: A
+safety: read_only_telemetry_candidate
+f10_applicability: unverified
+
+# Additional identifiers CLAIMED in the same issue table ("captured with
+# ISTA cross-reference"). No raw frames were shown for these two, so they
+# are source_claim, tier C - recorded, not promoted.
+additional_claims:
+  - identifier: "0x03EB"
+    signal: "Distance since regen"
+    response_shape: "6C 10 VV VV VV VV"
+    scale_expression: "[B2:B5]/1000"
+    unit: km
+  - identifier: "0x0AF1"
+    signal: "Engine temperature (overall)"
+    response_shape: "6C 10 VV VV"
+    scale_expression: "[B2:B3]*0.01969"
+    unit: degC
+
+citation:
+  url: "https://github.com/meatpiHQ/wican-fw/issues/752"
+  retrieved_at: "2026-08-25"
+  license: unknown             # issue text; repository is GPL-3.0 but issue content is a user report

@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- Verbatim excerpt of Me7.2/Datalogger/TestO Datalogger/config/customjobs.xml,
+     MotorMouth93/BMW-XDFs @ 54a7ce420867452609e1116adc0afb8fe8a395ba (no license -> unknown).
+     Small factual excerpt for deterministic importer tests. -->
+<customjobs>
+ <customjob ecu="D71N47A0">
+  <jobname>STATUS_MESSWERTBLOCK_LESEN</jobname>
+  <virtualname>SET_1</virtualname>
+  <comment>Values #1</comment>
+  <argument>3;0x13A6;0x0080</argument>
+ </customjob>
+ <customjob ecu="D71N47C0">
+  <jobname>STATUS_MESSWERTBLOCK_LESEN</jobname>
+  <virtualname>SET_1</virtualname>
+  <comment>Values #1</comment>
+  <argument>3;0x1881;0x0500;0x0709;0x076D;0x01F4;0x0502;0x0772;0x0672;0x0641;0x07D1;0x07D0;0x041E;0x0A29</argument>
+ </customjob>
+ <customjob ecu="D71N47D0">
+  <jobname>STATUS_MESSWERTBLOCK_LESEN</jobname>
+  <virtualname>SET_2</virtualname>
+  <comment>Values #2</comment>
+  <argument>3</argument>
+ </customjob>
+ <customjob ecu="D71N47D0">
+  <jobname>STATUS_MESSWERTBLOCK_LESEN</jobname>
+  <virtualname>SET_1</virtualname>
+  <comment>Values #1</comment>
+  <argument>3;0x1881;0x0500;0x0709;0x076D;0x01F4;0x0502;0x0772;0x0672;0x0641;0x07D1;0x07D0;0x041E;0x0A29</argument>
+ </customjob>
+ <customjob ecu="MEVD176K">
+  <jobname>STATUS_MESSWERTBLOCK_LESEN</jobname>
+  <virtualname>SET_1</virtualname>
+  <comment>Basic Datalog</comment>
+  <argument>3;0x4807;0x5812;0x580F;0x4205;0x4300;0x4506;0x480B;0x4651;0x5813;0x582C;0x5A37;0x582F</argument>
+ </customjob>
+</customjobs>

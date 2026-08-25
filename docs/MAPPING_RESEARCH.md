@@ -213,8 +213,16 @@ executable.
 | Mapping | Status | Notes |
 | --- | --- | --- |
 | `mappings/obd/engine.yaml` | `verified` | Standard SAE Mode 01. Polled live and logged on `F10-520d-dev`. |
+| `mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml` | `candidate` | F-series dynamic `0xF303` reads (oil temp, DPF soot, engine temp). Wire-verified on an F25 X3 (source); NOT verified on `F10-520d-dev`. |
+| `mappings/candidates/bmw/dde/n47/dde7_kwp_local_id.yaml` | `candidate` | E-series DDE7 non-echoing local-id read, from the raw E90 capture in WiCAN issue #752. |
+| `mappings/candidates/bmw/dde/n47/f10_static_58xx.yaml` | `candidate` | F10 static `22 586F` oil pressure (u16 millibar), on-car verified on an F10 **N55** — engine family differs. |
 | `mappings/examples/uds_example.yaml` | `rejected` | **TEST FIXTURE — NOT A REAL BMW MAPPING.** Every value invented. |
 
-There are no proprietary BMW mappings in this repository. When there are,
-each will arrive through the lifecycle above with its provenance written
-down.
+Every candidate is `production: false` and additionally gated behind a
+capability kind no current provider satisfies, so none can reach a
+vehicle until the DDE variant is resolved and a human promotes it. The
+evidence, pins, licenses and conflict analysis behind them live under
+`research/` — see `research/reports/n47-source-audit.md` for where every
+byte came from, and `research/reports/n47-unresolved-questions.md` for
+the supervised on-car validation sequence that would promote (or reject)
+each one.

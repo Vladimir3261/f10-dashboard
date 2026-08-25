@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- Verbatim excerpt of BmwDeepObd/Xml/E90/Motor.ccpage, uholeschak/ediabaslib
+     @ a7cef80490412115b16d700901573ec821f01ec8 (GPL-3.0). Config-fragment
+     excerpt for deterministic importer tests; see legal-and-license-notes.md. -->
+<fragment xmlns="http://www.holeschak.de/BmwDeepObd">
+  <page name="tab_motor">
+    <jobs sgbd="d_motor">
+      <job name="STATUS_MESSWERTBLOCK_LESEN"
+           args_first="JA;IUBAT2;OBD_PID05_CEngDsT_tSens;ITMOT;ITOEL;ITKRS;OBD_PID10_AFS_dmSens;ILMMG;SLMMG;ITUMG;IPLAD;SPLAD;ITLAL;IPUMG;IPRDR;SPRDR;ITAVO;ITAVP1;IPDIP;IDSLRE;PFltRgn_numRgn;CoEOM_stOpModeAct;ISRBF;ISOED;PCBS_lDistanceOut"
+           args="NEIN;IUBAT2;OBD_PID05_CEngDsT_tSens;ITMOT;ITOEL;ITKRS;OBD_PID10_AFS_dmSens;ILMMG;SLMMG;ITUMG;IPLAD;SPLAD;ITLAL;IPUMG;IPRDR;SPRDR;ITAVO;ITAVP1;IPDIP;IDSLRE;PFltRgn_numRgn;CoEOM_stOpModeAct;ISRBF;ISOED;PCBS_lDistanceOut">
+        <display name="label_motor_bat_voltage" result="STAT_UBATT2_WERT" />
+        <display name="label_motor_refrig_temp" result="STAT_CEngDsT_tSens_WERT" format="6.2R" />
+        <display name="label_motor_temp" result="STAT_MOTORTEMPERATUR_WERT" format="6.2R" />
+        <display name="label_motor_oil_temp" result="STAT_MOTOROEL_TEMPERATUR_WERT" format="6.2R" />
+        <display name="label_motor_air_mass" result="STAT_AFS_dmSens_WERT" format="7.2R" />
+      </job>
+    </jobs>
+  </page>
+</fragment>

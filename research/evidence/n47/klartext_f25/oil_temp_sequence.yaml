@@ -1,0 +1,86 @@
+# Source-backed multi-step exchange: F-series dynamic measurement read.
+#
+# Transcribed from HadiCherkaoui/klartext at commit
+# 04c9ee520c3c33cbc933377ae57321c82e191319 (retrieved 2026-08-25):
+#
+#   docs/car-session-1-results.md, finding 1 - the pcap-verified wire
+#   exchange (BMW F25 X3, N47 diesel, DDE variant d72n47a0, tester 0xF4?
+#   no: tester 0xF1, DDE 0x12), timestamped 358.8s in the session pcap:
+#
+#       TX F1->12: 2C 03 F3 03             (clear dynamic define)
+#       TX F1->12: 2C 01 F3 03 45 17 01 02 (define F303 := source 4517, pos 1, width 2)
+#       TX F1->12: 22 F3 03
+#       RX 12->F1: 62 F3 03 39 08          -> 0x3908 -> 46.0 degC
+#
+#   crates/best/tests/differential.rs:41-42 - the scale, sourced from the
+#   d72n47a0 SG_FUNKTIONEN table: oil temp ITOEL = `0.01*raw - 100`.
+#
+# Cross-checked against an independent export of the same primary source:
+# emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+# docs/sgbd/d72n47a0.md row:
+#   ITOEL | 0x4517 | STAT_MOTOROEL_TEMPERATUR_WERT | gefilterte Oeltemperatur
+#   | degC | Oz_tempf | unsigned int | MUL 0.010000 | ADD -100.000000
+#   | SG_ADR 12 | SERVICE 22;2C
+# (same primary source - BMW's d72n47a0.prg - so this is parser
+# validation, not independent confirmation.)
+#
+# Arithmetic check: 0x3908 = 14600; 14600 * 0.01 - 100 = 46.0. Exact.
+
+source_id: klartext
+record_id: klartext.d72n47a0.ITOEL
+
+vehicle:
+  description: BMW F25 X3 (session-1 car; the project's primary car is an F20)
+  engine_family: N47
+  sgbd: d72n47a0
+  ecu_address: 0x12
+  transport: "ENET/HSFZ via ZGW"
+
+sequence:
+  setup:
+    - "2C 03 F3 03"
+    - "2C 01 F3 03 45 17 01 02"
+  poll: "22 F3 03"
+  response: "62 F3 03 39 08"
+  matcher: echo_full
+  prefix: "62 F3 03"
+
+source_measurement:
+  arg: ITOEL
+  source_identifier: "0x4517"
+  result_name: STAT_MOTOROEL_TEMPERATUR_WERT
+  wire_did: "0xF303"
+  position: 1
+  width_bytes: 2
+
+decode:
+  raw: 0x3908
+  raw_type: uint16
+  byte_order: big
+  mul: "0.01"
+  div: "1"
+  add: "-100.0"
+  value: 46.0
+  unit: degC
+
+verification: externally_verified
+evidence_tier: A
+safety: read_only_telemetry_candidate
+f10_applicability: unverified
+session_requirement: none      # klartext sgbd-findings 7a - "no session/security precondition"
+
+# The same session also proved the OPPOSITE for the static form: a plain
+# `22 45 17` to this DDE was answered `7F 22 31` (requestOutOfRange).
+# On d72n47a0 the source id is a define-source, not a readable DID.
+static_read_rejected:
+  request: "22 45 17"
+  response: "7F 22 31"
+
+citation:
+  url: "https://github.com/HadiCherkaoui/klartext"
+  commit: "04c9ee520c3c33cbc933377ae57321c82e191319"
+  files:
+    - "docs/car-session-1-results.md"
+    - "crates/best/tests/differential.rs"
+  retrieved_at: "2026-08-25"
+  license: AGPL-3.0-or-later   # facts extracted, no code copied

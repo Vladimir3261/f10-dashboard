@@ -94,6 +94,37 @@ proprietary job that fits no service/identifier convention:
       data_length: 4
 ```
 
+### Setup sequences
+
+Some reads are a *sequence*, not a single exchange. The BMW F-series
+dynamic measurement is the motivating case: clear a dynamic identifier,
+define it from a source id, then poll it. `setup:` holds the frames
+that go out **once per session**, in declared order, before the request
+is first polled:
+
+```yaml
+  n47.d72.dyn.4517:
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    setup:
+      - "2C 03 F3 03"                # clear dynamic define
+      - "2C 01 F3 03 45 17 01 02"    # define F303 := source 0x4517
+    response: {data_length: 2}
+```
+
+The polled request stays the honest `22 F3 03` - a sequence is data,
+never one fabricated identifier. The executor arms each request's setup
+on first execution and re-arms automatically on reconnect, because a
+reconnect builds a fresh executor. Two requests defining the same
+dynamic identifier must not be enabled together; candidate files that
+carry several say so loudly.
+
+Response matching is unchanged: the expected prefix is per-request
+data, which is also how a protocol whose replies do not echo the
+identifier (the DDE7 `6C 10` shape) is declared without loosening
+matching anywhere else.
+
 ---
 
 ## Decoding

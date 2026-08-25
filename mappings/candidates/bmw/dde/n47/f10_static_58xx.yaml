@@ -1,0 +1,76 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# NOT verified on the target F10 520d. production: false. Source
+# vehicle: an F10 535i - RIGHT chassis, WRONG engine (N55 petrol). What
+# this file encodes is the one decode that source proved on-car:
+#
+#   TX 22 58 6F
+#   RX 62 58 6F VV VV     -> u16 big-endian, millibar
+#
+# 159 drive samples, 144 distinct values, 2324-4776 mbar, monotone by
+# RPM band (cheeseprince/obd-gauge-cluster @ bb132396,
+# docs/BMW-STATUS.md). The same document records that its first
+# byte-0-only decode was wrong by ~4x - "a shape check cannot validate
+# a scale" - which is why this row carries the full 16-bit decode and
+# nothing else from that project's unpinned leads (5817/58EB stay in
+# research storage, not here).
+#
+# Whether a diesel DDE serves 0x586F at all is exactly what the on-car
+# validation session must answer. It is a plain static read the
+# capability gate keeps disabled until then.
+# ======================================================================
+
+mapping:
+  id: candidate-f10-static-58xx
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - F10 static Mode-22 oil pressure (0x586F, u16 millibar),
+    on-car verified on an F10 N55 petrol; unverified for the N47 diesel
+    target.
+
+source:
+  type: trace
+  file: "https://github.com/cheeseprince/obd-gauge-cluster/blob/main/docs/BMW-STATUS.md"
+  notes: >
+    On-car F10 scan, pinned commit bb1323960c8e378633138dc46226cf99b8a55859.
+    Transcription: research/evidence/n47/f10_field/oil_pressure_586F.yaml.
+    OBDb's BMW-5-Series signalset disagrees on the width (8-bit scalar);
+    the on-car u16 decode is used and the conflict is recorded in
+    research/reports/n47-conflicts.md.
+
+verification:
+  status: candidate
+  method: >
+    externally verified on the source F10 535i (N55). NOT verified on
+    F10-520d-dev; engine family differs.
+  vehicle: F10-535i-N55 (source), F10-520d-dev (target, PENDING)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      sgbd_variant: f10-dme-58xx-namespace
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    target: discovered_engine
+
+requests:
+
+  f10.static.586F:
+    did: 0x586F
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      f10_oil_press:
+        label: Oil pressure
+        unit: mbar
+        display: {digits: 0, min: 0, max: 10000}
+        decode: {type: uint16_be}

@@ -1,0 +1,69 @@
+# Source-backed on-car F10 evidence: static Mode-22 namespace + oil pressure.
+#
+# Transcribed from cheeseprince/obd-gauge-cluster @
+# bb1323960c8e378633138dc46226cf99b8a55859, docs/BMW-STATUS.md
+# (retrieved 2026-08-25). MIT licensed.
+#
+# The vehicle is an F10 535i - the RIGHT CHASSIS but the WRONG ENGINE
+# (N55 petrol, not N47 diesel). What transfers is gateway/namespace
+# behaviour and the methodology; the specific DID values must be
+# re-proven on a diesel DDE.
+#
+# On-car scan findings (census + sweep + ~15 min drive, ELM327 adapter):
+#
+#   * The DME answers enhanced Mode-22 on the PLAIN 7DF functional
+#     broadcast, in a 58xx/42xx/45xx identifier namespace.
+#   * The community `6F1` extended-addressing headers were NOT routed to
+#     the adapter: DME `612` and EGS `618` stayed silent, and `22 DA25`
+#     on 7DF returned `7F 22 22`. NOTE: adapter-specific - our transport
+#     is ENET/HSFZ through the ZGW, which routes 0x18 (tools/egs.py
+#     reaches it), so this reachability finding does NOT transfer.
+#   * `22 58 6F` answered a 2-byte value on-car; decoded as u16
+#     BIG-ENDIAN MILLIBAR it gave 2324-4776 mbar (33.7-69.3 psi) over
+#     the drive, monotone by RPM band, r = 0.653. Their initial
+#     byte-0-only read was wrong by ~4x - the documented lesson is that
+#     a shape check cannot validate a scale.
+#   * Oil-temp candidates `22 58 17` / `22 58 EB` both sat 91-98 degC
+#     tracking coolant on a WARM-started drive - never pinned; explicitly
+#     left unverified by the source.
+
+source_id: obd-gauge-cluster
+record_id: f10field.n55.586F
+
+vehicle:
+  description: BMW F10 535i
+  engine_family: N55            # NOT N47
+  chassis: F10
+  transport: "ELM327 / ISO 15765-4 on 7DF functional"
+
+exchange:
+  request: "22 58 6F"
+  response_shape: "62 58 6F VV VV"
+  matcher: echo_full
+  prefix: "62 58 6F"
+
+decode:
+  raw_type: uint16
+  byte_order: big
+  mul: "1"
+  div: "1"
+  add: "0"
+  unit: mbar
+  signal: "Engine oil pressure"
+
+verification: externally_verified
+evidence_tier: A
+safety: read_only_telemetry_candidate
+n47_applicability: unverified   # engine mismatch; namespace evidence only
+
+unpinned_leads:
+  - request: "22 58 17"
+    note: "oil-temp candidate, 91-98 degC on warm drive, never pinned"
+  - request: "22 58 EB"
+    note: "oil-temp candidate, same drive, never pinned"
+
+citation:
+  url: "https://github.com/cheeseprince/obd-gauge-cluster/blob/main/docs/BMW-STATUS.md"
+  commit: "bb1323960c8e378633138dc46226cf99b8a55859"
+  retrieved_at: "2026-08-25"
+  license: MIT
