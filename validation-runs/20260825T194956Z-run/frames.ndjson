@@ -1,0 +1,27 @@
+{"request": "n47.d72.dyn.461B", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.1}
+{"request": "n47.d72.dyn.461B", "dst": "0x12", "tx": "2c 01 f3 03 46 1b 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.9}
+{"request": "n47.d72.dyn.461B", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 4c dc", "nrc": null, "ms": 29.7}
+{"request": "n47.d72.dyn.4841", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.9}
+{"request": "n47.d72.dyn.4841", "dst": "0x12", "tx": "2c 01 f3 03 48 41 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.9}
+{"request": "n47.d72.dyn.4841", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 2c 75", "nrc": null, "ms": 30.1}
+{"request": "n47.d72.dyn.42C8", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.7}
+{"request": "n47.d72.dyn.42C8", "dst": "0x12", "tx": "2c 01 f3 03 42 c8 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 30.2}
+{"request": "n47.d72.dyn.42C8", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 2d 70", "nrc": null, "ms": 30.0}
+{"request": "n47.d72.dyn.4746", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.8}
+{"request": "n47.d72.dyn.4746", "dst": "0x12", "tx": "2c 01 f3 03 47 46 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.7}
+{"request": "n47.d72.dyn.4746", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 19 99", "nrc": null, "ms": 30.3}
+{"request": "n47.d72.dyn.4715", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.5}
+{"request": "n47.d72.dyn.4715", "dst": "0x12", "tx": "2c 01 f3 03 47 15 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 30.0}
+{"request": "n47.d72.dyn.4715", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 19 99", "nrc": null, "ms": 30.1}
+{"request": "n47.d72.dyn.47DD", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 30.2}
+{"request": "n47.d72.dyn.47DD", "dst": "0x12", "tx": "2c 01 f3 03 47 dd 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.7}
+{"request": "n47.d72.dyn.47DD", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 4e 59", "nrc": null, "ms": 30.0}
+{"request": "n47.d72.dyn.4843", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 29.7}
+{"request": "n47.d72.dyn.4843", "dst": "0x12", "tx": "2c 01 f3 03 48 43 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.8}
+{"request": "n47.d72.dyn.4843", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 3a 26", "nrc": null, "ms": 30.0}
+{"request": "n47.d72.dyn.4CF0", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 30.1}
+{"request": "n47.d72.dyn.4CF0", "dst": "0x12", "tx": "2c 01 f3 03 4c f0 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 29.8}
+{"request": "n47.d72.dyn.4CF0", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 7f de", "nrc": null, "ms": 29.9}
+{"request": "n47.d72.dyn.4232", "dst": "0x12", "tx": "2c 03 f3 03", "rx": "6c 03 f3 03", "nrc": null, "ms": 30.0}
+{"request": "n47.d72.dyn.4232", "dst": "0x12", "tx": "2c 01 f3 03 42 32 01 02", "rx": "6c 01 f3 03", "nrc": null, "ms": 30.2}
+{"request": "n47.d72.dyn.4232", "dst": "0x12", "tx": "22 f3 03", "rx": "62 f3 03 00 00", "nrc": null, "ms": 29.9}
