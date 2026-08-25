@@ -1,0 +1,178 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# VERIFIED on F10-520d-dev (warm idle, 2026-08-25). production: false. Same
+# F-series dynamic 0xF303 read path as d72n47a0_dynamic.yaml, whose
+# oil-temp/soot/engine-temp reads ARE now confirmed on F10-520d-dev
+# (validation-runs/20260825T1922*). This file adds the idle-meaningful
+# air/fuel/pressure channels from the same d72n47a0 SG_FUNKTIONEN table.
+#
+# Every id + scale is quoted from the cached SGBD table, cross-checked
+# between klartext's disassembly and the ediabasx-docs export:
+#   emdzej/ediabasx-docs-sgbd @ b644de8f, docs/sgbd/d72n47a0.md
+# (same primary source - parser validation, not independent evidence).
+# Every row: SG_ADR 12, SERVICE 22;2C, DATENTYP unsigned int (u16 BE).
+#
+# !! ONE REQUEST AT A TIME - all share dynamic DID 0xF303 !!
+# (the validation runner clears F303 between requests.)
+#
+# Idle plausibility checks this file enables:
+#   coolant (ITKUM) should match standard OBD PID 0x05 at the same moment
+#   ambient pressure (IPUMG) and boost actual (IPLAD) ~ atmospheric (~1000 hPa) at idle
+#   pedal (IFPWG) ~ 0 % with foot off
+#   rail actual (IPRDR) a few hundred bar at diesel idle
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-flow
+  version: "0"
+  production: false
+  description: >
+    F-series N47 air/fuel/pressure dynamic (0xF303) measurements from
+    the d72n47a0 SG_FUNKTIONEN table. All 9 channels verified on
+    F10-520d-dev at warm idle (three MATCH standard OBD PIDs).
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export, cross-checked vs klartext)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Rows: IPLAD 0x4841, SPLAD 0x42C8, IPRDR
+    0x4746, SPRDR 0x4715, ILMMG 0x47DD, ITKUM 0x461B, ITLAL 0x4843,
+    IPUMG 0x4CF0, IFPWG 0x4232. All unsigned int, SG_ADR 12, SERVICE 22;2C.
+
+verification:
+  status: verified
+  method: >
+    Confirmed on F10-520d-dev at warm idle 2026-08-25
+    (validation-runs/20260825T192546Z-run, 20260825T192640Z-crosscheck).
+    9/9 channels decoded to physically correct idle values, with several
+    independent anchors:
+      - ambient pressure (4CF0) 99.9 kPa MATCHES standard OBD baro PID
+        0x33 (99 kPa); boost actual (4841) 103.7 kPa MATCHES standard OBD
+        MAP PID 0x0B (103 kPa); coolant (461B) 82.4 degC MATCHES standard
+        OBD PID 0x05 (82 degC);
+      - accelerator pedal (4232) 0.0 % with foot off idle;
+      - boost actual ~ atmospheric (no boost at idle);
+      - rail actual (4746) 300.9 bar ~ setpoint (4715) 300.0 bar (closed-
+        loop tracking, textbook diesel idle);
+      - charge-air temp (4843) 43 degC, MAF/cyl (47DD) 495 mg/hub, both
+        plausible warm idle.
+  vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      sgbd_variant: d72n47a0
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+requests:
+
+  n47.d72.dyn.461B:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 46 1B 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_coolant:
+        label: Coolant temp (DDE)
+        unit: °C
+        display: {digits: 1, min: -40, max: 140}
+        decode: {type: uint16_be, scale: 0.01, add: -100.0, round: 2}
+
+  n47.d72.dyn.4841:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 41 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_boost_act:
+        label: Boost pressure (actual)
+        unit: hPa
+        display: {digits: 0, min: 0, max: 3000}
+        decode: {type: uint16_be, scale: 0.091554, round: 1}
+
+  n47.d72.dyn.42C8:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 C8 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_boost_set:
+        label: Boost pressure (setpoint)
+        unit: hPa
+        display: {digits: 0, min: 0, max: 3000}
+        decode: {type: uint16_be, scale: 0.091554, round: 1}
+
+  n47.d72.dyn.4746:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 47 46 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_rail_act:
+        label: Rail pressure (actual)
+        unit: bar
+        display: {digits: 0, min: 0, max: 2200}
+        decode: {type: uint16_be, scale: 0.045777, round: 1}
+
+  n47.d72.dyn.4715:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 47 15 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_rail_set:
+        label: Rail pressure (setpoint)
+        unit: bar
+        display: {digits: 0, min: 0, max: 2200}
+        decode: {type: uint16_be, scale: 0.045777, round: 1}
+
+  n47.d72.dyn.47DD:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 47 DD 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_maf_per_cyl:
+        label: Air mass per cylinder
+        unit: mg/hub
+        display: {digits: 1, min: 0, max: 2000}
+        decode: {type: uint16_be, scale: 0.024414, round: 2}
+
+  n47.d72.dyn.4843:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 43 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_charge_air_temp:
+        label: Charge-air temp (after intercooler)
+        unit: °C
+        display: {digits: 1, min: -40, max: 120}
+        decode: {type: uint16_be, scale: 0.01, add: -100.0, round: 2}
+
+  n47.d72.dyn.4CF0:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4C F0 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_ambient_press:
+        label: Ambient pressure
+        unit: hPa
+        display: {digits: 0, min: 0, max: 1200}
+        decode: {type: uint16_be, scale: 0.030518, round: 1}
+
+  n47.d72.dyn.4232:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 32 01 02"]
+    polling: {class: slow}
+    response: {data_length: 2}
+    signals:
+      n47d_pedal:
+        label: Accelerator pedal (filtered)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.001526, round: 2}

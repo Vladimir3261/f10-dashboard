@@ -1,16 +1,18 @@
 schema_version: 1
 
-# ============================================================ CANDIDATE
+# ================================================ VERIFIED ON F10-520d-dev
 #
-# NOT verified on the target F10. production: false - live.py never
-# loads this file; it exists so the CLI, the tests and a future
-# supervised on-car validation session can exercise real, source-backed
-# request definitions.
+# On-car confirmed 2026-08-25 (see verification: below and
+# validation-runs/). Still production: false - live.py does not load it
+# yet: wiring these into the runtime needs a variant-aware capability
+# provider (the `sgbd_variant` match below), which is a separate
+# integration step. The CLI, the tests and the validation runner use it.
 #
 # ECU variant: d72n47a0 - "SGBD fuer N47TUe/N57TUe (DDE7.21/7.01/7.41)
 # verwendet in F0x, F1x, F2x, F3x (UDS, MV, FlexRay)" per the SGBD's own
-# comment. Wire-verified on a BMW F25 X3 N47 (klartext car-session-1
-# pcap); the F10 development car's exact DDE variant is UNRESOLVED.
+# comment. Wire-verified on a BMW F25 X3 N47 (klartext pcap) AND now on
+# the F10 520d dev car: the 0xF303 sequence is accepted and every value
+# cross-checks (dynamic coolant/boost/ambient MATCH standard OBD PIDs).
 #
 # !! ONE REQUEST AT A TIME !!
 # All four requests below read the same dynamic DID 0xF303, and the
@@ -27,9 +29,9 @@ mapping:
   version: "0"
   production: false
   description: >
-    CANDIDATE - F-series N47 dynamic (0xF303) measurements from the
-    d72n47a0 SG_FUNKTIONEN table, wire-verified on an F25 X3, not
-    verified on the target F10. One request may be active at a time.
+    F-series N47 dynamic (0xF303) measurements from the d72n47a0
+    SG_FUNKTIONEN table. Verified on F10-520d-dev (and the source F25).
+    One request may be active at a time (shared dynamic DID 0xF303).
 
 source:
   type: trace
@@ -43,11 +45,23 @@ source:
     research/evidence/n47/klartext_f25/.
 
 verification:
-  status: candidate
+  status: verified
   method: >
-    externally verified on F25-X3-N47 (source vehicle, pcap); ITMOT is
-    disassembly-derived only. Nothing here is verified on F10-520d-dev.
-  vehicle: F25-X3-N47 (source), F10-520d-dev (target, PENDING)
+    Confirmed on F10-520d-dev at warm idle 2026-08-25
+    (validation-runs/20260825T1922*, 20260825T192640Z-crosscheck). The
+    0xF303 clear/define/read sequence was accepted (not 7F 22 31), and
+    every channel decoded to a physically correct value with independent
+    cross-checks:
+      - engine temp (4BC3) 74-75 degC ~ oil temp (4517) 75 degC ~
+        coolant (461B, sibling file) 80.9 degC, all warm-idle consistent;
+      - dynamic coolant 461B 82.4 degC MATCHES standard OBD PID 0x05
+        (82 degC) at the same moment;
+      - DPF soot measured (44BE) 0.09 g ~ modelled (44C1) 0.10 g, the two
+        independent estimates agree (clean/regenerated filter).
+    ITMOT (4BC3) was disassembly-derived at authoring; it is now
+    on-car confirmed.
+  vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
+  source_vehicle: F25-X3-N47 (original pcap evidence)
 
 ecu:
   family: engine

@@ -1,0 +1,172 @@
+{
+  "meta": {
+    "kind": "run",
+    "started_utc": "20260825T192203Z",
+    "tool": "tools/validate_candidate.py",
+    "read_only": true,
+    "allowlist": [
+      "0x1",
+      "0x19",
+      "0x22",
+      "0x2c",
+      "0x3e",
+      "0x9"
+    ],
+    "argv": [
+      "run",
+      "mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml",
+      "--all",
+      "--step"
+    ],
+    "host_time_local": "2026-08-25 22:22:03 +0300",
+    "environment": {
+      "gateway": "169.254.65.67",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "supported_pid_count": 30,
+      "mapping_file": "mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml"
+    }
+  },
+  "records": [
+    {
+      "kind": "run",
+      "request": "n47.d72.dyn.4517",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "expected_prefix": "62 f3 03",
+      "signals": {
+        "n47d_oil_temp": 75.7
+      },
+      "frames": [
+        {
+          "dst": "0x12",
+          "tx": "2c 03 f3 03",
+          "rx": "6c 03 f3 03",
+          "nrc": null,
+          "ms": 29.8
+        },
+        {
+          "dst": "0x12",
+          "tx": "2c 01 f3 03 45 17 01 02",
+          "rx": "6c 01 f3 03",
+          "nrc": null,
+          "ms": 28.8
+        },
+        {
+          "dst": "0x12",
+          "tx": "22 f3 03",
+          "rx": "62 f3 03 44 a2",
+          "nrc": null,
+          "ms": 30.5
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    },
+    {
+      "kind": "run",
+      "request": "n47.d72.dyn.44BE",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "expected_prefix": "62 f3 03",
+      "signals": {
+        "n47d_soot_meas": 0.09
+      },
+      "frames": [
+        {
+          "dst": "0x12",
+          "tx": "2c 03 f3 03",
+          "rx": "6c 03 f3 03",
+          "nrc": null,
+          "ms": 26.5
+        },
+        {
+          "dst": "0x12",
+          "tx": "2c 01 f3 03 44 be 01 02",
+          "rx": "6c 01 f3 03",
+          "nrc": null,
+          "ms": 30.0
+        },
+        {
+          "dst": "0x12",
+          "tx": "22 f3 03",
+          "rx": "62 f3 03 00 06",
+          "nrc": null,
+          "ms": 30.1
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    },
+    {
+      "kind": "run",
+      "request": "n47.d72.dyn.44C1",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "expected_prefix": "62 f3 03",
+      "signals": {
+        "n47d_soot_model": 0.1
+      },
+      "frames": [
+        {
+          "dst": "0x12",
+          "tx": "2c 03 f3 03",
+          "rx": "6c 03 f3 03",
+          "nrc": null,
+          "ms": 27.5
+        },
+        {
+          "dst": "0x12",
+          "tx": "2c 01 f3 03 44 c1 01 02",
+          "rx": "6c 01 f3 03",
+          "nrc": null,
+          "ms": 28.8
+        },
+        {
+          "dst": "0x12",
+          "tx": "22 f3 03",
+          "rx": "62 f3 03 00 0a",
+          "nrc": null,
+          "ms": 30.0
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    },
+    {
+      "kind": "run",
+      "request": "n47.d72.dyn.4BC3",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "expected_prefix": "62 f3 03",
+      "signals": {
+        "n47d_engine_temp": 74.06
+      },
+      "frames": [
+        {
+          "dst": "0x12",
+          "tx": "2c 03 f3 03",
+          "rx": "6c 03 f3 03",
+          "nrc": null,
+          "ms": 26.7
+        },
+        {
+          "dst": "0x12",
+          "tx": "2c 01 f3 03 4b c3 01 02",
+          "rx": "6c 01 f3 03",
+          "nrc": null,
+          "ms": 29.8
+        },
+        {
+          "dst": "0x12",
+          "tx": "22 f3 03",
+          "rx": "62 f3 03 0d 90",
+          "nrc": null,
+          "ms": 30.0
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    }
+  ]
+}
