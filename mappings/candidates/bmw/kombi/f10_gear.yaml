@@ -39,13 +39,17 @@ source:
     signal 5SERIES_GEAR_V2 len 8 scalar. Community claim, F-series 5er.
 
 verification:
-  status: candidate
+  status: rejected
   method: >
-    Not yet read on F10-520d-dev. Validate that 0x63 answers 22 D031 and
-    that the byte matches the actual gear (drive through the gears; the
-    value should step 1..8 in Drive, and read a distinct value for
-    N/P/R).
-  vehicle: F10-520d-dev (target, PENDING)
+    Read on F10-520d-dev 2026-08-26 (drive3): 0x63 answers 22 D031 with
+    TWO data bytes (62 D0 31 b0 b1). Byte 0 is NOT the engaged gear - it
+    reads 2 in Park and 1 otherwise (255/0xFF invalid at times), and does
+    NOT step 1..8 with road speed. So the OBDb "5SERIES_GEAR_V2 = byte 0"
+    claim does not hold for this F10's cluster. Byte 0 is kept as a coarse
+    "in Park" indicator; byte 1 (0 in Park) is an UNTESTED candidate for
+    the real gear - logged now so the next drive reveals whether it steps
+    1..8. Also try the EGS 0x18 selector / a DID scan (n47-next-session).
+  vehicle: F10-520d-dev (byte0 rejected as gear; byte1 pending)
 
 ecu:
   family: kombi
@@ -65,10 +69,19 @@ requests:
   kombi.gear.D031:
     did: 0xD031
     polling: {class: fast}
-    response: {data_length: 1}
+    response: {data_length: 2}
     signals:
-      gear:
-        label: Gear
+      # byte 0: REJECTED as gear (2 in Park, 1 otherwise). Kept as a
+      # coarse park indicator only.
+      park_state:
+        label: Park state (2=P)
+        unit: ""
+        display: {digits: 0, min: 0, max: 2}
+        decode: {type: uint8, offset: 0, round: 0}
+      # byte 1: UNTESTED candidate for the real gear. If the next drive
+      # shows this stepping 1..8 with speed, rename to `gear` and verify.
+      gear_b1:
+        label: Gear? (D031 byte1)
         unit: ""
         display: {digits: 0, min: 0, max: 8}
-        decode: {type: uint8, round: 0}
+        decode: {type: uint8, offset: 1, round: 0}
