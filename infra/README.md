@@ -89,5 +89,34 @@ WHERE channel_raw = 'some_raw_key';
 
 Query one car at a time — cross-vehicle mixing is noise. `ASOF JOIN`
 assembles operating points from the narrow table; per-condition quantile
-baselines + weekly residual trends give drift detection. Design notes and
-recipes will live in `docs/ANALYTICS_DESIGN.md`.
+baselines + weekly residual trends give drift detection.
+
+`analysis/clickhouse/insights.sql` is a ready battery (session inventory,
+DPF ΔP-vs-flow baseline, boost/rail tracking, soot accumulation, decode
+cross-check, data quality). Run it:
+
+```bash
+clickhouse-client --param_vin=<VIN> --multiquery < analysis/clickhouse/insights.sql
+```
+
+## Grafana (visual dashboards)
+
+The compose stack includes Grafana, provisioned from git:
+`grafana/provisioning/` wires the ClickHouse datasource (password from
+`CH_PASS`, nothing committed) and loads every dashboard under
+`grafana/dashboards/` — currently `f10-health.json` (the vehicle-health
+panels: DPF ΔP-vs-flow, boost tracking, soot accumulation, decode
+cross-check, data quality). Pick the car with the `Vehicle` (VIN)
+variable.
+
+Set `GF_ADMIN_PASSWORD` in `.env`, then `docker compose up -d`. Grafana
+binds to `127.0.0.1:3000` by default — reach it securely over an SSH
+tunnel (no TLS needed):
+
+```bash
+ssh -L 3000:localhost:3000 root@<vps>      # then open http://localhost:3000
+```
+
+Log in as `admin` with your `GF_ADMIN_PASSWORD`. Set `GF_BIND=0.0.0.0`
+only behind a TLS reverse proxy. Dashboards live in git — edit the JSON
+and redeploy, or edit in the UI and export back to the file.

@@ -1,0 +1,111 @@
+{
+  "uid": "f10-health",
+  "title": "F10 vehicle health",
+  "tags": ["f10", "telemetry"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-30d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "vin",
+        "label": "Vehicle",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+        "query": "SELECT DISTINCT vehicle_id FROM telemetry.samples WHERE vehicle_id != 'DEMO0000000000000' ORDER BY vehicle_id",
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Drives (sessions)",
+      "type": "table",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT formatDateTime(min(ts),'%Y-%m-%d %H:%M') AS started, round(dateDiff('second',min(ts),max(ts))/60.0,1) AS minutes, count() AS samples, round(max(if(channel='vehicle.speed',value,0)),0) AS max_kmh, round(max(if(channel='engine.rpm',value,0)),0) AS max_rpm FROM telemetry.samples WHERE vehicle_id='$vin' GROUP BY session_id HAVING samples>2000 ORDER BY started DESC" } ]
+    },
+    {
+      "id": 2,
+      "title": "DPF ΔP vs exhaust flow (restriction baseline)",
+      "description": "Median differential pressure binned by engine MAF. Trend this up over months = filter loading up at comparable flow.",
+      "type": "barchart",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "continuous-BlYlRd" } }, "overrides": [] },
+      "options": { "xField": "maf_gps", "orientation": "auto", "showValue": "auto" },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT toString(round(maf,-1)) AS maf_gps, round(quantile(0.5)(dp),1) AS median_dP_hPa FROM (SELECT a.value AS dp, b.value AS maf FROM (SELECT vehicle_id, ts, value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.differential_pressure') a ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf') b ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts) WHERE maf IS NOT NULL GROUP BY maf_gps ORDER BY toFloat64(maf_gps)" } ]
+    },
+    {
+      "id": 3,
+      "title": "Boost tracking |actual − setpoint| by RPM",
+      "description": "Mean absolute boost deviation, conditioned on RPM. A growing baseline = actuator/wastegate wear.",
+      "type": "barchart",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "xField": "rpm_band", "orientation": "auto", "showValue": "auto" },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT multiIf(rpm<1000,'0 idle',rpm<1800,'1 1000-1800',rpm<2600,'2 1800-2600','3 2600+') AS rpm_band, round(avg(abs(dev)),1) AS mean_abs_dev_hPa FROM (SELECT a.value-b.value AS dev, c.value AS rpm FROM (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.actual') a ASOF LEFT JOIN (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.setpoint') b ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts ASOF LEFT JOIN (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.rpm') c ON a.vehicle_id=c.vehicle_id AND a.ts>=c.ts) WHERE rpm IS NOT NULL GROUP BY rpm_band ORDER BY rpm_band" } ]
+    },
+    {
+      "id": 4,
+      "title": "DPF soot vs distance since regen",
+      "description": "Soot accumulation. The slope (g/km) is a DPF-health baseline; a steeper slope over time points at injectors/EGR/combustion.",
+      "type": "barchart",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 17 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "xField": "dist_km", "orientation": "auto", "showValue": "never" },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT toString(round(dist,0)) AS dist_km, round(quantile(0.5)(soot),2) AS soot_g FROM (SELECT a.value AS dist, b.value AS soot FROM (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.distance_since_regeneration') a ASOF LEFT JOIN (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured') b ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts) WHERE soot IS NOT NULL GROUP BY dist_km ORDER BY toFloat64(dist_km)" } ]
+    },
+    {
+      "id": 5,
+      "title": "DDE vs OBD coolant agreement per drive",
+      "description": "Mean |difference| between the proprietary and standard coolant reads. Should stay near 0; drifting up flags a sensor.",
+      "type": "table",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 17 },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT formatDateTime(min_ts,'%Y-%m-%d %H:%M') AS drive, mean_abs_diff_degC, pairs FROM (SELECT session_id, min(a.ts) AS min_ts, round(avg(abs(a.value-b.value)),3) AS mean_abs_diff_degC, count() AS pairs FROM (SELECT vehicle_id,session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='n47d_coolant') a ASOF LEFT JOIN (SELECT vehicle_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='coolant') b ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts GROUP BY session_id HAVING pairs>20) ORDER BY min_ts DESC" } ]
+    },
+    {
+      "id": 6,
+      "title": "OBD MAP saturated (255 kPa)",
+      "type": "stat",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 10 } ] } }, "overrides": [] },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT 100.0*countIf(value>=255)/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.manifold_pressure.absolute'" } ]
+    },
+    {
+      "id": 7,
+      "title": "Lambda at 2.0 sentinel (no-value)",
+      "type": "stat",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 40 } ] } }, "overrides": [] },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT 100.0*countIf(value>=2.0)/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.lambda'" } ]
+    },
+    {
+      "id": 8,
+      "title": "Total samples",
+      "type": "stat",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "refId": "A", "queryType": "table",
+        "rawSql": "SELECT count() AS samples FROM telemetry.samples WHERE vehicle_id='$vin'" } ]
+    }
+  ]
+}
