@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""
+session_report.py - cold-start + drive analysis of one recorded run.
+
+    python3 -m analysis.session_report --db local/sessions/foo.db
+    python3 -m analysis.session_report --db foo.db --run 7 --out validation-runs
+
+Read-only on the database. VIN is never emitted. Produces, under
+`--out/<timestamp>-session/`:
+    report.md   human-readable: warm-up, cross-checks, load behaviour, DPF,
+                data quality, per-channel coverage
+    summary.json machine copy of the computed metrics
+    curves.html self-contained SVG plots (warm-up + drive), no dependencies
+
+This is roadmap Stage 3's quick win: descriptive stats + the first
+proprietary-vs-OBD cross-checks over a whole session, from data the
+runtime already records. It makes no baseline claims across sessions yet.
+"""
+
+import argparse
+import json
+import os
+import sqlite3
+import time
+from typing import Dict, List, Optional, Tuple
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Cross-check pairs: (proprietary key, OBD key, scale to apply to OBD to
+# match the proprietary unit, label). The DDE dynamic reads and the
+# standard SAE PIDs measure the same physical quantity two independent
+# ways; agreement validates the decode path live, per quantity.
+CROSSCHECKS = [
+    ("n47d_coolant", "coolant", 1.0, "coolant °C"),
+    ("n47d_boost_act", "map", 10.0, "manifold/boost (hPa vs kPa×10)"),
+    ("n47d_ambient_press", "baro", 10.0, "ambient (hPa vs kPa×10)"),
+]
+
+# (actual, setpoint, label) - deviation is a health signal.
+SETPOINT_PAIRS = [
+    ("n47d_boost_act", "n47d_boost_set", "boost"),
+    ("n47d_rail_act", "n47d_rail_set", "rail pressure"),
+]
+
+DRIVING_SPEED = 3.0   # km/h; above this the car is moving
+WARM_C = 80.0         # coolant target for warm-up timing
+
+
+# ----------------------------------------------------------- loading
+
+
+def load_run(db_path: str, run_id: Optional[int]) -> Dict:
+    """Pull one run's series out of the DB, read-only. Never returns VIN."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+    try:
+        if run_id is None:
+            row = db.execute("SELECT MAX(id) FROM runs").fetchone()
+            run_id = row[0] if row else None
+
+        if run_id is None:
+            raise SystemExit("no runs in this database")
+
+        meta = db.execute(
+            "SELECT started_at, ended_at, ecu, ecu_addr FROM runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+
+        if meta is None:
+            raise SystemExit(f"no run {run_id}")
+
+        rows = db.execute(
+            "SELECT p.key, s.ts, s.value FROM samples s "
+            "JOIN params p ON p.id = s.param_id WHERE s.run_id=? ORDER BY s.ts",
+            (run_id,),
+        ).fetchall()
+
+        params = db.execute(
+            "SELECT p.key, p.unit, p.pid FROM params p "
+            "WHERE p.id IN (SELECT DISTINCT param_id FROM samples WHERE run_id=?)",
+            (run_id,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    series: Dict[str, List[Tuple[float, float]]] = {}
+
+    for key, ts, value in rows:
+        series.setdefault(key, []).append((ts, value))
+
+    started, ended, ecu, ecu_addr = meta
+
+    return {
+        "run_id": run_id,
+        "started": started,
+        "ended": ended,
+        "ecu": ecu,                       # NOT the VIN
+        "ecu_addr": ecu_addr,
+        "series": series,
+        "units": {k: u for k, u, _ in params},
+        "is_obd": {k: (pid is not None) for k, _, pid in params},
+    }
+
+
+# ----------------------------------------------------------- helpers
+
+
+def _nearest(series: List[Tuple[float, float]], t: float) -> Optional[float]:
+    if not series:
+        return None
+
+    best, bd = None, 1e18
+
+    for ts, v in series:
+        d = abs(ts - t)
+
+        if d < bd:
+            bd, best = d, v
+
+    return best
+
+
+def _stats(values: List[float]) -> Dict:
+    if not values:
+        return {}
+
+    s = sorted(values)
+    n = len(s)
+    mean = sum(s) / n
+
+    def pct(p):
+        return s[min(n - 1, int(p * n))]
+
+    return {
+        "n": n, "min": round(s[0], 3), "max": round(s[-1], 3),
+        "mean": round(mean, 3), "p50": round(pct(0.5), 3),
+        "p95": round(pct(0.95), 3),
+    }
+
+
+def elapsed(series, t0):
+    return [(ts - t0, v) for ts, v in series]
+
+
+# ----------------------------------------------------------- analyses
+
+
+def warmup(run: Dict) -> Dict:
+    """Coolant/oil rise from start; time to warm; oil-lags-coolant."""
+    t0 = run["started"]
+    out: Dict = {}
+
+    for key in ("coolant", "n47d_oil_temp", "n47d_engine_temp",
+                "n47d_charge_air_temp"):
+        s = run["series"].get(key)
+
+        if not s:
+            continue
+
+        e = elapsed(s, t0)
+        start_v = e[0][1]
+        end_v = e[-1][1]
+        warmed = next((t for t, v in e if v >= WARM_C), None)
+        out[key] = {
+            "start": round(start_v, 1), "end": round(end_v, 1),
+            "min": round(min(v for _, v in e), 1),
+            "max": round(max(v for _, v in e), 1),
+            "seconds_to_80C": round(warmed, 1) if warmed is not None else None,
+            "unit": run["units"].get(key, "°C"),
+        }
+
+    # oil should lag coolant during warm-up: at the coolant-hits-80 time,
+    # oil is typically cooler.
+    cool = run["series"].get("coolant")
+    oil = run["series"].get("n47d_oil_temp")
+
+    if cool and oil:
+        warmed_t = next((ts for ts, v in cool if v >= WARM_C), None)
+
+        if warmed_t is not None:
+            out["oil_vs_coolant_at_coolant80"] = {
+                "coolant": WARM_C,
+                "oil": round(_nearest(oil, warmed_t), 1),
+            }
+
+    return out
+
+
+def crosschecks(run: Dict) -> List[Dict]:
+    """Proprietary DDE read vs the standard OBD PID, sampled together."""
+    out = []
+
+    for prop_key, obd_key, scale, label in CROSSCHECKS:
+        prop = run["series"].get(prop_key)
+        obd = run["series"].get(obd_key)
+
+        if not prop or not obd:
+            continue
+
+        diffs = []
+
+        for ts, pv in prop:
+            ov = _nearest(obd, ts)
+
+            if ov is None:
+                continue
+
+            diffs.append(pv - ov * scale)
+
+        if not diffs:
+            continue
+
+        mad = sum(abs(d) for d in diffs) / len(diffs)
+        out.append({
+            "label": label, "proprietary": prop_key, "obd": obd_key,
+            "pairs": len(diffs),
+            "mean_abs_diff": round(mad, 2),
+            "max_abs_diff": round(max(abs(d) for d in diffs), 2),
+            "agree": mad < 3.0,      # within a few units/percent
+        })
+
+    return out
+
+
+def phase_mask(run: Dict) -> Dict:
+    """Driving (speed>threshold) vs idle, from the OBD speed channel."""
+    speed = run["series"].get("speed")
+
+    if not speed:
+        return {"has_speed": False}
+
+    driving = [(ts, v) for ts, v in speed if v > DRIVING_SPEED]
+    idle = [(ts, v) for ts, v in speed if v <= DRIVING_SPEED]
+    moving_span = None
+
+    if driving:
+        moving_span = (driving[0][0], driving[-1][0])
+
+    return {
+        "has_speed": True,
+        "driving_samples": len(driving),
+        "idle_samples": len(idle),
+        "max_speed": round(max(v for _, v in speed), 1),
+        "moving_span": moving_span,
+    }
+
+
+def _in_span(series, span):
+    if span is None:
+        return series
+    a, b = span
+    return [(ts, v) for ts, v in series if a <= ts <= b]
+
+
+def load_behaviour(run: Dict, span) -> Dict:
+    """During the driving phase: ranges + actual-vs-setpoint deviation."""
+    out: Dict = {"ranges": {}, "setpoint_tracking": []}
+
+    for key in ("rpm", "map", "n47d_boost_act", "n47d_rail_act",
+                "n47d_maf_per_cyl", "n47d_pedal", "load", "speed",
+                "maf", "rail"):
+        s = _in_span(run["series"].get(key, []), span)
+
+        if s:
+            out["ranges"][key] = _stats([v for _, v in s])
+
+    for act_key, set_key, label in SETPOINT_PAIRS:
+        act = _in_span(run["series"].get(act_key, []), span)
+        setp = run["series"].get(set_key, [])
+
+        if not act or not setp:
+            continue
+
+        devs = [av - _nearest(setp, ts) for ts, av in act
+                if _nearest(setp, ts) is not None]
+
+        if devs:
+            out["setpoint_tracking"].append({
+                "label": label, "actual": act_key, "setpoint": set_key,
+                "pairs": len(devs),
+                "mean_abs_deviation": round(
+                    sum(abs(d) for d in devs) / len(devs), 1),
+                "max_abs_deviation": round(max(abs(d) for d in devs), 1),
+            })
+
+    return out
+
+
+def dpf(run: Dict) -> Dict:
+    meas = run["series"].get("n47d_soot_meas")
+    model = run["series"].get("n47d_soot_model")
+    out: Dict = {}
+
+    if meas:
+        out["measured"] = _stats([v for _, v in meas])
+
+    if model:
+        out["modelled"] = _stats([v for _, v in model])
+
+    if meas and model:
+        diffs = [mv - _nearest(model, ts) for ts, mv in meas
+                 if _nearest(model, ts) is not None]
+
+        if diffs:
+            out["mean_abs_diff"] = round(
+                sum(abs(d) for d in diffs) / len(diffs), 3)
+
+    return out
+
+
+def quality(run: Dict) -> List[Dict]:
+    """Per-channel coverage + saturation/gap flags."""
+    out = []
+
+    for key, s in sorted(run["series"].items()):
+        ts = [t for t, _ in s]
+        vals = [v for _, v in s]
+        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        # crude saturation flag: many samples pinned at the max value
+        vmax = max(vals)
+        pinned = sum(1 for v in vals if v == vmax)
+        out.append({
+            "key": key,
+            "obd": run["is_obd"].get(key, False),
+            "samples": len(s),
+            "max_gap_s": round(max(gaps), 1) if gaps else None,
+            "unit": run["units"].get(key, ""),
+            "pinned_at_max": pinned if pinned > max(3, 0.2 * len(vals)) else 0,
+        })
+
+    return out
+
+
+# ----------------------------------------------------------- rendering
+
+
+def _svg_line(series, t0, w=560, h=120, color="#3987e5"):
+    if len(series) < 2:
+        return ""
+
+    xs = [ts - t0 for ts, _ in series]
+    ys = [v for _, v in series]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+
+    if x1 - x0 < 1e-6:
+        x1 = x0 + 1
+    if y1 - y0 < 1e-6:
+        y1 = y0 + 1
+
+    def px(x):
+        return 40 + (w - 50) * (x - x0) / (x1 - x0)
+
+    def py(y):
+        return 10 + (h - 30) * (1 - (y - y0) / (y1 - y0))
+
+    pts = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in zip(xs, ys))
+    return (
+        f'<polyline fill="none" stroke="{color}" stroke-width="1.6" '
+        f'points="{pts}"/>'
+        f'<text x="2" y="14" fill="#8b97ab" font-size="10">{y1:.0f}</text>'
+        f'<text x="2" y="{h-12}" fill="#8b97ab" font-size="10">{y0:.0f}</text>'
+    )
+
+
+def render_html(run: Dict) -> str:
+    t0 = run["started"]
+    blocks = []
+    charts = [
+        ("Warm-up — coolant (OBD) & oil (DDE)",
+         [("coolant", "#e66767"), ("n47d_oil_temp", "#c98500"),
+          ("n47d_engine_temp", "#3987e5")]),
+        ("Drive — RPM", [("rpm", "#3987e5")]),
+        ("Drive — boost actual (hPa)", [("n47d_boost_act", "#199e70")]),
+        ("Drive — rail actual (bar)", [("n47d_rail_act", "#9085e9")]),
+    ]
+
+    for title, keys in charts:
+        lines = ""
+
+        for key, color in keys:
+            s = run["series"].get(key)
+
+            if s:
+                lines += _svg_line(s, t0, color=color)
+
+        if lines:
+            legend = "  ".join(f'<span style="color:{c}">■ {k}</span>'
+                               for k, c in keys if run["series"].get(k))
+            blocks.append(
+                f'<h3>{title}</h3><div class="legend">{legend}</div>'
+                f'<svg viewBox="0 0 560 120" width="100%">{lines}</svg>'
+            )
+
+    body = "\n".join(blocks)
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Session curves</title><style>
+body{{background:#0b0e13;color:#e6edf7;font:13px system-ui;padding:16px;max-width:640px}}
+h3{{font-size:13px;margin:18px 0 2px}} .legend{{font-size:11px;color:#8b97ab;margin-bottom:4px}}
+svg{{background:#141922;border:1px solid #263041;border-radius:8px}}
+</style></head><body><h1>Session {run['run_id']} curves</h1>{body}</body></html>"""
+
+
+def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
+    dur = (run["ended"] or run["series"] and max(
+        t for s in run["series"].values() for t, _ in s)) - run["started"]
+    L = [
+        f"# Session report — run {run['run_id']}",
+        "",
+        f"- ECU: {run['ecu']}  (addr {run['ecu_addr']})",
+        f"- Duration: {dur/60:.1f} min, "
+        f"{sum(len(s) for s in run['series'].values())} samples across "
+        f"{len(run['series'])} channels",
+        f"- Started (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(run['started']))}",
+        "",
+        "## Cold-start warm-up",
+        "",
+    ]
+
+    if wu:
+        L.append("| channel | start | max | →80 °C | unit |")
+        L.append("|---|---|---|---|---|")
+
+        for key, d in wu.items():
+            if not isinstance(d, dict) or "start" not in d:
+                continue
+
+            t80 = f"{d['seconds_to_80C']:.0f}s" if d.get("seconds_to_80C") else "—"
+            L.append(f"| {key} | {d['start']} | {d['max']} | {t80} | {d['unit']} |")
+
+        ovc = wu.get("oil_vs_coolant_at_coolant80")
+
+        if ovc:
+            L.append("")
+            L.append(f"- When coolant reached 80 °C, oil was **{ovc['oil']} °C** "
+                     "(oil lags coolant — the expected warm-up signature).")
+    else:
+        L.append("_no temperature channels captured_")
+
+    L += ["", "## Proprietary DDE vs standard OBD (live cross-check)", ""]
+
+    if cc:
+        L.append("| quantity | pairs | mean |Δ| | max |Δ| | agree |")
+        L.append("|---|---|---|---|---|")
+
+        for c in cc:
+            L.append(f"| {c['label']} | {c['pairs']} | {c['mean_abs_diff']} | "
+                     f"{c['max_abs_diff']} | {'✅' if c['agree'] else '⚠️'} |")
+    else:
+        L.append("_no cross-check pairs available_")
+
+    L += ["", "## Drive / load behaviour", ""]
+
+    if ph.get("has_speed"):
+        L.append(f"- max speed {ph['max_speed']} km/h; "
+                 f"{ph['driving_samples']} driving / {ph['idle_samples']} idle "
+                 "samples (speed>3 km/h = driving).")
+
+    if lb.get("setpoint_tracking"):
+        L.append("")
+        L.append("| loop | pairs | mean |dev| | max |dev| |")
+        L.append("|---|---|---|---|")
+
+        for t in lb["setpoint_tracking"]:
+            L.append(f"| {t['label']} (act−set) | {t['pairs']} | "
+                     f"{t['mean_abs_deviation']} | {t['max_abs_deviation']} |")
+
+    if lb.get("ranges"):
+        L.append("")
+        L.append("| channel | min | max | mean | p95 |")
+        L.append("|---|---|---|---|---|")
+
+        for key, s in lb["ranges"].items():
+            if s:
+                L.append(f"| {key} | {s['min']} | {s['max']} | {s['mean']} | "
+                         f"{s['p95']} |")
+
+    L += ["", "## DPF", ""]
+
+    if dp:
+        if dp.get("measured"):
+            L.append(f"- soot measured: {dp['measured']['min']}–"
+                     f"{dp['measured']['max']} g")
+
+        if dp.get("modelled"):
+            L.append(f"- soot modelled: {dp['modelled']['min']}–"
+                     f"{dp['modelled']['max']} g")
+
+        if "mean_abs_diff" in dp:
+            L.append(f"- measured vs modelled mean |Δ|: {dp['mean_abs_diff']} g "
+                     "(the two independent estimates should agree)")
+    else:
+        L.append("_no DPF channels captured_")
+
+    L += ["", "## Data quality / coverage", "",
+          "| channel | src | samples | max gap | pinned@max |",
+          "|---|---|---|---|---|"]
+
+    for q in ql:
+        src = "OBD" if q["obd"] else "DDE"
+        pin = q["pinned_at_max"] or ""
+        L.append(f"| {q['key']} | {src} | {q['samples']} | "
+                 f"{q['max_gap_s']}s | {pin} |")
+
+    L += ["", "---",
+          "_Read-only analysis; no baselines across sessions claimed yet._",
+          ""]
+
+    return "\n".join(L)
+
+
+# ----------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="cold-start + drive session report")
+    ap.add_argument("--db", required=True)
+    ap.add_argument("--run", type=int, default=None)
+    ap.add_argument("--out", default=os.path.join(_ROOT, "drive-sessions"))
+    args = ap.parse_args()
+
+    run = load_run(args.db, args.run)
+
+    wu = warmup(run)
+    cc = crosschecks(run)
+    ph = phase_mask(run)
+    lb = load_behaviour(run, ph.get("moving_span"))
+    dp = dpf(run)
+    ql = quality(run)
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    out = os.path.join(args.out, f"{stamp}-session")
+    os.makedirs(out, exist_ok=True)
+
+    md = render_markdown(run, wu, cc, ph, lb, dp, ql)
+
+    with open(os.path.join(out, "report.md"), "w") as fh:
+        fh.write(md)
+
+    with open(os.path.join(out, "summary.json"), "w") as fh:
+        json.dump({
+            "run_id": run["run_id"], "ecu": run["ecu"],
+            "warmup": wu, "crosschecks": cc, "phase": ph,
+            "load": lb, "dpf": dp, "quality": ql,
+        }, fh, indent=2)
+
+    with open(os.path.join(out, "curves.html"), "w") as fh:
+        fh.write(render_html(run))
+
+    print(md)
+    print(f"\n[+] written to {os.path.relpath(out, _ROOT)}/")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
