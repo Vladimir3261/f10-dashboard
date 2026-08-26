@@ -1095,9 +1095,19 @@ def poll_loop(
             if ip is None:
                 tel.update(status="discovering vehicle", connected=False)
 
+                #
+                # Re-detect the link-local interface each attempt: the
+                # ENET cable may be plugged in after the process starts
+                # (e.g. logging armed before the car is connected), and
+                # the 169.254.x.x address only appears once it is.
+                #
+                if not local_ip:
+                    local_ip = args.local_ip or find_link_local_ip()
+
                 if not local_ip:
                     raise HsfzError(
-                        "no 169.254.x.x interface found - pass --local-ip"
+                        "no 169.254.x.x interface found yet - waiting for "
+                        "the ENET cable (or pass --local-ip)"
                     )
 
                 ip, vin = discover(local_ip)
