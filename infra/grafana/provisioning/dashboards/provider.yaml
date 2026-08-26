@@ -1,0 +1,16 @@
+apiVersion: 1
+
+# Load every dashboard JSON under /var/lib/grafana/dashboards (mounted
+# from infra/grafana/dashboards) so they are versioned in git and appear
+# automatically on deploy.
+providers:
+  - name: f10
+    orgId: 1
+    folder: F10
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
