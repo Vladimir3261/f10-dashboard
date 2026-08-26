@@ -1495,6 +1495,11 @@ PAGE = r"""
     <div class="chip"><b id="hz">0</b> Hz</div>
     <div class="chip"><b id="lat">0</b> ms</div>
     <div class="chip">logged <b id="rows">0</b></div>
+    <div class="chip" id="syncchip" title="click to pause/resume sync"
+         style="cursor:pointer">
+      <span id="syncdot" class="dot off"></span>sync
+      <b id="syncstate">-</b><span id="syncpend"></span>
+    </div>
   </div>
 </header>
 
@@ -1868,6 +1873,43 @@ WINDOWS.forEach(([label, secs]) => {
 });
 el("run").onchange = e => { runId = parseInt(e.target.value,10); loadHistory(); };
 el("reload").onclick = () => { loadRuns(); loadHistory(); };
+
+/* ---------------------------------------------------------- sync agent */
+/* The sync agent (infra/sync/agent.py) runs on this machine and exposes
+   a CORS-enabled control endpoint. The dashboard polls it so sync can be
+   watched and paused during a drive. If the agent is not running the
+   chip just shows "off". This talks to a separate process; live.py's
+   recording path is untouched. */
+const SYNC_BASE = `http://${location.hostname || "localhost"}:8091`;
+let syncEnabled = null;
+async function pollSync() {
+  try {
+    const s = await (await fetch(SYNC_BASE + "/sync/status", {cache: "no-store"})).json();
+    syncEnabled = s.enabled;
+    el("syncdot").className = "dot " + (s.enabled && s.state !== "offline" ? "on" : "off");
+    el("syncstate").textContent = s.state || "-";
+    let pend = 0;
+    for (const k in (s.databases || {})) pend += (s.databases[k].pending || 0);
+    el("syncpend").textContent = pend > 0 ? `  ${pend.toLocaleString()} pending` : "";
+    el("syncchip").title = (s.last_error ? "error: " + s.last_error + " — " : "") +
+      "click to " + (s.enabled ? "pause" : "resume") + " sync";
+  } catch (e) {
+    el("syncdot").className = "dot off";
+    el("syncstate").textContent = "off";
+    el("syncpend").textContent = "";
+    syncEnabled = null;
+  }
+}
+el("syncchip").onclick = async () => {
+  if (syncEnabled === null) return;                 // agent not reachable
+  try {
+    await fetch(SYNC_BASE + (syncEnabled ? "/sync/pause" : "/sync/resume"),
+                {method: "POST"});
+    pollSync();
+  } catch (e) {}
+};
+setInterval(pollSync, 3000);
+pollSync();
 
 const es = new EventSource("/api/stream");
 es.onmessage = async e => {
