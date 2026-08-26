@@ -256,6 +256,24 @@ declaration order. That ordering is load-bearing: the OBD session batches
 PIDs six at a time in list order, so a stable order keeps the traffic
 byte-identical to the pre-mapping implementation.
 
+### Staggered classes
+
+A class marked `stagger: true` fires **one member per firing**,
+round-robin, instead of all its due members at once:
+
+```yaml
+polling_classes:
+  dde_dyn: {every: 5, priority: 2, stagger: true}
+```
+
+This exists for the F303 dynamic reads. Each is a three-frame exchange
+(clear + define + read ≈ 90 ms), so firing thirteen of them on one cycle
+stalls the fast OBD channels for over a second. Staggered, at most one
+proprietary read lands per cycle, bounding the stall to ~90 ms while the
+fast channels keep their cadence; each member is refreshed every
+`members × every` cycles. `stagger` is opt-in — `fast` and `slow` stay
+eager, so the standard-OBD traffic is byte-unchanged.
+
 ---
 
 ## ECU matching and capability

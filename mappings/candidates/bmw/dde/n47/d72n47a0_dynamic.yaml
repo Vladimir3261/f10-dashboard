@@ -82,6 +82,16 @@ defaults:
     service: 0x22
     target: discovered_engine
 
+# Proprietary F303 reads are STAGGERED. Each is a 3-frame exchange
+# (clear + define + read), so firing all of them on one cycle stalls the
+# fast OBD channels for ~1s. `stagger: true` fires ONE member per
+# due-cycle, round-robin, bounding the per-cycle cost to a single read.
+# every=5 at 10 Hz => one proprietary read per ~0.5s; with N channels
+# each refreshes every ~N*0.5s, and the fast loop pauses only ~90ms at a
+# time instead of ~1.2s in a block.
+polling_classes:
+  dde_dyn: {every: 5, priority: 2, stagger: true}
+
 requests:
 
   # -- oil temperature - the pcap-verified exchange -------------------
@@ -96,7 +106,7 @@ requests:
     setup:
       - "2C 03 F3 03"
       - "2C 01 F3 03 45 17 01 02"
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_oil_temp:
@@ -111,7 +121,7 @@ requests:
     setup:
       - "2C 03 F3 03"
       - "2C 01 F3 03 44 BE 01 02"
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_soot_meas:
@@ -126,7 +136,7 @@ requests:
     setup:
       - "2C 03 F3 03"
       - "2C 01 F3 03 44 C1 01 02"
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_soot_model:
@@ -145,7 +155,7 @@ requests:
     setup:
       - "2C 03 F3 03"
       - "2C 01 F3 03 4B C3 01 02"
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_engine_temp:

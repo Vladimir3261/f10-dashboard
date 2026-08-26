@@ -76,11 +76,21 @@ defaults:
     did: 0xF303
     target: discovered_engine
 
+# Proprietary F303 reads are STAGGERED. Each is a 3-frame exchange
+# (clear + define + read), so firing all of them on one cycle stalls the
+# fast OBD channels for ~1s. `stagger: true` fires ONE member per
+# due-cycle, round-robin, bounding the per-cycle cost to a single read.
+# every=5 at 10 Hz => one proprietary read per ~0.5s; with N channels
+# each refreshes every ~N*0.5s, and the fast loop pauses only ~90ms at a
+# time instead of ~1.2s in a block.
+polling_classes:
+  dde_dyn: {every: 5, priority: 2, stagger: true}
+
 requests:
 
   n47.d72.dyn.461B:
     setup: ["2C 03 F3 03", "2C 01 F3 03 46 1B 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_coolant:
@@ -91,7 +101,7 @@ requests:
 
   n47.d72.dyn.4841:
     setup: ["2C 03 F3 03", "2C 01 F3 03 48 41 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_boost_act:
@@ -102,7 +112,7 @@ requests:
 
   n47.d72.dyn.42C8:
     setup: ["2C 03 F3 03", "2C 01 F3 03 42 C8 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_boost_set:
@@ -113,7 +123,7 @@ requests:
 
   n47.d72.dyn.4746:
     setup: ["2C 03 F3 03", "2C 01 F3 03 47 46 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_rail_act:
@@ -124,7 +134,7 @@ requests:
 
   n47.d72.dyn.4715:
     setup: ["2C 03 F3 03", "2C 01 F3 03 47 15 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_rail_set:
@@ -135,7 +145,7 @@ requests:
 
   n47.d72.dyn.47DD:
     setup: ["2C 03 F3 03", "2C 01 F3 03 47 DD 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_maf_per_cyl:
@@ -146,7 +156,7 @@ requests:
 
   n47.d72.dyn.4843:
     setup: ["2C 03 F3 03", "2C 01 F3 03 48 43 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_charge_air_temp:
@@ -157,7 +167,7 @@ requests:
 
   n47.d72.dyn.4CF0:
     setup: ["2C 03 F3 03", "2C 01 F3 03 4C F0 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_ambient_press:
@@ -168,7 +178,7 @@ requests:
 
   n47.d72.dyn.4232:
     setup: ["2C 03 F3 03", "2C 01 F3 03 42 32 01 02"]
-    polling: {class: slow}
+    polling: {class: dde_dyn}
     response: {data_length: 2}
     signals:
       n47d_pedal:

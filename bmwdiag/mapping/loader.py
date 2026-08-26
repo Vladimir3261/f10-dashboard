@@ -939,6 +939,7 @@ def _polling_classes(raw: Any, source: str, path: str) -> Tuple[PollingClassDef,
             value=value,
             priority=_as_int(spec.get("priority", index), source,
                              f"{path}.{name}.priority"),
+            stagger=bool(spec.get("stagger", False)),
         ))
 
     return tuple(out)

@@ -68,6 +68,8 @@ class PollingPlan:
         self.classes = classes if classes is not None else resolve_classes()
         self.requests: List[RequestDef] = list(requests)
         self._last: Dict[str, float] = {}
+        #: Round-robin cursor per staggered class.
+        self._rotation: Dict[str, int] = {}
 
         for request in self.requests:
             if request.polling_class not in self.classes:
@@ -102,6 +104,10 @@ class PollingPlan:
     def due(self, cycle: int, now: Optional[float] = None) -> List[RequestDef]:
         """Requests that should be sent this iteration."""
         out: List[RequestDef] = []
+        #: Members of a staggered class that are due this cycle, resolved
+        #: to a single round-robin pick after the eager pass so ordering
+        #: and the byte-pinned OBD behaviour are untouched.
+        staggered: Dict[str, List[RequestDef]] = {}
 
         for request in self.requests:
             cls = self.classes[request.polling_class]
@@ -109,7 +115,12 @@ class PollingPlan:
             if cls.kind == "cycles":
                 every = max(1, int(cls.value))
 
-                if cycle % every == 0:
+                if cycle % every != 0:
+                    continue
+
+                if cls.stagger:
+                    staggered.setdefault(cls.name, []).append(request)
+                else:
                     out.append(request)
 
                 continue
@@ -129,5 +140,16 @@ class PollingPlan:
             if last is None or now - last >= period:
                 self._last[request.id] = now
                 out.append(request)
+
+        #
+        # One member per staggered class per firing, cycling through them
+        # in declaration order. `self.requests` is already priority-sorted,
+        # so members come out in a stable order and the cursor advances
+        # only on cycles the class actually fires.
+        #
+        for name, members in staggered.items():
+            cursor = self._rotation.get(name, 0)
+            out.append(members[cursor % len(members)])
+            self._rotation[name] = cursor + 1
 
         return out
