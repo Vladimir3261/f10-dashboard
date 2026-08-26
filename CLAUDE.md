@@ -124,12 +124,20 @@ mappings/
 research/                   offline import/evidence pipeline + reports
   reports/                  source audit, coverage, conflicts, legal, on-car results,
                             n47-next-session (the running to-do)
+analysis/                   read-only session analytics (Stage 3): warm-up, cross-
+                            checks, load, DPF, quality -> report.md/json + curves.html
+infra/                      the ClickHouse lake + telemetry sync (deploy on a VPS)
+  clickhouse/init/          schema: narrow samples (VIN=vehicle_id), sessions, vehicles
+  ingest/                   the only writer into CH; auth + server-side normalization
+  sync/                     fault-tolerant local agent (reads SQLite RO, ships batches)
+  common/wire.py            columnar + LZMA batch format (~4 bytes/sample)
 tools/                      read-only research + validation (egs.py, export_json.py,
                             validate_candidate.py)
 validation-runs/            on-car artifacts, VIN-redacted, one dir per run
-docs/                       MAPPING_ARCHITECTURE.md, MAPPING_RESEARCH.md
+drive-sessions/             analysis output (VIN-redacted), one dir per analysed run
+docs/                       MAPPING_ARCHITECTURE.md, MAPPING_RESEARCH.md, ROADMAP.md
 local/                      gitignored: VEHICLES.md (VIN), captures, raw run copies,
-                            research source cache, telemetry.db
+                            research source cache, telemetry.db, sessions/, sync-state
 ```
 
 Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and

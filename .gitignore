@@ -64,3 +64,9 @@ coverage.xml
 ._*
 Thumbs.db
 desktop.ini
+
+# ------------------------------------------------------------ infra secrets
+# Deployment secrets and local sync config/state — never committed.
+/infra/.env
+/infra/sync/config.json
+/local/sync-state.json

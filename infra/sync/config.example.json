@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to infra/sync/config.json (gitignored) and edit. Every field can also be overridden by an env var SYNC_<UPPERCASE_KEY>.",
+
+  "server_url": "https://telemetry.example.com",
+  "token": "the-same-long-random-token-as-INGEST_TOKEN",
+
+  "databases": [
+    "telemetry.db",
+    "local/sessions/*.db"
+  ],
+
+  "state_file": "local/sync-state.json",
+  "batch_rows": 5000,
+  "idle_interval": 5.0,
+  "control_port": 8091,
+  "mapping_ver": "",
+
+  "connect_timeout": 10.0,
+  "read_timeout": 60.0,
+  "max_backoff": 60.0,
+  "enabled": true
+}

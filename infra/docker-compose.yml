@@ -1,0 +1,47 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    environment:
+      CLICKHOUSE_USER: ${CH_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CH_PASS:?set CH_PASS in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    # ClickHouse HTTP/native are NOT published to the host: only the
+    # ingest server (same compose network) may reach it.
+    expose:
+      - "8123"
+      - "9000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: infra/ingest/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      INGEST_TOKEN: ${INGEST_TOKEN:?set INGEST_TOKEN in .env}
+      INGEST_PORT: "8090"
+      CH_URL: http://clickhouse:8123
+      CH_USER: ${CH_USER:-default}
+      CH_PASS: ${CH_PASS:?set CH_PASS in .env}
+      CH_DATABASE: telemetry
+    # Publish the ingest port. In production put a TLS reverse proxy
+    # (caddy/traefik/nginx) in front of this - the bearer token must not
+    # cross a mobile network in the clear. See README.
+    ports:
+      - "${INGEST_BIND:-127.0.0.1}:8090:8090"
+
+volumes:
+  ch-data:
