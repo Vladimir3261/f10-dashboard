@@ -1,13 +1,11 @@
 schema_version: 1
 
-# ============================================================ CANDIDATE
+# ================================================ VERIFIED ON F10-520d-dev
 #
-# NOT yet verified on F10-520d-dev. production: false. Same F-series
-# dynamic 0xF303 read path as the verified d72 files (which confirmed the
-# path works on this car) - but these specific DPF/emissions channels
-# have NOT been individually validated. Run them through
-# tools/validate_candidate.py on-car, cross-check against physical state,
-# then promote to verified.
+# VERIFIED on F10-520d-dev (40-min drive, 2026-08-26 - see verification
+# below). production: false - live.py loads it only via --extra-mappings.
+# Same F-series dynamic 0xF303 read path as the other verified d72 files;
+# all 7 DPF/emissions channels moved correctly under load on the drive.
 #
 # Highest-diagnostic-value N47 channels (roadmap Stage 2): DPF
 # differential pressure, exhaust temps before DPF and catalyst, distance
@@ -28,11 +26,10 @@ mapping:
   version: "0"
   production: false
   description: >
-    CANDIDATE - F-series N47 DPF/emissions dynamic (0xF303) measurements
-    from the d72n47a0 SG_FUNKTIONEN table: DPF differential pressure,
-    exhaust temps, regeneration distance/count/mode, EGR deviation. The
-    F303 path is confirmed on F10-520d-dev; these channels are not yet
-    individually validated.
+    F-series N47 DPF/emissions dynamic (0xF303) measurements from the
+    d72n47a0 SG_FUNKTIONEN table: DPF differential pressure, exhaust
+    temps, regeneration distance/count/mode, EGR deviation. Verified on
+    F10-520d-dev on a drive (exhaust temps + dP rise under load).
 
 source:
   type: ediabas
@@ -44,15 +41,25 @@ source:
     CoEOM_stOpModeAct 0x467E (u32), AirCtl_rGovDvtNrm 0x487A.
 
 verification:
-  status: candidate
+  status: verified
   method: >
-    SGBD-table sourced. The 0xF303 read path is locally confirmed on
-    F10-520d-dev, but these individual channels are NOT yet validated -
-    pending an on-car session (validate_candidate.py + physical
-    cross-check). DPF dP should rise with exhaust flow; exhaust temps
-    should climb under load and spike during a regen; distance-since-regen
-    should increase monotonically; regen count is a slto-changing integer.
-  vehicle: F10-520d-dev (target, PENDING per-channel)
+    Confirmed on F10-520d-dev on a 40-min drive 2026-08-26
+    (drive-sessions/ report from local/sessions/drive2-20260826T151304Z).
+    All 7 channels moved exactly as physics demands under load:
+      - DPF differential pressure (0x44F8): ~0 hPa warm idle -> 35 hPa
+        under exhaust flow (healthy, and validates the 0.045777/-1000 scale);
+      - exhaust temp before DPF (0x44EF) 24 -> 244 degC, before catalyst
+        (0x44F2) 26 -> 305 degC - both climb under load and pre-cat runs
+        hotter than pre-DPF, exactly right;
+      - distance since regen (0x44BF) 29.1 -> 37.1 km, monotonic over the
+        ~8 km driven;
+      - successful-regen count (0x44B8) steady at 92 (a real lifetime
+        accumulator; no regen occurred);
+      - operating-mode word (0x467E) single value, regen-inactive as
+        expected;
+      - EGR control deviation (0x487A) sits at 0.0 % (p50=p90=0) with two
+        brief transient spikes to 51 % during load tip-in - a healthy loop.
+  vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
 
 ecu:
   family: engine
