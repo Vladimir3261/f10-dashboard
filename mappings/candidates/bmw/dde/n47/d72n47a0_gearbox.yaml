@@ -1,6 +1,6 @@
 schema_version: 1
 
-# ============================================================ CANDIDATE
+# ================================================ VERIFIED ON F10-520d-dev
 #
 # Gearbox values the DDE (0x12) RECEIVES over the drivetrain bus, read
 # via the proven F-series dynamic 0xF303 path (same as the verified d72
@@ -21,9 +21,9 @@ mapping:
   version: "0"
   production: false
   description: >
-    CANDIDATE - DDE-received gearbox values (oil temp, turbine speed,
-    converter temp) via 0xF303. Same path as the verified d72 files;
-    not yet individually validated on this car.
+    DDE-received gearbox values (oil temp, turbine speed, converter
+    temp) via 0xF303. Verified on F10-520d-dev on a drive (turbine speed
+    ~= engine speed at cruise; gearbox oil warms below coolant).
 
 source:
   type: ediabas
@@ -36,12 +36,20 @@ source:
     Nturb_calc 0x46FA (modellierte Turbinendrehzahl, u16, 0.1 rpm).
 
 verification:
-  status: candidate
+  status: verified
   method: >
-    Not yet validated on F10-520d-dev. Expect gearbox oil temp to warm
-    like engine oil; turbine speed to track rpm/road speed; converter
-    temp to track gearbox oil.
-  vehicle: F10-520d-dev (target, PENDING)
+    Confirmed on F10-520d-dev on a 29-min drive 2026-08-26
+    (local/sessions/drive3-20260826T160132Z):
+      - gearbox oil temp (0x46F0) 64 -> 80 degC, warmed during the drive
+        and stayed below coolant (85-92), i.e. the gearbox runs cooler -
+        correct;
+      - converter-output temp (0x46F2) 62 -> 85 degC, tracked the gearbox
+        oil temp;
+      - turbine speed (0x46ED) 0 -> 2933 rpm, and at cruise (>40 km/h) the
+        average turbine speed 1709 rpm ~= engine 1726 rpm - the torque
+        converter locks up at speed, exactly as a ZF 8HP does. Validates
+        the 0.5 rpm/bit scale.
+  vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
 
 ecu:
   family: engine
