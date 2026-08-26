@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "kind": "run",
+    "started_utc": "20260826T163504Z",
+    "tool": "tools/validate_candidate.py",
+    "read_only": true,
+    "allowlist": [
+      "0x1",
+      "0x19",
+      "0x22",
+      "0x2c",
+      "0x3e",
+      "0x9"
+    ],
+    "argv": [
+      "run",
+      "mappings/candidates/bmw/egs/f10_transmission.yaml",
+      "--all"
+    ],
+    "host_time_local": "2026-08-26 19:35:04 +0300",
+    "environment": {
+      "gateway": "169.254.65.67",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "supported_pid_count": 30,
+      "mapping_file": "mappings/candidates/bmw/egs/f10_transmission.yaml"
+    }
+  },
+  "records": [
+    {
+      "kind": "run",
+      "request": "egs.selector.DA2E",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x18",
+      "expected_prefix": "62 da 2e",
+      "signals": {
+        "gear_selector": 0.0,
+        "drive_mode": 1.0
+      },
+      "frames": [
+        {
+          "dst": "0x18",
+          "tx": "22 da 2e",
+          "rx": "62 da 2e 00 01",
+          "nrc": null,
+          "ms": 9.1
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    }
+  ]
+}
