@@ -37,6 +37,7 @@ import json
 import os
 import random
 import sqlite3
+import zlib
 import sys
 import threading
 import time
@@ -129,6 +130,21 @@ class State:
 # ----------------------------------------------------------- reading
 
 
+def global_session_id(db_path: str, run_id: int) -> int:
+    """
+    A globally-unique session id from the local run id.
+
+    Local run ids reset to 1 in every SQLite database, so the raw id
+    collides across drives (and across the main db and the per-drive
+    session dbs) once they all land in one ClickHouse table. Namespacing
+    by the database basename keeps each drive distinct and is
+    deterministic, so a re-sync still de-duplicates. The source db name
+    also rides along in the sessions row for traceability.
+    """
+    ns = zlib.crc32(os.path.basename(db_path).encode()) & 0xFFFFFFFF
+    return (ns << 20) | (int(run_id) & 0xFFFFF)
+
+
 def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
     """Unsynced sample rows, resolved to VIN + channel key, read-only."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -147,7 +163,8 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         con.close()
 
     return [
-        {"_rowid": rid, "vehicle_id": vin, "session_id": run_id,
+        {"_rowid": rid, "vehicle_id": vin,
+         "session_id": global_session_id(db_path, run_id),
          "ts": ts, "channel_raw": key, "unit": unit or "", "value": value}
         for rid, vin, run_id, ts, key, unit, value in rows
     ]
@@ -167,7 +184,8 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         con.close()
 
     return [
-        {"_id": rid, "vehicle_id": vin, "session_id": rid,
+        {"_id": rid, "vehicle_id": vin,
+         "session_id": global_session_id(db_path, rid),
          "started": started, "ended": ended, "ecu": ecu or "",
          "ecu_addr": ecu_addr, "gateway": gateway or ""}
         for rid, vin, started, ended, ecu, ecu_addr, gateway in rows
