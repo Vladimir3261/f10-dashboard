@@ -117,6 +117,25 @@ tunnel (no TLS needed):
 ssh -L 3000:localhost:3000 root@<vps>      # then open http://localhost:3000
 ```
 
-Log in as `admin` with your `GF_ADMIN_PASSWORD`. Set `GF_BIND=0.0.0.0`
-only behind a TLS reverse proxy. Dashboards live in git — edit the JSON
-and redeploy, or edit in the UI and export back to the file.
+Log in as `admin` with your `GF_ADMIN_PASSWORD`. Dashboards live in
+git — edit the JSON and redeploy, or edit in the UI and export back to
+the file.
+
+### Exposing Grafana to specific IPs
+
+To reach Grafana directly (no tunnel) from a fixed IP, set
+`GF_BIND=0.0.0.0` and firewall port 3000 to the allowed address. Docker
+publishes ports by inserting its own iptables rules, which **bypass
+ufw** — the correct place to filter is the `DOCKER-USER` chain:
+
+```bash
+WL=<your.ip.here>
+iptables -I DOCKER-USER 1 -p tcp --dport 3000 ! -s $WL -j DROP
+apt-get install -y iptables-persistent && netfilter-persistent save
+```
+
+That drops every packet to :3000 except from `$WL`. Add more `-s` lines
+above the DROP to allow additional IPs. If your IP changes you must
+update the rule. Access is plain HTTP — fine behind an IP allowlist for
+personal use; put a TLS proxy in front if you want encryption on the
+path.
