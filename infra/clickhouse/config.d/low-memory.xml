@@ -1,4 +1,9 @@
 <clickhouse>
+    <!-- Listen on all interfaces so the ingest container can reach CH
+         over the compose network. CH ports are NOT published to the host
+         (only `expose:`), so this stays private to the compose network. -->
+    <listen_host>0.0.0.0</listen_host>
+
     <!-- Tuned for a small single-vehicle VPS (~2 GB RAM). Caps memory so
          ClickHouse cannot OOM the box during a backfill insert. -->
     <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
