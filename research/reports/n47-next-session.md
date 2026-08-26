@@ -15,6 +15,26 @@ proven. This file is the to-do for the next session.
 - Artifacts land in `validation-runs/` (tracked, VIN-redacted) and
   `local/validation-runs-raw/` (gitignored, VIN).
 
+## Ready to validate now — the new DPF/EGR candidate channels
+
+`mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml` (7 channels,
+built 2026-08-26, Stage 2) is source-backed but **not yet validated on
+the car**: DPF differential pressure (0x44F8), exhaust temp before DPF
+(0x44EF) and before catalyst (0x44F2), distance-since-regen (0x44BF,
+u32), successful-regen count (0x44B8), operating-mode status word
+(0x467E), EGR control deviation (0x487A).
+
+    # one at a time, or --all
+    python3 tools/validate_candidate.py run \
+        mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml --all --step
+
+Plausibility to confirm: DPF ΔP a few to tens of hPa warm idle, rising
+with exhaust flow under load; exhaust temps climb under load (and spike
+during a regen); distance-since-regen increases monotonically; regen
+count a stable integer; EGR deviation near 0 % when the loop is happy.
+Promote each to `verified` on success, then add the file to the live
+`--extra-mappings` set. (The polling stagger fix, also Stage 2, is done.)
+
 ## Planned experiments, in priority order
 
 ### 1. Boost under real load (a gentle drive)

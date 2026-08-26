@@ -54,7 +54,7 @@ class ProductionUnchanged(unittest.TestCase):
         registry = MappingRegistry.from_tree(
             support.MAPPINGS, production_only=False
         )
-        self.assertEqual(len(registry.mappings), 6)
+        self.assertEqual(len(registry.mappings), 7)
 
     def test_a_production_decode_spot_check(self):
         mapping = load_file(support.OBD_MAPPING)

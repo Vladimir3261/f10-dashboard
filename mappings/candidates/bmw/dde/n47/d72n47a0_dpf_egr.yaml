@@ -1,0 +1,163 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# NOT yet verified on F10-520d-dev. production: false. Same F-series
+# dynamic 0xF303 read path as the verified d72 files (which confirmed the
+# path works on this car) - but these specific DPF/emissions channels
+# have NOT been individually validated. Run them through
+# tools/validate_candidate.py on-car, cross-check against physical state,
+# then promote to verified.
+#
+# Highest-diagnostic-value N47 channels (roadmap Stage 2): DPF
+# differential pressure, exhaust temps before DPF and catalyst, distance
+# since last regen, successful-regen count, operating-mode status, and
+# EGR control deviation. Each ties to a known N47 wear/failure mode and
+# is a baseline worth trending.
+#
+# Every id + scale is quoted verbatim from the cached d72n47a0
+# SG_FUNKTIONEN table:
+#   emdzej/ediabasx-docs-sgbd @ b644de8f, docs/sgbd/d72n47a0.md
+# Every row: SG_ADR 12, SERVICE 22;2C. Widths per DATENTYP (u16=02,
+# u32/unsigned long=04) - reflected in both the define frame and
+# data_length.
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-dpf-egr
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - F-series N47 DPF/emissions dynamic (0xF303) measurements
+    from the d72n47a0 SG_FUNKTIONEN table: DPF differential pressure,
+    exhaust temps, regeneration distance/count/mode, EGR deviation. The
+    F303 path is confirmed on F10-520d-dev; these channels are not yet
+    individually validated.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Rows: IPDIP 0x44F8, ITAVP1 0x44EF, ITAVO
+    0x44F2, IDSLRE 0x44BF (u32, m), PFltRgn_ctRgnSucEEP_mp 0x44B8,
+    CoEOM_stOpModeAct 0x467E (u32), AirCtl_rGovDvtNrm 0x487A.
+
+verification:
+  status: candidate
+  method: >
+    SGBD-table sourced. The 0xF303 read path is locally confirmed on
+    F10-520d-dev, but these individual channels are NOT yet validated -
+    pending an on-car session (validate_candidate.py + physical
+    cross-check). DPF dP should rise with exhaust flow; exhaust temps
+    should climb under load and spike during a regen; distance-since-regen
+    should increase monotonically; regen count is a slto-changing integer.
+  vehicle: F10-520d-dev (target, PENDING per-channel)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      sgbd_variant: d72n47a0
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+polling_classes:
+  dde_dyn: {every: 5, priority: 2, stagger: true}
+
+requests:
+
+  # -- DPF differential pressure (IPDIP 0x44F8) - THE restriction signal
+  n47.d72.dyn.44F8:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 F8 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_dpf_dp:
+        label: DPF differential pressure
+        unit: hPa
+        display: {digits: 1, min: -50, max: 800}
+        decode: {type: uint16_be, scale: 0.045777, add: -1000.0, round: 2}
+
+  # -- exhaust temp before particulate filter (ITAVP1 0x44EF) ----------
+  n47.d72.dyn.44EF:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 EF 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_exh_temp_pre_dpf:
+        label: Exhaust temp before DPF
+        unit: °C
+        display: {digits: 0, min: -40, max: 900}
+        decode: {type: uint16_be, scale: 0.031281, add: -50.0, round: 1}
+
+  # -- exhaust temp before catalyst (ITAVO 0x44F2) ---------------------
+  n47.d72.dyn.44F2:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 F2 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_exh_temp_pre_cat:
+        label: Exhaust temp before catalyst
+        unit: °C
+        display: {digits: 0, min: -40, max: 900}
+        decode: {type: uint16_be, scale: 0.031281, add: -50.0, round: 1}
+
+  # -- distance since last successful regen (IDSLRE 0x44BF, u32 metres) -
+  #    raw is metres (MUL 1); divided to km for display (unit conversion,
+  #    the underlying 1 m/bit scale is preserved).
+  n47.d72.dyn.44BF:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 BF 01 04"]
+    polling: {class: dde_dyn}
+    response: {data_length: 4}
+    signals:
+      n47d_dist_since_regen:
+        label: Distance since regen
+        unit: km
+        display: {digits: 1, min: 0, max: 2000}
+        decode: {type: uint32_be, divide: 1000.0, round: 2}
+
+  # -- successful-regeneration count (PFltRgn_ctRgnSucEEP_mp 0x44B8) ----
+  n47.d72.dyn.44B8:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 B8 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_regen_count:
+        label: Successful regen count
+        unit: ""
+        display: {digits: 0, min: 0, max: 5000}
+        decode: {type: uint16_be, round: 0}
+
+  # -- operating-mode status bitfield (CoEOM_stOpModeAct 0x467E, u32) ---
+  #    hex status; bit 0x02 is the regeneration-active flag (per the Deep
+  #    OBD ccpage code). Exposed raw; bit decoding is a later step.
+  n47.d72.dyn.467E:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 46 7E 01 04"]
+    polling: {class: dde_dyn}
+    response: {data_length: 4}
+    signals:
+      n47d_opmode:
+        label: Operating mode (status word)
+        unit: ""
+        display: {digits: 0, min: 0, max: 65535}
+        decode: {type: uint32_be, round: 0}
+
+  # -- EGR control deviation (AirCtl_rGovDvtNrm 0x487A) ----------------
+  n47.d72.dyn.487A:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 7A 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_egr_deviation:
+        label: EGR control deviation
+        unit: "%"
+        display: {digits: 1, min: -50, max: 50}
+        decode: {type: uint16_be, scale: 0.012207, round: 2}

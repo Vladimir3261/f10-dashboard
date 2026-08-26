@@ -340,6 +340,12 @@ class PollingClassDef:
     kind: str = "cycles"
     value: float = 1.0
     priority: int = 0
+    #: When true, the class round-robins its members: at most one member
+    #: is due per firing, cycling through them. This bounds the per-cycle
+    #: cost of an expensive group (e.g. the multi-frame F303 dynamic
+    #: reads) to a single member, instead of firing all of them at once
+    #: and stalling the fast channels. Opt-in; fast/slow stay eager.
+    stagger: bool = False
 
     @property
     def period(self) -> Optional[float]:
