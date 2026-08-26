@@ -1,0 +1,10 @@
+<clickhouse>
+    <!-- Tuned for a small single-vehicle VPS (~2 GB RAM). Caps memory so
+         ClickHouse cannot OOM the box during a backfill insert. -->
+    <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>268435456</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <max_concurrent_queries>16</max_concurrent_queries>
+    <background_pool_size>4</background_pool_size>
+    <logger><level>warning</level></logger>
+</clickhouse>

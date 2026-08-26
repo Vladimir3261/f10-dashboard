@@ -2,6 +2,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
     restart: unless-stopped
+    mem_limit: ${CH_MEM_LIMIT:-1400m}
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -11,6 +12,7 @@ services:
     volumes:
       - ch-data:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
     # ClickHouse HTTP/native are NOT published to the host: only the
     # ingest server (same compose network) may reach it.
     expose:
