@@ -1,0 +1,52 @@
+{
+  "meta": {
+    "kind": "run",
+    "started_utc": "20260826T160053Z",
+    "tool": "tools/validate_candidate.py",
+    "read_only": true,
+    "allowlist": [
+      "0x1",
+      "0x19",
+      "0x22",
+      "0x2c",
+      "0x3e",
+      "0x9"
+    ],
+    "argv": [
+      "run",
+      "mappings/candidates/bmw/kombi/f10_gear.yaml",
+      "--all"
+    ],
+    "host_time_local": "2026-08-26 19:00:53 +0300",
+    "environment": {
+      "gateway": "169.254.65.67",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x12",
+      "supported_pid_count": 30,
+      "mapping_file": "mappings/candidates/bmw/kombi/f10_gear.yaml"
+    }
+  },
+  "records": [
+    {
+      "kind": "run",
+      "request": "kombi.gear.D031",
+      "ecu": "0x12 (ECM-EngineControl)",
+      "ecu_addr": "0x63",
+      "expected_prefix": "62 d0 31",
+      "signals": {
+        "gear": 2.0
+      },
+      "frames": [
+        {
+          "dst": "0x63",
+          "tx": "22 d0 31",
+          "rx": "62 d0 31 02 00",
+          "nrc": null,
+          "ms": 15.8
+        }
+      ],
+      "outcome": "decoded",
+      "plausibility_note": "FILL IN: does this value match the physical state? (e.g. oil ~ coolant when cold, soot measured ~ modelled, pressure rises with rpm)"
+    }
+  ]
+}
