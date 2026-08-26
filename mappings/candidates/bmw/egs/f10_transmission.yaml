@@ -1,0 +1,67 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Gear SELECTOR (P/R/N/D) and drive mode from the EGS / transmission ECU
+# (0x18) by static UDS 22 DA2E. A different ECU from the DDE; NOT yet
+# verified on F10-520d-dev. This is the shift-lever position, not the
+# engaged gear number (that is kombi/f10_gear.yaml, 0x63 D031).
+#
+# Source: OBDb/BMW-5-Series @ 9c5aa60 (CC-BY-SA-4.0), command 22 DA2E,
+# ecu 0x18: byte 0 = 5SERIES_GEAR_SHIFT {0 Park, 1 Reverse, 2 Neutral,
+# 3 Drive}; byte 1 = 5SERIES_GEAR (drive mode) {3 Drive, 5 Sport}.
+# Decoded numeric here for logging; the enum meaning is in the labels.
+# Validate: 0x18 answers 22 DA2E, and the bytes match the lever/mode.
+# ======================================================================
+
+mapping:
+  id: candidate-f10-egs-transmission
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)
+    via static UDS 22 DA2E (OBDb). Unverified on this car.
+
+source:
+  type: manual
+  file: OBDb/BMW-5-Series signalsets/v3/default.json
+  notes: >
+    OBDb/BMW-5-Series @ 9c5aa60 (CC-BY-SA-4.0). command 22 DA2E, ecu 0x18:
+    byte0 GEAR_SHIFT {0=P,1=R,2=N,3=D}; byte1 drive mode {3=D,5=Sport}.
+
+verification:
+  status: candidate
+  method: >
+    Not yet read on F10-520d-dev. Confirm 0x18 answers 22 DA2E and that
+    byte 0 tracks the shift lever (P/R/N/D) and byte 1 the drive mode.
+  vehicle: F10-520d-dev (target, PENDING)
+
+ecu:
+  family: transmission
+  target: 0x18
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    target: 0x18
+    timeout: 0.4
+
+requests:
+
+  egs.selector.DA2E:
+    did: 0xDA2E
+    polling: {class: fast}
+    response: {data_length: 2}
+    signals:
+      gear_selector:
+        label: Selector (0=P 1=R 2=N 3=D)
+        unit: ""
+        display: {digits: 0, min: 0, max: 3}
+        decode: {type: uint8, offset: 0, round: 0}
+      drive_mode:
+        label: Drive mode (3=D 5=S)
+        unit: ""
+        display: {digits: 0, min: 0, max: 8}
+        decode: {type: uint8, offset: 1, round: 0}

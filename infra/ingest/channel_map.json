@@ -47,6 +47,12 @@
     "n47d_dist_since_regen": "dpf.distance_since_regeneration",
     "n47d_regen_count": "dpf.regeneration.count",
     "n47d_opmode": "engine.operating_mode",
-    "n47d_egr_deviation": "egr.control_deviation"
+    "n47d_egr_deviation": "egr.control_deviation",
+
+    "gear": "transmission.gear",
+    "gear_selector": "transmission.selector",
+    "n47d_gbx_oil_temp": "transmission.oil_temperature",
+    "n47d_turbine_speed": "transmission.turbine_speed",
+    "n47d_converter_temp": "transmission.converter_temperature.modelled"
   }
 }

@@ -1,0 +1,74 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Current gear, read from the KOMBI / instrument cluster (ECU 0x63) by
+# STATIC UDS 0x22 - a DIFFERENT ECU and a different path from the engine
+# DDE's F303 dynamic reads. NOT yet verified on F10-520d-dev.
+#
+# Source: OBDb/BMW-5-Series @ d6345247 signalsets/v3/default.json -
+# command "22 D031" on ecu 0x63 (rax 0x663), signal 5SERIES_GEAR_V2
+# "Current gear", 8-bit scalar. F10 is in the 5-Series set, but this is
+# an OBDb community claim, unverified on THIS car and this EGS variant
+# (ZF 8HP). Validate with tools/validate_candidate.py:
+#     python3 tools/validate_candidate.py run \
+#         mappings/candidates/bmw/kombi/f10_gear.yaml --all
+# then correlate the value with the actual selected/engaged gear.
+#
+# The ecu.match is intentionally empty: the KOMBI advertises no OBD
+# bitmask and no SGBD variant we probe, so this file is enabled whenever
+# it is loaded via --extra-mappings and simply yields no value if 0x63
+# does not answer 22 D031. A short timeout keeps a silent ECU from
+# stalling the loop. Confirm on-car before trusting the number.
+# ======================================================================
+
+mapping:
+  id: candidate-f10-kombi-gear
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - current gear from the KOMBI (0x63) via static UDS 22 D031
+    (OBDb 5SERIES_GEAR_V2). Different ECU from the DDE; unverified on this
+    car.
+
+source:
+  type: manual
+  file: OBDb/BMW-5-Series signalsets/v3/default.json
+  notes: >
+    OBDb/BMW-5-Series @ 9c5aa60 (CC-BY-SA-4.0). command 22 D031, ecu 0x63,
+    signal 5SERIES_GEAR_V2 len 8 scalar. Community claim, F-series 5er.
+
+verification:
+  status: candidate
+  method: >
+    Not yet read on F10-520d-dev. Validate that 0x63 answers 22 D031 and
+    that the byte matches the actual gear (drive through the gears; the
+    value should step 1..8 in Drive, and read a distinct value for
+    N/P/R).
+  vehicle: F10-520d-dev (target, PENDING)
+
+ecu:
+  family: kombi
+  target: 0x63
+  # no capability match - see header. Reachability is confirmed on-car.
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    target: 0x63
+    timeout: 0.4
+
+requests:
+
+  kombi.gear.D031:
+    did: 0xD031
+    polling: {class: fast}
+    response: {data_length: 1}
+    signals:
+      gear:
+        label: Gear
+        unit: ""
+        display: {digits: 0, min: 0, max: 8}
+        decode: {type: uint8, round: 0}

@@ -1588,10 +1588,11 @@ function ageLabel(ts, now) {
 /* which channels lead the Drive view, best-effort by key (present ones win) */
 const DRIVE_PRIMARY = ["rpm","boost","speed"];
 const DRIVE_SECONDARY = [
+  "gear","n47d_gbx_oil_temp","n47d_turbine_speed",
   "n47d_rail_act","rail","n47d_boost_act","map","load","throttle","pedal","n47d_pedal",
   "coolant","n47d_coolant","oil","n47d_oil_temp","n47d_engine_temp",
   "n47d_maf_per_cyl","maf","n47d_charge_air_temp","iat","voltage",
-  "n47d_soot_meas","n47d_soot_model","n47d_ambient_press"
+  "n47d_dpf_dp","n47d_exh_temp_pre_dpf","n47d_soot_meas","n47d_ambient_press"
 ];
 function present(keys) {
   const seen = new Set(); const out = [];

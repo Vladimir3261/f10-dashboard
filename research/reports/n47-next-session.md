@@ -15,6 +15,49 @@ proven. This file is the to-do for the next session.
 - Artifacts land in `validation-runs/` (tracked, VIN-redacted) and
   `local/validation-runs-raw/` (gitignored, VIN).
 
+## Ready to validate now — GEAR + gearbox candidates (built 2026-08-26)
+
+The user wants current gear on the dashboard. Gear lives on OTHER ECUs
+than the DDE, reached by static UDS 0x22 (the mapping engine already
+polls a second ECU via fixed-address targets — proven offline). Three
+new candidate files, all source-backed, all pending on-car validation:
+
+  - mappings/candidates/bmw/kombi/f10_gear.yaml — CURRENT GEAR (number)
+    from KOMBI 0x63, `22 D031` (OBDb 5SERIES_GEAR_V2). THE one the user
+    wants on the dashboard.
+  - mappings/candidates/bmw/egs/f10_transmission.yaml — gear SELECTOR
+    (P/R/N/D) + drive mode from EGS 0x18, `22 DA2E` (OBDb).
+  - mappings/candidates/bmw/dde/n47/d72n47a0_gearbox.yaml — gearbox oil
+    temp / turbine speed / converter temp the DDE receives (F303 on 0x12,
+    d72 SG_FUNKTIONEN scales) — health signals, not the gear number.
+
+Validate each (one file at a time; the gear/EGS ones target 0x63 / 0x18):
+
+    python3 tools/validate_candidate.py run mappings/candidates/bmw/kombi/f10_gear.yaml --all
+    python3 tools/validate_candidate.py run mappings/candidates/bmw/egs/f10_transmission.yaml --all
+    python3 tools/validate_candidate.py run mappings/candidates/bmw/dde/n47/d72n47a0_gearbox.yaml --all
+
+Plausibility: gear steps 1..8 in Drive (0/N distinct); selector tracks the
+lever; gearbox oil temp warms like engine oil; turbine speed tracks rpm.
+UNKNOWNS to confirm on-car: does 0x63 answer 22 D031, and 0x18 answer
+22 DA2E, on THIS car? (OBDb is a 5-series community claim.) If 0x63 is
+silent, try the EGS DA2E, or scan with tools/egs.py. Once gear decodes,
+add its file to the live --extra-mappings set and it shows on the
+dashboard Drive view (already wired in).
+
+## TANK LEVEL + WARNINGS (washer fluid etc) — needs a discovery session
+
+Not a table lookup. Fuel tank level and NBT warning states (washer fluid
+low, brake wear, ...) live on body/cluster modules and are not in the DDE
+SG_FUNKTIONEN table. Approach: an on-car discovery session — scan the
+KOMBI (0x60/0x63), JBE/body (0x00), and fuel modules for UDS 0x22 DIDs
+with tools/egs.py, correlate a value against a known state (tank level
+vs the gauge; washer low vs the actual warning), then build candidates.
+local/captures/kombi_dids.json (a real 0x60 scan) is a starting point but
+uses the 0x1xxx DID space; the OBDb DAxx space (e.g. 0x60 D111 fuel range)
+is the other lead. This is a research/discovery task for a dedicated
+session, not an offline build.
+
 ## Ready to validate now — the new DPF/EGR candidate channels
 
 `mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml` (7 channels,
