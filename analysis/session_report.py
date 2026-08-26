@@ -375,6 +375,53 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
             "differential-pressure sensing is healthy; this is a baseline to "
             "trend soot-accumulation rate against.")
 
+    # -- new DPF/EGR candidate channels (validation by plausibility) ---
+    def rng(key):
+        s = run["series"].get(key)
+        return (min(v for _, v in s), max(v for _, v in s)) if s else None
+
+    dpf_dp = rng("n47d_dpf_dp")
+    if dpf_dp:
+        out.append(
+            f"[CANDIDATE] DPF differential pressure {dpf_dp[0]:.1f}–"
+            f"{dpf_dp[1]:.1f} hPa — should read low warm-idle and rise with "
+            "exhaust flow under load; a plausible spread validates the 0x44F8 "
+            "scale. (Baseline for filter-restriction trending.)")
+
+    pre_dpf = rng("n47d_exh_temp_pre_dpf")
+    pre_cat = rng("n47d_exh_temp_pre_cat")
+    if pre_dpf:
+        out.append(
+            f"[CANDIDATE] Exhaust temp before DPF {pre_dpf[0]:.0f}–"
+            f"{pre_dpf[1]:.0f} °C" +
+            (f", before catalyst {pre_cat[0]:.0f}–{pre_cat[1]:.0f} °C"
+             if pre_cat else "") +
+            " — should climb under load; pre-cat typically hotter than "
+            "pre-DPF. Validates the exhaust-temp scales.")
+
+    dsr = rng("n47d_dist_since_regen")
+    if dsr:
+        out.append(
+            f"[CANDIDATE] Distance since regen {dsr[0]:.1f}–{dsr[1]:.1f} km — "
+            "should be a steady value increasing monotonically over the "
+            "drive (unless a regen completes, resetting it).")
+
+    egr_dev = rng("n47d_egr_deviation")
+    if egr_dev:
+        out.append(
+            f"[CANDIDATE] EGR control deviation {egr_dev[0]:.1f}–"
+            f"{egr_dev[1]:.1f} % — should sit near 0 when the loop is happy; "
+            "a persistent offset would flag EGR fouling. Baseline for "
+            "EGR-health trending.")
+
+    regen = run["series"].get("n47d_opmode")
+    if regen:
+        vals = {v for _, v in regen}
+        out.append(
+            f"[CANDIDATE] Operating-mode word took {len(vals)} distinct "
+            "value(s) — bit 0x02 is the regeneration-active flag; a change "
+            "mid-drive would mark a regeneration event.")
+
     return out
 
 
