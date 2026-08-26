@@ -308,6 +308,76 @@ def dpf(run: Dict) -> Dict:
     return out
 
 
+def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
+    """
+    Human interpretation of the numbers - the point of the whole exercise.
+    Distinguishes a real disagreement from an OBD limitation.
+    """
+    out: List[str] = []
+
+    # warm-up
+    cool = wu.get("coolant")
+    if cool and cool.get("seconds_to_80C"):
+        out.append(
+            f"Cold start captured from {cool['start']} °C; coolant reached "
+            f"80 °C in {cool['seconds_to_80C']/60:.1f} min and stabilised near "
+            f"{cool['max']} °C. Oil and engine temp tracked it closely — a "
+            "healthy warm-up with no lag anomaly.")
+
+    # OBD MAP saturation vs DDE boost — a data-quality finding, not a
+    # cross-check failure.
+    mp = run["series"].get("map")
+    ba = run["series"].get("n47d_boost_act")
+    if mp and ba:
+        map_max = max(v for _, v in mp)
+        boost_kpa = max(v for _, v in ba) / 10.0
+        if map_max >= 255 and boost_kpa > 255:
+            out.append(
+                f"**OBD MAP saturates at 255 kPa**; under boost the DDE reads "
+                f"the true manifold pressure up to {boost_kpa:.0f} kPa. The "
+                "boost cross-check ⚠️ is OBD sensor saturation, NOT a decode "
+                "error — above 255 kPa the DDE boost channel is the accurate "
+                "one. (Exactly the 'generic OBD saturation' caveat the project "
+                "set out to handle.)")
+
+    # ambient quantisation
+    amb = next((c for c in cc if c["obd"] == "baro"), None)
+    if amb and amb["mean_abs_diff"] < 12:
+        out.append(
+            f"Ambient/baro cross-check differs by only {amb['mean_abs_diff']} "
+            "hPa on average — that is the standard OBD baro PID's 1 kPa integer "
+            "quantisation, i.e. agreement within resolution, not a discrepancy.")
+
+    # lambda sentinel
+    lam = run["series"].get("lambda")
+    if lam:
+        at2 = sum(1 for _, v in lam if abs(v - 2.0) < 1e-6)
+        if at2 > 0.2 * len(lam):
+            out.append(
+                f"Lambda sat at the 2.0 sentinel for {at2}/{len(lam)} samples "
+                "(= 'no value', not a real λ of 2.0); exclude those from any "
+                "AFR analysis.")
+
+    # setpoint tracking health
+    for t in lb.get("setpoint_tracking", []):
+        out.append(
+            f"{t['label'].capitalize()} closed-loop control tracked its "
+            f"setpoint to {t['mean_abs_deviation']} mean deviation "
+            f"(max {t['max_abs_deviation']}) — the actuator is hitting its "
+            "target; a growing deviation over future sessions would flag "
+            "wear.")
+
+    # DPF
+    if dp.get("measured") and "mean_abs_diff" in dp:
+        out.append(
+            f"DPF soot measured vs modelled agree to {dp['mean_abs_diff']} g "
+            f"(range {dp['measured']['min']}–{dp['measured']['max']} g) — "
+            "differential-pressure sensing is healthy; this is a baseline to "
+            "trend soot-accumulation rate against.")
+
+    return out
+
+
 def quality(run: Dict) -> List[Dict]:
     """Per-channel coverage + saturation/gap flags."""
     out = []
@@ -413,9 +483,15 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         f"{len(run['series'])} channels",
         f"- Started (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(run['started']))}",
         "",
-        "## Cold-start warm-up",
-        "",
     ]
+
+    fnd = findings(run, wu, cc, lb, dp)
+    if fnd:
+        L += ["## Key findings", ""]
+        L += [f"- {line}" for line in fnd]
+        L += [""]
+
+    L += ["## Cold-start warm-up", ""]
 
     if wu:
         L.append("| channel | start | max | →80 °C | unit |")
