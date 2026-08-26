@@ -1,0 +1,97 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Gearbox values the DDE (0x12) RECEIVES over the drivetrain bus, read
+# via the proven F-series dynamic 0xF303 path (same as the verified d72
+# files). These are the engine ECU's copy of transmission data - useful
+# health signals (gearbox oil temp, torque-converter turbine speed and
+# modelled converter-output temp) without needing to reach the EGS.
+# NOT the selected gear NUMBER - that is not in the DDE's data (see
+# mappings/candidates/bmw/kombi/f10_gear.yaml for gear from the cluster).
+#
+# ids + scales quoted from the cached d72n47a0 SG_FUNKTIONEN table
+# (emdzej/ediabasx-docs-sgbd @ b644de8f). Validate on a drive:
+# gearbox oil temp should warm like engine oil; turbine speed should
+# track rpm/road speed; converter temp track gearbox oil.
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-gearbox
+  version: "0"
+  production: false
+  description: >
+    CANDIDATE - DDE-received gearbox values (oil temp, turbine speed,
+    converter temp) via 0xF303. Same path as the verified d72 files;
+    not yet individually validated on this car.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8f, docs/sgbd/d72n47a0.md. Rows:
+    Com_tGbxOil 0x46F0 (Getriebeoeltemperatur, u8, 1.0/-40), Com_nTSC
+    0x46ED (Drehzahl Getriebeturbine, u16, 0.5 rpm), Twandler_sim 0x46F2
+    (modellierte Temperatur Getriebeausgang, u8, 1.529412/-40),
+    Nturb_calc 0x46FA (modellierte Turbinendrehzahl, u16, 0.1 rpm).
+
+verification:
+  status: candidate
+  method: >
+    Not yet validated on F10-520d-dev. Expect gearbox oil temp to warm
+    like engine oil; turbine speed to track rpm/road speed; converter
+    temp to track gearbox oil.
+  vehicle: F10-520d-dev (target, PENDING)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      sgbd_variant: d72n47a0
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+polling_classes:
+  dde_dyn: {every: 5, priority: 2, stagger: true}
+
+requests:
+
+  n47.d72.dyn.46F0:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 46 F0 01 01"]
+    polling: {class: dde_dyn}
+    response: {data_length: 1}
+    signals:
+      n47d_gbx_oil_temp:
+        label: Gearbox oil temp (DDE)
+        unit: °C
+        display: {digits: 0, min: -40, max: 160}
+        decode: {type: uint8, add: -40.0, round: 1}
+
+  n47.d72.dyn.46ED:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 46 ED 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_turbine_speed:
+        label: Torque-converter turbine speed
+        unit: rpm
+        display: {digits: 0, min: 0, max: 5000}
+        decode: {type: uint16_be, scale: 0.5, round: 0}
+
+  n47.d72.dyn.46F2:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 46 F2 01 01"]
+    polling: {class: dde_dyn}
+    response: {data_length: 1}
+    signals:
+      n47d_converter_temp:
+        label: Converter-output temp (modelled)
+        unit: °C
+        display: {digits: 0, min: -40, max: 200}
+        decode: {type: uint8, scale: 1.529412, add: -40.0, round: 1}
