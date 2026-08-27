@@ -1345,6 +1345,22 @@ def demo_loop(
             "fuel_l": round(63.0 / 100.0 * args.tank, 2),
             "fuelrate": round(0.8 + drive * 14, 1),
             "runtime": round(t),
+            #
+            # Synthetic proprietary/transmission channels so the demo can
+            # exercise the M-Performance drive view. They only surface if
+            # the matching --extra-mappings are also loaded.
+            #
+            "gear": max(1, min(8, int(drive * 130 / 22) + 1)),
+            "n47d_gbx_oil_temp": round(min(92, 40 + t * 1.2), 1),
+            "n47d_turbine_speed": round(rpm * (0.85 + drive * 0.15)),
+            "n47d_converter_temp": round(min(95, 42 + t * 1.3), 1),
+            "n47d_boost_act": round(1000 + boost * 100 * 10, 0),
+            "n47d_rail_act": round(300 + drive * 1200),
+            "n47d_coolant": round(min(89, 20 + t * 2), 1),
+            "n47d_oil_temp": round(min(96, 18 + t * 1.7), 1),
+            "n47d_maf_per_cyl": round(240 + drive * 900, 1),
+            "n47d_dpf_dp": round(drive * 45, 1),
+            "distance": round(1000 + t * 0.02, 1),
         }
 
         if rec is not None:
@@ -1419,31 +1435,55 @@ PAGE = r"""
   .hidden { display: none !important; }
 
   /* --- mode 1: drive --- */
-  #drive .bigwrap { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-                    gap: 12px; }
-  .biggauge {
-    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
-    padding: 14px 10px 10px; text-align: center;
+  /* --- M-Performance drive cluster --- */
+  :root { --m-red: #E4002B; --m-blue: #1C5EAB; --m-lblue: #2E9BD6; --m-violet: #6c4b9e; }
+  .mcluster { max-width: 980px; margin: 0 auto; }
+  .revbar { display: flex; gap: 3px; height: 16px; margin-bottom: 14px; }
+  .revbar .led { flex: 1; border-radius: 2px; background: #171d28; transition: background .05s; }
+  .herorow {
+    display: grid; grid-template-columns: 1fr 0.9fr 1fr; gap: 10px; align-items: center;
   }
-  .biggauge svg { width: 100%; max-width: 230px; height: auto; }
-  .biggauge .gval { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums;
-                    line-height: 1; margin-top: -18px; }
-  .biggauge .glabel { font-size: 11px; color: var(--muted); text-transform: uppercase;
-                      letter-spacing: .1em; margin-top: 6px; }
-  .biggauge .gunit { font-size: 11px; color: var(--muted); }
-  .biggauge.alarm-warn { border-color: var(--warn); }
-  .biggauge.alarm-bad { border-color: var(--bad); }
-  #drive .stripwrap { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                      gap: 10px; margin-top: 12px; }
-  .strip {
+  .herogauge { position: relative; text-align: center; }
+  .herogauge svg { width: 100%; max-width: 300px; height: auto; }
+  .herogauge .heroval {
+    position: absolute; left: 0; right: 0; top: 52%; transform: translateY(-50%);
+    font-size: 46px; font-weight: 800; font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em; text-shadow: 0 0 18px rgba(46,155,214,.25);
+  }
+  .herogauge .herolabel {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .18em;
+    margin-top: -6px;
+  }
+  .gearbox {
+    background: linear-gradient(160deg, #10151f, #0a0d13);
+    border: 1px solid var(--line); border-radius: 16px; padding: 10px 6px 12px;
+    text-align: center; box-shadow: inset 0 0 40px rgba(0,0,0,.5);
+  }
+  .gearlabel { font-size: 11px; color: var(--muted); letter-spacing: .28em; }
+  .gearnum {
+    font-size: 128px; font-weight: 800; line-height: .95; font-variant-numeric: tabular-nums;
+    background: linear-gradient(180deg, #fff, #9fc6e6); -webkit-background-clip: text;
+    background-clip: text; color: transparent; text-shadow: 0 0 30px rgba(46,155,214,.35);
+  }
+  .gearnum.rev { background: linear-gradient(180deg, #fff, #f2a0a0); -webkit-background-clip: text; }
+  .mstripe {
+    height: 6px; border-radius: 3px; margin: 4px 22px 0;
+    background: linear-gradient(90deg, var(--m-lblue) 0 33%, var(--m-blue) 33% 66%, var(--m-red) 66% 100%);
+  }
+  .tilerow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+             gap: 8px; margin-top: 16px; }
+  .mtile {
     background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-    padding: 9px 11px;
+    padding: 8px 11px; border-left: 3px solid var(--m-blue);
   }
-  .strip .sname { font-size: 10.5px; color: var(--muted); text-transform: uppercase;
-                  letter-spacing: .07em; }
-  .strip .sval { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .strip .sunit { font-size: 11px; color: var(--muted); margin-left: 3px; }
-  .strip canvas { width: 100%; height: 30px; display: block; margin-top: 4px; }
+  .mtile.warn { border-left-color: var(--warn); } .mtile.bad { border-left-color: var(--bad); }
+  .mtile .tname { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .mtile .tval { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mtile .tunit { font-size: 11px; color: var(--muted); margin-left: 3px; }
+  @media (max-width: 640px) {
+    .herorow { grid-template-columns: 1fr; }
+    .gearnum { font-size: 92px; }
+  }
 
   /* --- mode 2: detail (gauges + panels) --- */
   .gauges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 640px; }
@@ -1521,8 +1561,27 @@ PAGE = r"""
 
 <!-- ===================== MODE 1: DRIVE ===================== -->
 <section id="drive" class="hidden">
-  <div class="bigwrap" id="bigwrap"></div>
-  <div class="stripwrap" id="stripwrap"></div>
+  <div class="mcluster">
+    <div class="revbar" id="revbar"></div>
+    <div class="herorow">
+      <div class="herogauge">
+        <svg viewBox="0 0 200 165" id="bg-rpm"></svg>
+        <div class="heroval" id="hv-rpm">--</div>
+        <div class="herolabel">RPM</div>
+      </div>
+      <div class="gearbox" id="gearbox">
+        <div class="gearlabel">GEAR</div>
+        <div class="gearnum" id="gearnum">–</div>
+        <div class="mstripe"></div>
+      </div>
+      <div class="herogauge">
+        <svg viewBox="0 0 200 165" id="bg-speed"></svg>
+        <div class="heroval" id="hv-speed">--</div>
+        <div class="herolabel">KM/H</div>
+      </div>
+    </div>
+    <div class="tilerow" id="tilerow"></div>
+  </div>
 </section>
 
 <!-- ===================== MODE 2: DETAIL ===================== -->
@@ -1636,48 +1695,69 @@ function statusOf(key, v) {
 }
 
 /* ---------------------------------------------------------- mode 1: drive */
+/* which channels fill the secondary tile row, best available first */
+const DRIVE_TILES = ["boost","n47d_boost_act","n47d_rail_act","coolant","n47d_coolant",
+  "oil","n47d_oil_temp","n47d_gbx_oil_temp","n47d_turbine_speed","load","n47d_maf_per_cyl",
+  "maf","n47d_dpf_dp","voltage","distance"];
+const RPM_MAX = 5200, RPM_REDLINE = 4600, REV_LEDS = 22;
+
 function buildDrive() {
-  const primary = present(DRIVE_PRIMARY);
-  const secondary = present(DRIVE_SECONDARY).filter(k => !primary.includes(k)).slice(0, 8);
-  const bw = el("bigwrap"); bw.innerHTML = "";
-  for (const k of primary) {
+  // rev-bar LEDs
+  const rb = el("revbar"); rb.innerHTML = "";
+  for (let i=0;i<REV_LEDS;i++){ const d=document.createElement("div"); d.className="led"; rb.appendChild(d); }
+  // secondary tiles from whatever channels exist
+  const tiles = present(DRIVE_TILES).slice(0, 6);
+  const tr = el("tilerow"); tr.innerHTML = "";
+  for (const k of tiles) {
     const m = metaByKey[k];
     const d = document.createElement("div");
-    d.className = "biggauge"; d.id = "big-" + k;
-    d.innerHTML = `<svg viewBox="0 0 200 150" id="bg-${k}"></svg>` +
-      `<div class="gval" id="bv-${k}">--</div>` +
-      `<div class="glabel">${m.label} <span class="gunit">${m.unit}</span></div>`;
-    bw.appendChild(d);
-  }
-  const sw = el("stripwrap"); sw.innerHTML = "";
-  for (const k of secondary) {
-    const m = metaByKey[k];
-    const d = document.createElement("div");
-    d.className = "strip";
-    d.innerHTML = `<div class="sname">${m.label}</div>` +
-      `<div><span class="sval" id="sv-${k}">--</span><span class="sunit">${m.unit}</span></div>` +
-      `<canvas id="sc-${k}"></canvas>`;
-    sw.appendChild(d);
+    d.className = "mtile"; d.id = "tile-"+k;
+    d.innerHTML = `<div class="tname">${m.label}</div>` +
+      `<div><span class="tval" id="tv-${k}">--</span><span class="tunit">${m.unit}</span></div>`;
+    tr.appendChild(d);
   }
 }
+
+function heroGauge(svgId, valId, key, unit, digits, gmax, color) {
+  const m = metaByKey[key];
+  const v = latest[key];
+  const svg = el(svgId); if (!svg) return;
+  const hi = gmax || (m ? m.hi : 100);
+  const frac = (v||0) / Math.max(hi, 1e-6);
+  svg.innerHTML = gaugeSVG(frac, T(0, hi, 5), color, 82, 14);
+  el(valId).textContent = (v===undefined||v===null) ? "--" : (unit==="k" ? (v/1000).toFixed(1) : Math.round(v));
+}
+
 function renderDrive() {
-  for (const k of present(DRIVE_PRIMARY)) {
-    const m = metaByKey[k], v = latest[k];
-    const svg = el("bg-"+k); if (!svg) continue;
-    const frac = (v - m.lo) / Math.max(m.hi - m.lo, 1e-6);
-    const st = statusOf(k, v);
-    const color = st==="bad" ? "var(--bad)" : st==="warn" ? "var(--warn)" :
-                  k==="speed" ? "var(--accent)" : k==="boost" ? "var(--good)" : "var(--series)";
-    svg.innerHTML = gaugeSVG(frac, T(m.lo, m.hi, 5), color, 78, 13);
-    el("bv-"+k).textContent = fmt(v, m.digits);
-    const box = el("big-"+k);
-    box.className = "biggauge" + (st ? " alarm-"+st : "");
+  // rev bar: green -> the last few red (shift light)
+  const rpm = latest.rpm || 0;
+  const lit = Math.round(REV_LEDS * Math.min(1, rpm / RPM_MAX));
+  const leds = el("revbar").children;
+  for (let i=0;i<leds.length;i++){
+    const on = i < lit;
+    const red = i >= REV_LEDS * (RPM_REDLINE/RPM_MAX);
+    const mid = i >= REV_LEDS * 0.6;
+    leds[i].style.background = !on ? "#171d28"
+      : red ? "var(--m-red)" : mid ? "var(--warn)" : "var(--m-lblue)";
+    leds[i].style.boxShadow = on ? "0 0 6px "+(red?"var(--m-red)":mid?"var(--warn)":"var(--m-lblue)") : "none";
   }
-  const now = latest.__ts || 0;
-  for (const k of present(DRIVE_SECONDARY)) {
-    const sv = el("sv-"+k); if (!sv) continue;
-    sv.textContent = fmt(latest[k], metaByKey[k].digits);
-    sparkline("sc-"+k, k);
+  // hero gauges: rpm (x1000) + speed
+  heroGauge("bg-rpm","hv-rpm","rpm","k",1, RPM_MAX,
+            rpm>RPM_REDLINE ? "var(--m-red)" : "var(--m-lblue)");
+  el("hv-rpm").textContent = rpm ? (rpm/1000).toFixed(1) : "--";
+  heroGauge("bg-speed","hv-speed","speed","",0, 250, "var(--accent)");
+  // big gear
+  const g = latest.gear;
+  const gn = el("gearnum");
+  gn.textContent = (g===undefined||g===null) ? "N" : String(Math.round(g));
+  gn.classList.toggle("rev", rpm>RPM_REDLINE);
+  // tiles
+  for (const k of present(DRIVE_TILES)) {
+    const tv = el("tv-"+k); if (!tv) continue;
+    tv.textContent = fmt(latest[k], metaByKey[k].digits);
+    const st = statusOf(k, latest[k]);
+    const tile = el("tile-"+k);
+    if (tile) tile.className = "mtile" + (st ? " "+st : "");
   }
 }
 function sparkline(cvId, key) {
