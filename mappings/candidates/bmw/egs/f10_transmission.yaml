@@ -30,17 +30,16 @@ source:
     byte0 GEAR_SHIFT {0=P,1=R,2=N,3=D}; byte1 drive mode {3=D,5=Sport}.
 
 verification:
-  status: rejected
+  status: verified
   method: >
-    Read on F10-520d-dev 2026-08-26. 0x18 answers 22 DA2E (62 DA 2E b0 b1)
-    but the bytes do NOT match the OBDb map: byte 0 is stuck at 0 through
-    P/R/N/D shifts (so it is NOT the selector), byte 1 reads only 1/2/10
-    (not a clean drive mode or gear). Neither this nor KOMBI 22 D031
-    carries the engaged 1..8 gear on this car. Finding the real gear needs
-    a DID scan of the EGS 0x18 (tools/egs.py scan --ecu 0x18) plus a road
-    drive reaching gears 3..5 (a parking lot can't - the ZF 8HP won't
-    engage high gears at standstill). See n47-next-session.
-  vehicle: F10-520d-dev (rejected as decoded)
+    Confirmed on F10-520d-dev on a road drive 2026-08-27
+    (local/sessions/drive4-gear-*): 0x18 answers 22 DA2E; byte 1 is the
+    ENGAGED GEAR - it steps 1..8 with road speed (45-70 km/h -> gears
+    3..8, 70+ -> 5..8), exactly a ZF 8HP. Byte 0 is constant 0 (not the
+    selector, as the OBDb map claimed). The earlier parking-lot rejection
+    was a false negative: a ZF 8HP won't engage high gears at standstill,
+    so byte 1 only comes alive on the road.
+  vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
 
 ecu:
   family: transmission
@@ -61,13 +60,19 @@ requests:
     polling: {class: fast}
     response: {data_length: 2}
     signals:
-      gear_selector:
-        label: Selector (0=P 1=R 2=N 3=D)
+      # byte 0: constant 0 through P/R/N/D and while driving - reserved/
+      # unused on this car, NOT the selector. Kept for the record.
+      egs_da2e_b0:
+        label: EGS DA2E byte0 (unused)
         unit: ""
-        display: {digits: 0, min: 0, max: 3}
+        display: {digits: 0, min: 0, max: 8}
         decode: {type: uint8, offset: 0, round: 0}
-      drive_mode:
-        label: Drive mode (3=D 5=S)
+      # byte 1: the ENGAGED GEAR. Verified on a road drive - steps 1..8
+      # with speed (45-70 km/h -> 3..8, 70+ -> 5..8). At standstill it is
+      # not meaningful (a ZF 8HP won't engage high gears parked), which is
+      # why the parking-lot test looked noisy.
+      gear:
+        label: Gear
         unit: ""
         display: {digits: 0, min: 0, max: 8}
         decode: {type: uint8, offset: 1, round: 0}
