@@ -15,31 +15,19 @@ proven. This file is the to-do for the next session.
 - Artifacts land in `validation-runs/` (tracked, VIN-redacted) and
   `local/validation-runs-raw/` (gitignored, VIN).
 
-## TOMORROW — find the real gear (needs a ROAD drive)
+## DONE — engaged gear found (2026-08-27)
 
-Status: D031 (KOMBI 0x63) and DA2E (EGS 0x18) are REJECTED as the gear
-source (parking-lot manual-shift test 2026-08-26 — none of their bytes
-step 1..8; a ZF 8HP won't engage high gears at standstill anyway). The
-engaged 1..8 gear is on a DID we haven't found. Plan:
+The engaged 1..8 gear is **EGS 0x18, 22 DA2E, byte 1**. Confirmed on a
+road drive: it steps monotonically with speed (gear 1 avg 2 km/h, 2->16,
+3->27, 4->38, 5->48, ranges overlapping on shifts) - textbook ZF 8HP.
+Verified, wired to the dashboard, syncing to ClickHouse as
+`transmission.gear`. The earlier parking-lot rejection was a false
+negative (a ZF 8HP won't engage high gears at standstill). Byte 0 of
+DA2E is constant 0 (not the selector the OBDb map claimed). D031 carries
+no gear. 0xFF at standstill is clamped out (valid 1..8).
 
-1. Parked, engine on: scan the EGS for every DID it answers -
-       python3 tools/egs.py scan --ecu 0x18
-   (holds the gateway a few minutes; nothing else connected). Repeat for
-   the KOMBI if needed (--ecu 0x63). Gives a DID inventory.
-2. Pick DIDs whose response is a small 1-byte value (gear-shaped).
-3. Road drive reaching gears 3..5, logging those DIDs (a throwaway
-   candidate file, one signal per DID), then correlate which value steps
-   1..8 with speed. That DID+byte is the gear.
-4. Rename to `gear`, verify, add to --extra-mappings -> dashboard (the
-   Drive view already lists `gear`).
-
-Fallback if no clean gear DID exists: derive gear from the ratio of
-road speed to engine rpm (ZF 8HP fixed ratios) - approximate, discrete-
-ised. Only if a direct DID can't be found.
-
-VERIFIED this session (keep): DDE gearbox oil temp / turbine speed /
-converter temp (d72n47a0_gearbox.yaml) - turbine speed ~= engine speed
-at cruise confirmed the scale.
+Still open: a clean P/R/N/D **selector** (not found yet - would need a
+0x18/0x63 DID scan). Reverse-gear encoding also uncaptured.
 
 ## Ready to validate now — the new DPF/EGR candidate channels
 
