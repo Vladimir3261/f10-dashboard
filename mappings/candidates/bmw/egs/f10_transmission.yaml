@@ -75,4 +75,7 @@ requests:
         label: Gear
         unit: ""
         display: {digits: 0, min: 0, max: 8}
-        decode: {type: uint8, offset: 1, round: 0}
+        # 0xFF (255) is the standstill/not-engaged sentinel; valid gears
+        # are 1..8, so clamp it out - the dashboard shows blank when no
+        # gear is engaged rather than a bogus 255.
+        decode: {type: uint8, offset: 1, round: 0, valid_min: 1, valid_max: 8}
