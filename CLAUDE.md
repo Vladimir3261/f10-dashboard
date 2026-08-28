@@ -101,14 +101,29 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   executor, OBD capability, variant capability.
 - The N47 research pipeline: pinned source manifest, importers,
   normalized records, gate, conflict detection, generated reports.
-- **13 d72n47a0 proprietary channels verified on the car** (oil / coolant
-  / engine / charge-air temps, DPF soot measured+modelled, rail act+set,
-  boost act+set, MAF, ambient pressure, pedal) — idle cross-check against
-  standard OBD PIDs plus a throttle sweep. Wired into the runtime behind
-  `--extra-mappings`, shown on the dashboard.
-- **Dashboard has 3 modes**: Drive (big gauges + live strips), Detail
+- **~23 proprietary channels verified on the car**, in five files under
+  `mappings/candidates/` (all `verification.status: verified`, still in
+  candidates/ — not moved to `mappings/verified/`, deliberately left in
+  place): d72 dynamic (oil/soot×2/engine temp), d72 flow (coolant, boost
+  act+set, rail act+set, MAF, charge-air, ambient, pedal), d72 DPF/EGR
+  (ΔP, exhaust temps, dist-since-regen, regen count, op-mode, EGR dev),
+  d72 gearbox (gearbox oil temp, turbine speed, converter temp), and the
+  **engaged gear** (EGS `0x18`, `22 DA2E` byte 1 — steps 1..8 with speed).
+  Validated by on-car cross-checks / drives. Loaded via `--extra-mappings`.
+- **`./run_car.sh`** launches `live.py` with every verified channel — use
+  it instead of a bare `live.py` (a bare launch has no gear/DPF/etc and
+  the dashboard falls back to "N").
+- **Dashboard has 3 modes**: Drive (M-Performance cluster — shift-light
+  rev bar, hero tach+speedo, big centre GEAR, M-tricolor, tiles), Detail
   (per-channel history graphs), All-data (dense table w/ min/max/age).
-- 277 tests, no car / no network / no BMW data required.
+- **ClickHouse lake + Grafana are DEPLOYED on a VPS** (`infra/`, docker
+  compose): the sync agent ships every drive up over mobile (~1.4
+  bytes/sample), server-side normalization, and a provisioned
+  `f10-health` Grafana dashboard (DPF ΔP-vs-flow, soot rate, boost
+  tracking, decode cross-check). Secrets live in the VPS `.env`
+  (gitignored); the VPS IP + Grafana password are in the owner's notes,
+  not git. `analysis/clickhouse/insights.sql` is the query battery.
+- 294 tests, no car / no network / no BMW data required.
 
 ## Repo map
 
@@ -159,11 +174,32 @@ Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and
 - Commit messages end with the `Co-Authored-By` trailer; branch off
   master before committing if asked to commit.
 
+## Running it in the car
+
+- Launch with **`./run_car.sh`** (loads every verified channel; a bare
+  `live.py` has no gear/DPF and the dashboard shows "N"). Dashboard on
+  `:8080`; open the Drive view for the M-cluster.
+- The link is **ENET/HSFZ over Ethernet** — the host needs a
+  `169.254.x.x` link-local address on the cable, and discovery UDP-
+  broadcasts to find the gateway. On a laptop this is automatic; on a
+  **Raspberry Pi** (the near-term in-car host) it works natively; on
+  Android/Termux the link-local IP on a USB-Ethernet adapter is the
+  fiddly part (may need root / a static `--ip`/`--local-ip`).
+  `find_link_local_ip()` currently shells out to `ifconfig` — fine on a
+  Pi, but replace with pure-Python/`ip addr` for non-laptop hosts.
+- Keep the **sync agent** (`infra/sync/agent.py --config
+  infra/sync/config.json`) running alongside to ship to the VPS over the
+  host's mobile/data connection. Config (server URL + token) is
+  gitignored; recreate it from `infra/sync/config.json` on the owner's
+  laptop or the token in the VPS `.env`.
+
 ## Explicitly NOT doing yet
 
-Embedded hardware; a mapping→C compiler; remote/cloud storage; the AI
-interpretation layer; multi-ECU polling beyond the DDE. These are real
-future directions (see the long-term goal above) but the current priority
-is depth and confidence on the DDE + the first longitudinal analytics.
-The analytics layer (baselines, drift/anomaly detection) is the biggest
-unbuilt piece and the highest-value next domain.
+A mapping→C compiler; the AI interpretation layer; multi-ECU polling
+beyond the DDE + the gear/EGS reads already added. The in-car host is
+moving to a **Raspberry Pi** (Android phone considered as an interim —
+stdlib-only runtime makes it feasible, but the ENET link is the catch).
+The biggest unbuilt piece and highest-value next domain remains the
+**analytics layer** (condition-normalized baselines, drift/anomaly
+detection) — the ClickHouse lake + Grafana are deployed and accumulating
+the data it needs; `docs/ROADMAP.md` has the staging.
