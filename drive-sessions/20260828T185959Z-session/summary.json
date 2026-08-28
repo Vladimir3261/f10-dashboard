@@ -1,0 +1,572 @@
+{
+  "run_id": 7,
+  "ecu": "0x12 (ECM-EngineControl)",
+  "warmup": {
+    "coolant": {
+      "start": 92.0,
+      "end": 88.0,
+      "min": 82.0,
+      "max": 92.0,
+      "seconds_to_80C": 0.3,
+      "unit": "\u00b0C"
+    },
+    "n47d_oil_temp": {
+      "start": 92.0,
+      "end": 88.7,
+      "min": 82.1,
+      "max": 92.1,
+      "seconds_to_80C": 0.9,
+      "unit": "\u00b0C"
+    },
+    "n47d_engine_temp": {
+      "start": 92.3,
+      "end": 88.8,
+      "min": 83.0,
+      "max": 92.3,
+      "seconds_to_80C": 8.1,
+      "unit": "\u00b0C"
+    },
+    "n47d_charge_air_temp": {
+      "start": 44.9,
+      "end": 36.9,
+      "min": 23.2,
+      "max": 47.3,
+      "seconds_to_80C": null,
+      "unit": "\u00b0C"
+    },
+    "oil_vs_coolant_at_coolant80": {
+      "coolant": 80.0,
+      "oil": 92.0
+    }
+  },
+  "crosschecks": [
+    {
+      "label": "coolant \u00b0C",
+      "proprietary": "n47d_coolant",
+      "obd": "coolant",
+      "pairs": 37,
+      "mean_abs_diff": 0.48,
+      "max_abs_diff": 1.36,
+      "agree": true
+    },
+    {
+      "label": "manifold/boost (hPa vs kPa\u00d710)",
+      "proprietary": "n47d_boost_act",
+      "obd": "map",
+      "pairs": 36,
+      "mean_abs_diff": 18.91,
+      "max_abs_diff": 99.9,
+      "agree": false
+    },
+    {
+      "label": "ambient (hPa vs kPa\u00d710)",
+      "proprietary": "n47d_ambient_press",
+      "obd": "baro",
+      "pairs": 36,
+      "mean_abs_diff": 6.06,
+      "max_abs_diff": 9.0,
+      "agree": false
+    }
+  ],
+  "phase": {
+    "has_speed": true,
+    "driving_samples": 2831,
+    "idle_samples": 1324,
+    "max_speed": 131.0,
+    "moving_span": [
+      1787943100.371324,
+      1787943472.5349581
+    ]
+  },
+  "load": {
+    "ranges": {
+      "rpm": {
+        "n": 3330,
+        "min": 740.5,
+        "max": 3436.0,
+        "mean": 1564.928,
+        "p50": 1603.5,
+        "p95": 2319.5
+      },
+      "map": {
+        "n": 3330,
+        "min": 105.0,
+        "max": 255.0,
+        "mean": 149.908,
+        "p50": 124.0,
+        "p95": 246.0
+      },
+      "n47d_boost_act": {
+        "n": 29,
+        "min": 1055.0,
+        "max": 2454.9,
+        "mean": 1502.959,
+        "p50": 1284.0,
+        "p95": 2440.9
+      },
+      "n47d_rail_act": {
+        "n": 29,
+        "min": 292.0,
+        "max": 1443.9,
+        "mean": 685.669,
+        "p50": 504.0,
+        "p95": 1386.1
+      },
+      "n47d_maf_per_cyl": {
+        "n": 29,
+        "min": 495.29,
+        "max": 1248.46,
+        "mean": 724.632,
+        "p50": 612.28,
+        "p95": 1202.37
+      },
+      "n47d_pedal": {
+        "n": 28,
+        "min": 0.0,
+        "max": 81.8,
+        "mean": 23.799,
+        "p50": 30.38,
+        "p95": 60.27
+      },
+      "load": {
+        "n": 3330,
+        "min": 0.0,
+        "max": 100.0,
+        "mean": 38.199,
+        "p50": 29.412,
+        "p95": 98.039
+      },
+      "speed": {
+        "n": 3330,
+        "min": 0.0,
+        "max": 131.0,
+        "mean": 64.16,
+        "p50": 70.0,
+        "p95": 121.0
+      },
+      "maf": {
+        "n": 3330,
+        "min": 0.0,
+        "max": 190.41,
+        "mean": 51.534,
+        "p50": 41.72,
+        "p95": 116.97
+      },
+      "rail": {
+        "n": 3330,
+        "min": 233.2,
+        "max": 1724.8,
+        "mean": 682.821,
+        "p50": 484.1,
+        "p95": 1272.7
+      }
+    },
+    "setpoint_tracking": [
+      {
+        "label": "boost",
+        "actual": "n47d_boost_act",
+        "setpoint": "n47d_boost_set",
+        "pairs": 29,
+        "mean_abs_deviation": 225.5,
+        "max_abs_deviation": 777.0
+      },
+      {
+        "label": "rail pressure",
+        "actual": "n47d_rail_act",
+        "setpoint": "n47d_rail_set",
+        "pairs": 29,
+        "mean_abs_deviation": 243.4,
+        "max_abs_deviation": 678.1
+      }
+    ]
+  },
+  "dpf": {
+    "measured": {
+      "n": 36,
+      "min": 7.1,
+      "max": 7.22,
+      "mean": 7.161,
+      "p50": 7.17,
+      "p95": 7.22
+    },
+    "modelled": {
+      "n": 36,
+      "min": 7.1,
+      "max": 7.23,
+      "mean": 7.169,
+      "p50": 7.18,
+      "p95": 7.23
+    },
+    "mean_abs_diff": 0.007
+  },
+  "quality": [
+    {
+      "key": "ambient",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "\u00b0C",
+      "pinned_at_max": 16
+    },
+    {
+      "key": "baro",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "kPa",
+      "pinned_at_max": 19
+    },
+    {
+      "key": "boost",
+      "obd": false,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "bar",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "cattemp",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "coolant",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "distance",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "km",
+      "pinned_at_max": 15
+    },
+    {
+      "key": "egr",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "%",
+      "pinned_at_max": 42
+    },
+    {
+      "key": "egrerr",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "%",
+      "pinned_at_max": 42
+    },
+    {
+      "key": "egs_da2e_b0",
+      "obd": false,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "",
+      "pinned_at_max": 4155
+    },
+    {
+      "key": "gear",
+      "obd": false,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "",
+      "pinned_at_max": 840
+    },
+    {
+      "key": "iat",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "lambda",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "",
+      "pinned_at_max": 2988
+    },
+    {
+      "key": "load",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "%",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "maf",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "g/s",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "map",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "kPa",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_ambient_press",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "hPa",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_boost_act",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "hPa",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_boost_set",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "hPa",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_charge_air_temp",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_converter_temp",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 10
+    },
+    {
+      "key": "n47d_coolant",
+      "obd": false,
+      "samples": 37,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_dist_since_regen",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "km",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_dpf_dp",
+      "obd": false,
+      "samples": 37,
+      "max_gap_s": 13.0,
+      "unit": "hPa",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_egr_deviation",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "%",
+      "pinned_at_max": 36
+    },
+    {
+      "key": "n47d_engine_temp",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_exh_temp_pre_cat",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_exh_temp_pre_dpf",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_gbx_oil_temp",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_maf_per_cyl",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "mg/hub",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_oil_temp",
+      "obd": false,
+      "samples": 37,
+      "max_gap_s": 13.0,
+      "unit": "\u00b0C",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_opmode",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "",
+      "pinned_at_max": 36
+    },
+    {
+      "key": "n47d_pedal",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "%",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_rail_act",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "bar",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_rail_set",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "bar",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "n47d_regen_count",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "",
+      "pinned_at_max": 36
+    },
+    {
+      "key": "n47d_soot_meas",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "g",
+      "pinned_at_max": 10
+    },
+    {
+      "key": "n47d_soot_model",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "g",
+      "pinned_at_max": 8
+    },
+    {
+      "key": "n47d_turbine_speed",
+      "obd": false,
+      "samples": 36,
+      "max_gap_s": 13.0,
+      "unit": "rpm",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "pedal",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "%",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "rail",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "bar",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "relthr",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "%",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "rpm",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "rpm",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "runtime",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "s",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "speed",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "km/h",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "throttle",
+      "obd": true,
+      "samples": 4155,
+      "max_gap_s": 0.3,
+      "unit": "%",
+      "pinned_at_max": 0
+    },
+    {
+      "key": "voltage",
+      "obd": true,
+      "samples": 42,
+      "max_gap_s": 11.3,
+      "unit": "V",
+      "pinned_at_max": 0
+    }
+  ]
+}

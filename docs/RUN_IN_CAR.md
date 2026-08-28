@@ -69,13 +69,29 @@ The runtime is **stdlib-only** (no `pip install`), which is what makes a
 constrained host viable. The catch is always the **ENET link**, not the
 Python.
 
-### Raspberry Pi (the near-term target — recommended)
-Full Linux, so the ENET/link-local part "just works":
+### Raspberry Pi (the in-car host — commissioned 2026-08-28)
+Full Linux, so everything except the IP assignment is trouble-free.
+See `docs/PI_COMMISSIONING.md` for the full build record.
 - Pi USB/Ethernet → the RJ45 ENET/OBD cable → car gateway.
-- The Pi self-assigns a `169.254.x.x` link-local address on the wired
-  interface; discovery + `run_car.sh` work as on a laptop.
+- **The Pi does NOT self-assign a `169.254.x.x` address out of the box.**
+  A default NetworkManager profile is `ipv4.method: auto` (DHCP), and the
+  ZGW serves no DHCP — so the interface sits at "getting IP
+  configuration" forever with no IPv4 and discovery finds nothing. Set
+  the profile to link-local once, and it is then permanent:
+
+      sudo nmcli connection modify <eth-profile> \
+          ipv4.method link-local ipv4.may-fail yes ipv6.method ignore
+
+  After that, discovery + `run_car.sh` work as on a laptop.
+- `find_link_local_ip()` shells out to `ifconfig`; `net-tools` is present
+  on the Pi image in use, so no code change was needed.
 - Give it mobile data (USB dongle / phone tether) for the sync agent.
-- Auto-start both on boot (systemd units); the dashboard is reachable on
+  An iPhone hotspot + a WireGuard tunnel to the VPS is what is in use;
+  measured 6.1 Mbit/s up, far more than sync needs.
+- **Watch the cable.** On the first Pi drive the ENET cable lost carrier
+  for 2m46s over a bump, splitting the session into 7 runs. A Pi in a
+  moving car stresses the connector in a way a parked laptop never did.
+- Auto-start on boot with systemd units; the dashboard is reachable on
   the car's local network / a phone over WiFi.
 
 ### Android phone (interim option — feasible, fiddlier)
