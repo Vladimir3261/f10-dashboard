@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     ecu_addr     Nullable(UInt16),
     gateway      String DEFAULT '',
     source_db    LowCardinality(String) DEFAULT '',
+    -- "id@version,..." fingerprint of the mapping set that decoded this
+    -- session. The per-sample mapping_ver on telemetry.samples carries the
+    -- per-channel version; this is the whole-session summary.
+    mappings     String DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)

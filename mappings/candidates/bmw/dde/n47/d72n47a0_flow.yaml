@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-flow
-  version: "0"
+  version: 1
   production: false
   description: >
     F-series N47 air/fuel/pressure dynamic (0xF303) measurements from

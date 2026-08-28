@@ -30,6 +30,7 @@ schema_version: 1
 
 mapping:
   id: test-mapping
+  version: 1
   description: unit test fixture
 
 ecu:

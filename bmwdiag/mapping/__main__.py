@@ -320,6 +320,40 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_lock(args) -> int:
+    from .versioning import build_lock, render_lock, load_lock, diff_lock, LOCK_NAME
+    import os
+
+    document = build_lock(args.paths)
+    lock_path = args.out or os.path.join(args.paths[0], LOCK_NAME)
+
+    if args.check:
+        if not os.path.exists(lock_path):
+            print(f"error: lockfile {lock_path} does not exist; "
+                  "run without --check to create it", file=sys.stderr)
+            return 1
+
+        problems = diff_lock(document, load_lock(lock_path))
+
+        if problems:
+            print(f"mapping versions are OUT OF SYNC with {lock_path}:",
+                  file=sys.stderr)
+            for line in problems:
+                print(f"  - {line}", file=sys.stderr)
+            print("\nregenerate with: python3 -m bmwdiag.mapping lock "
+                  f"{args.paths[0]}", file=sys.stderr)
+            return 1
+
+        print(f"ok  {len(document['mappings'])} mapping(s) match {lock_path}")
+        return 0
+
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        handle.write(render_lock(document))
+
+    print(f"wrote {lock_path} ({len(document['mappings'])} mappings)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m bmwdiag.mapping",
@@ -361,6 +395,15 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--tank", type=float, default=70.0)
     plan.add_argument("--cycles", type=int, default=4)
     plan.set_defaults(func=cmd_plan)
+
+    lock = sub.add_parser("lock",
+                          help="write/check the mapping version lockfile")
+    lock.add_argument("paths", nargs="+")
+    lock.add_argument("--check", action="store_true",
+                      help="verify the lock matches disk instead of writing it")
+    lock.add_argument("--out", default=None,
+                      help="lockfile path (default: <first path>/VERSIONS.lock)")
+    lock.set_defaults(func=cmd_lock)
 
     return parser
 

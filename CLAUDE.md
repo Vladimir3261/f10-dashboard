@@ -81,6 +81,16 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
 - **Float-exactness is a contract.** Decode steps (`scale`, `divide`,
   `add`) are separate and skipped at identity so migrated formulas stay
   bit-identical; a frozen regression decodes every input byte.
+- **Mapping data is versioned.** Every mapping file carries an integer
+  `mapping.version` (starts at 1); it is incremented by one on every
+  change to that file's content — and only on mapping changes, never on
+  code changes. That version is stamped onto every recorded sample
+  (`params.mapping_ver` / `run_mappings` / `runs.mapping_set` locally,
+  `samples.mapping_ver` / `sessions.mappings` in the lake), so a dataset
+  ties back to the exact mapping revision that produced it.
+  `mappings/VERSIONS.lock` (a test enforces it) and
+  `tools/check_mapping_versions.py` (a git-diff guard) keep a change from
+  landing without a bump. See `docs/DATA_VERSIONING.md`.
 - **Verification states** (research): `discovered` → `candidate` →
   `externally_verified` → `cross_source_confirmed` → `locally_verified`
   → `rejected`. Only **`locally_verified`** means confirmed for THIS car.

@@ -145,7 +145,11 @@ def build_samples(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "value": float(r.get("value") or 0.0),
             "unit": r.get("unit") or "",
             "quality": r.get("quality") or "ok",
-            "mapping_ver": meta.get("mapping_ver", "") or r.get("mapping_ver", ""),
+            # Per-row (per-channel) version is authoritative - it is the
+            # version of the mapping file that decoded THIS channel. The
+            # batch-level meta value is only a coarse fallback for older
+            # clients that ship no per-row version.
+            "mapping_ver": r.get("mapping_ver") or meta.get("mapping_ver", ""),
         })
 
     return out
@@ -166,6 +170,8 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "ecu_addr": r.get("ecu_addr"),
             "gateway": r.get("gateway") or "",
             "source_db": meta.get("db", ""),
+            # "id@version,..." fingerprint of the mapping set for this run.
+            "mappings": r.get("mappings") or "",
         })
 
     return out

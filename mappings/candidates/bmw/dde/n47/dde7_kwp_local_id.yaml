@@ -21,7 +21,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-dde7-kwp
-  version: "0"
+  version: 1
   production: false
   description: >
     CANDIDATE - E-series DDE7 KWP-style local-identifier read, from the

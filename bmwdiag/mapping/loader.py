@@ -88,6 +88,37 @@ def _as_int(value: Any, source: str, path: str) -> int:
     return value
 
 
+def _mapping_version(meta: Dict[str, Any], source: str) -> int:
+    """
+    The mapping file's data version: a required positive integer.
+
+    Accepts an int (`version: 1`) or a digit string (`version: "1"`) so
+    existing files migrate cleanly, but the stored value is always an int.
+    Missing, non-integer, or non-positive versions are a load error - every
+    mapping must declare where it sits in its own revision history, because
+    that number is stamped onto every sample it decodes. See
+    docs/DATA_VERSIONING.md.
+    """
+    raw = _require(meta, "version", source, "mapping")
+
+    if isinstance(raw, bool):
+        raise InvalidFieldError(
+            f"mapping.version must be a positive integer, got {raw!r}",
+            source, "mapping.version",
+        )
+
+    if isinstance(raw, str) and raw.isdigit():
+        raw = int(raw)
+
+    if not isinstance(raw, int) or raw < 1:
+        raise InvalidFieldError(
+            f"mapping.version must be a positive integer, got {raw!r}",
+            source, "mapping.version",
+        )
+
+    return raw
+
+
 def _as_float(value: Any, source: str, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidFieldError(
@@ -1058,7 +1089,7 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
         description=_as_str(
             meta.get("description", ""), source, "mapping.description"
         ),
-        version=str(meta.get("version", "0")),
+        version=_mapping_version(meta, source),
         production=bool(meta.get("production", True)),
         ecu=ecu,
         requests=tuple(requests),

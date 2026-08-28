@@ -89,6 +89,12 @@ class ResolvedProfile:
         self._request_by_id: Dict[str, RequestDef] = {r.id: r for r in self.requests}
         self._derived_by_key: Dict[str, DerivedDef] = {d.key: d for d in self.derived}
 
+        #: mapping id -> data version, for stamping every recorded sample
+        #: with the exact mapping revision that decoded it.
+        self._version_by_mapping: Dict[str, int] = {
+            m.id: m.version for m in self.mappings
+        }
+
     # -- lookups ----------------------------------------------------
 
     def signal(self, key: str) -> Optional[SignalDef]:
@@ -107,6 +113,65 @@ class ResolvedProfile:
 
     def has(self, key: str) -> bool:
         return key in self._signal_by_key or key in self._derived_by_key
+
+    # -- data versioning --------------------------------------------
+
+    def channel_version(self, key: str) -> Optional[int]:
+        """
+        The data version of the mapping file that owns channel `key`.
+
+        A read signal inherits the version of the file its request came
+        from; a derived channel the version of the file that defines it.
+        Returns None for an unknown channel. This is the value stamped
+        onto every recorded sample so a dataset ties back to the exact
+        mapping revision that produced it. See docs/DATA_VERSIONING.md.
+        """
+        signal = self._signal_by_key.get(key)
+
+        if signal is not None:
+            request = self._request_by_id.get(signal.request_id)
+            mapping_id = request.mapping_id if request is not None else None
+        else:
+            definition = self._derived_by_key.get(key)
+            mapping_id = definition.mapping_id if definition is not None else None
+
+        if mapping_id is None:
+            return None
+
+        return self._version_by_mapping.get(mapping_id)
+
+    def mapping_manifest(self) -> List[Dict[str, Any]]:
+        """
+        Every loaded mapping file with its data version, in load order.
+
+        The authoritative "what decoded this run" record: id, version,
+        source path, and whether it is a production mapping. Ordered and
+        de-duplicated by id so the result is stable for one profile.
+        """
+        seen: Dict[str, Dict[str, Any]] = {}
+
+        for m in self.mappings:
+            if m.id not in seen:
+                seen[m.id] = {
+                    "id": m.id,
+                    "version": m.version,
+                    "source_path": m.source_path,
+                    "production": m.production,
+                }
+
+        return list(seen.values())
+
+    def mapping_set(self) -> str:
+        """
+        A compact one-line fingerprint of the loaded mapping set:
+        `id@version` for each file, comma-joined and sorted. Stable for a
+        given set of files+versions, cheap to store on a session row and
+        to compare across runs.
+        """
+        return ",".join(
+            f"{m['id']}@{m['version']}"
+            for m in sorted(self.mapping_manifest(), key=lambda r: r["id"])
+        )
 
     # -- ordering ---------------------------------------------------
 

@@ -611,21 +611,38 @@ class ObdSession:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at REAL NOT NULL,
-    ended_at   REAL,
-    vin        TEXT,
-    gateway    TEXT,
-    ecu        TEXT,
-    ecu_addr   INTEGER
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at  REAL NOT NULL,
+    ended_at    REAL,
+    vin         TEXT,
+    gateway     TEXT,
+    ecu         TEXT,
+    ecu_addr    INTEGER,
+    -- Compact fingerprint of the mapping set that decoded this run:
+    -- "id@version,..." sorted. The per-file detail is in run_mappings.
+    mapping_set TEXT
 );
 
 CREATE TABLE IF NOT EXISTS params (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    key   TEXT UNIQUE NOT NULL,
-    pid   INTEGER,
-    label TEXT,
-    unit  TEXT
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key         TEXT UNIQUE NOT NULL,
+    pid         INTEGER,
+    label       TEXT,
+    unit        TEXT,
+    -- Data version of the mapping file that owns this channel, as an
+    -- integer string ("" if unknown). Stamped onto every sample in the
+    -- lake so a dataset ties back to the exact mapping revision.
+    mapping_ver TEXT
+);
+
+-- Which mapping files (and versions) decoded each run - the authoritative
+-- "what produced this dataset" record. One row per loaded file per run.
+CREATE TABLE IF NOT EXISTS run_mappings (
+    run_id      INTEGER NOT NULL,
+    mapping_id  TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    production  INTEGER NOT NULL,
+    source_path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS samples (
@@ -705,10 +722,31 @@ class Recorder:
     def open(self) -> None:
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.commit()
         self.thread.start()
+
+    def _migrate(self) -> None:
+        """
+        Add the mapping-versioning columns to pre-existing databases.
+        CREATE TABLE IF NOT EXISTS never alters an existing table, so a db
+        made before versioning would otherwise lack these columns. Adding
+        them is idempotent - skipped when already present.
+        """
+        def cols(table: str) -> set:
+            return {
+                r[1] for r in self.db.execute(f"PRAGMA table_info({table})")
+            }
+
+        if "mapping_set" not in cols("runs"):
+            self.db.execute("ALTER TABLE runs ADD COLUMN mapping_set TEXT")
+
+        if "mapping_ver" not in cols("params"):
+            self.db.execute("ALTER TABLE params ADD COLUMN mapping_ver TEXT")
+
+        self.db.commit()
 
     def _param_id(self, key: str) -> int:
         if key in self.param_ids:
@@ -721,13 +759,17 @@ class Recorder:
         #
         if self.meta_source is not None:
             pid, label, unit = self.meta_source.param_row(key)
+            version = self.meta_source.channel_version(key)
         else:
             pid, label, unit = None, key, ""
+            version = None
 
-        row = (key, pid, label, unit)
+        mapping_ver = "" if version is None else str(version)
+        row = (key, pid, label, unit, mapping_ver)
 
         self.db.execute(
-            "INSERT OR IGNORE INTO params(key, pid, label, unit) VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO params(key, pid, label, unit, mapping_ver) "
+            "VALUES (?,?,?,?,?)",
             row,
         )
 
@@ -780,13 +822,36 @@ class Recorder:
             if kind == "run":
                 self._flush(pending)
 
-                cur = self.db.execute(
-                    "INSERT INTO runs(started_at, vin, gateway, ecu, ecu_addr) "
-                    "VALUES (?,?,?,?,?)",
-                    payload,
+                manifest = (
+                    self.meta_source.mapping_manifest()
+                    if self.meta_source is not None else []
                 )
-                self.db.commit()
+                mapping_set = (
+                    self.meta_source.mapping_set()
+                    if self.meta_source is not None else ""
+                )
+
+                cur = self.db.execute(
+                    "INSERT INTO runs"
+                    "(started_at, vin, gateway, ecu, ecu_addr, mapping_set) "
+                    "VALUES (?,?,?,?,?,?)",
+                    payload + (mapping_set,),
+                )
                 self.run_id = cur.lastrowid
+
+                if manifest:
+                    self.db.executemany(
+                        "INSERT INTO run_mappings"
+                        "(run_id, mapping_id, version, production, source_path) "
+                        "VALUES (?,?,?,?,?)",
+                        [
+                            (self.run_id, m["id"], m["version"],
+                             1 if m["production"] else 0, m["source_path"])
+                            for m in manifest
+                        ],
+                    )
+
+                self.db.commit()
 
             elif kind == "event" and self.run_id is not None:
                 ts, ekind, msg = payload
