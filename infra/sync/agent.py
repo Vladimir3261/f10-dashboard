@@ -145,13 +145,21 @@ def global_session_id(db_path: str, run_id: int) -> int:
     return (ns << 20) | (int(run_id) & 0xFFFFF)
 
 
+def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
+    """Whether `table` has `column` (older dbs predate mapping versioning)."""
+    return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})"))
+
+
 def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
     """Unsynced sample rows, resolved to VIN + channel key, read-only."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     try:
+        # p.mapping_ver only exists on databases recorded after mapping
+        # versioning landed; fall back to '' for older ones.
+        ver = "p.mapping_ver" if _has_column(con, "params", "mapping_ver") else "''"
         cur = con.execute(
-            "SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, p.unit, s.value "
+            f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, p.unit, s.value, {ver} "
             "FROM samples s "
             "JOIN runs r   ON r.id = s.run_id "
             "JOIN params p ON p.id = s.param_id "
@@ -165,8 +173,9 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
     return [
         {"_rowid": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, run_id),
-         "ts": ts, "channel_raw": key, "unit": unit or "", "value": value}
-        for rid, vin, run_id, ts, key, unit, value in rows
+         "ts": ts, "channel_raw": key, "unit": unit or "", "value": value,
+         "mapping_ver": mver or ""}
+        for rid, vin, run_id, ts, key, unit, value, mver in rows
     ]
 
 
@@ -175,8 +184,10 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     try:
+        # runs.mapping_set only exists post-versioning; fall back to ''.
+        mset = "mapping_set" if _has_column(con, "runs", "mapping_set") else "''"
         rows = con.execute(
-            "SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway "
+            f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, {mset} "
             "FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
@@ -187,8 +198,8 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         {"_id": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, rid),
          "started": started, "ended": ended, "ecu": ecu or "",
-         "ecu_addr": ecu_addr, "gateway": gateway or ""}
-        for rid, vin, started, ended, ecu, ecu_addr, gateway in rows
+         "ecu_addr": ecu_addr, "gateway": gateway or "", "mappings": mset_val or ""}
+        for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val in rows
     ]
 
 

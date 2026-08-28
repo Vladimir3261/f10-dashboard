@@ -19,7 +19,7 @@ from bmwdiag.mapping.errors import ResponseMismatchError
 def one_request(response_block: str, decode: str = "{type: uint16_be}") -> str:
     return f"""
 schema_version: 1
-mapping: {{id: matcher-fixture, production: false}}
+mapping: {{id: matcher-fixture, version: 1, production: false}}
 ecu: {{target: 0x7E}}
 requests:
   r1:
@@ -114,7 +114,7 @@ class GroupedResponses(unittest.TestCase):
         """One reply carries two values; one exchange, two channels."""
         text = """
 schema_version: 1
-mapping: {id: grouped-fixture, production: false}
+mapping: {id: grouped-fixture, version: 1, production: false}
 ecu: {target: 0x7E}
 requests:
   block:

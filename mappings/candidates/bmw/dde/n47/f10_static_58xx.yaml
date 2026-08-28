@@ -24,7 +24,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-static-58xx
-  version: "0"
+  version: 1
   production: false
   description: >
     CANDIDATE - F10 static Mode-22 oil pressure (0x586F, u16 millibar),

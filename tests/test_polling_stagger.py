@@ -17,7 +17,7 @@ from bmwdiag.mapping.polling import resolve_classes
 
 STAGGERED = """
 schema_version: 1
-mapping: {id: stagger-fixture, production: false}
+mapping: {id: stagger-fixture, version: 1, production: false}
 ecu: {target: 0x12}
 polling_classes:
   fast: {every: 1, priority: 0}

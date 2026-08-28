@@ -20,6 +20,7 @@ schema_version: 1
 
 mapping:
   id: grouped-test
+  version: 1
 
 ecu:
   family: test

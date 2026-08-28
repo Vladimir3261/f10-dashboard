@@ -16,7 +16,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-egs-transmission
-  version: "0"
+  version: 1
   production: false
   description: >
     CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)

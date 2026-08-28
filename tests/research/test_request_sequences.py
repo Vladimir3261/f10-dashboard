@@ -138,7 +138,7 @@ class CandidateSequence(unittest.TestCase):
     def test_empty_setup_frame_is_rejected_by_the_loader(self):
         bad = """
 schema_version: 1
-mapping: {id: bad-setup, production: false}
+mapping: {id: bad-setup, version: 1, production: false}
 ecu: {target: 0x12}
 requests:
   r1:

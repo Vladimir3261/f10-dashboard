@@ -208,6 +208,7 @@ class TestPollCycle(LiveWiringCase):
 schema_version: 1
 mapping:
   id: extra-test-channel
+  version: 1
 ecu:
   family: engine
   target: discovered_engine
@@ -310,7 +311,9 @@ class TestRecorderCompatibility(LiveWiringCase):
         finally:
             db.close()
 
-        self.assertEqual(columns, ["id", "key", "pid", "label", "unit"])
+        self.assertEqual(
+            columns, ["id", "key", "pid", "label", "unit", "mapping_ver"]
+        )
         self.assertEqual(rows["rpm"], (0x0C, "Engine speed", "rpm"))
         #
         # A derived channel has no PID; the column must be NULL, not 0.

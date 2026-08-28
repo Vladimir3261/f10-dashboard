@@ -28,6 +28,7 @@ engine speed.
 | `bmwdiag/mapping/model.py` | frozen dataclasses; the whole runtime vocabulary |
 | `bmwdiag/mapping/yamlsubset.py` | dependency-free parser for the mapping YAML subset |
 | `bmwdiag/mapping/loader.py` | parse + validate one file into a `MappingFile` |
+| `bmwdiag/mapping/versioning.py` | the `VERSIONS.lock` ledger (build/check) |
 | `bmwdiag/mapping/registry.py` | hold every file; resolve against one vehicle |
 | `bmwdiag/mapping/decoder.py` | primitives, transformations, response matching |
 | `bmwdiag/mapping/derive.py` | computed channels, closed set of named operations |
@@ -38,6 +39,13 @@ engine speed.
 
 `bmwdiag` imports nothing outside the standard library, and nothing in it
 opens a socket.
+
+Every mapping file also carries an integer `mapping.version` that is
+stamped onto the data it decodes, so a recorded dataset ties back to the
+exact mapping revision that produced it. That mechanism — the versioning
+rule, the `VERSIONS.lock` ledger, and where the version is stored through
+to the lake — is documented separately in
+[`DATA_VERSIONING.md`](DATA_VERSIONING.md).
 
 ---
 

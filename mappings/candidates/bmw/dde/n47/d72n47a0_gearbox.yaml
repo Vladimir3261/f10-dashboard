@@ -18,7 +18,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-gearbox
-  version: "0"
+  version: 1
   production: false
   description: >
     DDE-received gearbox values (oil temp, turbine speed, converter

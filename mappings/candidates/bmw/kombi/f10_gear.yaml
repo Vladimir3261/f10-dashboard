@@ -24,7 +24,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-kombi-gear
-  version: "0"
+  version: 1
   production: false
   description: >
     CANDIDATE - current gear from the KOMBI (0x63) via static UDS 22 D031

@@ -366,7 +366,15 @@ class MappingFile:
     id: str
     source_path: str
     description: str = ""
-    version: str = "0"
+    #: Data version of THIS mapping file. A positive integer that starts
+    #: at 1 and is incremented by one on every change to the file's
+    #: content (a decode, scale, DID, added/removed signal - anything that
+    #: alters what the file produces). It tracks the *mapping data*, never
+    #: the code: editing the loader or live.py never changes it. The
+    #: version is stamped onto every recorded sample the file decodes, so
+    #: a dataset can always be tied back to the exact mapping revision that
+    #: produced it. See docs/DATA_VERSIONING.md. The loader requires it.
+    version: int = 1
     production: bool = True
     ecu: EcuDef = field(default_factory=EcuDef)
     requests: Tuple[RequestDef, ...] = ()
