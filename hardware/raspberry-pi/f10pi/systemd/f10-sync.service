@@ -1,0 +1,23 @@
+# f10 telemetry sync agent — ships recorded drives to the ClickHouse lake
+# over wlan0. Installed by configure-app-services.sh (@PI_USER@/@REPO_DIR@
+# substituted from config/local.env). Fault-tolerant: reads the local
+# SQLite databases read-only and retries when the network is down, so it
+# is safe to run continuously.
+[Unit]
+Description=F10 telemetry sync agent (ships drives to the lake)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@PI_USER@
+WorkingDirectory=@REPO_DIR@
+# Config (server URL + token) is gitignored; recreate from
+# infra/sync/config.example.json. Endpoint/creds are reached over wg0.
+ExecStart=/usr/bin/python3 @REPO_DIR@/infra/sync/agent.py --config @REPO_DIR@/infra/sync/config.json
+Restart=on-failure
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

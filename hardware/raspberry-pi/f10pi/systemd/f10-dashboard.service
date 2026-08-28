@@ -1,0 +1,21 @@
+# f10 telemetry runtime + dashboard. Installed by configure-app-services.sh,
+# which substitutes @PI_USER@ and @REPO_DIR@ from config/local.env.
+# Read-only on the car. Waits for the network but does NOT require the BMW
+# cable (the runtime tolerates the car being absent and retries).
+[Unit]
+Description=F10 telemetry runtime + dashboard (run_car.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@PI_USER@
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/run_car.sh
+Restart=on-failure
+RestartSec=5
+# stdlib-only runtime: no venv, just system python3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

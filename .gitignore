@@ -70,3 +70,17 @@ desktop.ini
 /infra/.env
 /infra/sync/config.json
 /local/sync-state.json
+
+# --------------------------------------------------------- hardware secrets
+# Per-device config + secrets for the Pi and other hardware. Only the
+# tracked *.example / *.template files belong in git; the real files
+# (Wi-Fi PSKs, WireGuard keys, backend creds) are injected outside git.
+hardware/**/config/local.env
+hardware/**/config/secrets.env
+hardware/**/config/wifi.env
+hardware/**/config/wireguard.conf
+hardware/**/config/clickhouse.env
+hardware/**/config/ssh_config
+hardware/**/*.key
+hardware/**/*.pem
+hardware/**/*_wg0.conf
