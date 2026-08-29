@@ -6,12 +6,12 @@
 - name: Require stack secrets in the environment
   ansible.builtin.assert:
     that:
-      - lookup('env', 'CH_PASS') | length > 0
-      - lookup('env', 'INGEST_TOKEN') | length > 0
-      - lookup('env', 'GF_ADMIN_PASSWORD') | length > 0
+      - dotenv.get('CH_PASS', '') | length > 0
+      - dotenv.get('INGEST_TOKEN', '') | length > 0
+      - dotenv.get('GF_ADMIN_PASSWORD', '') | length > 0
     fail_msg: >-
       CH_PASS, INGEST_TOKEN and GF_ADMIN_PASSWORD must be set. Fill
-      infra/.env on your machine (the Makefile exports it) - see
+      infra/.env on your machine - see
       infra/.env.example.
     quiet: true
 
@@ -47,6 +47,31 @@
   changed_when: >-
     ('Started' in compose_up.stderr) or ('Created' in compose_up.stderr)
     or ('Recreated' in compose_up.stderr) or ('Built' in compose_up.stderr)
+
+# GF_SECURITY_ADMIN_PASSWORD only takes effect when Grafana initialises its
+# database for the first time. Changing it in .env afterwards has no effect,
+# so a corrected password would still be rejected at the login form. Reset it
+# explicitly on every deploy to keep Grafana in step with infra/.env.
+- name: Reconcile the Grafana admin password with infra/.env
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - grafana
+      - grafana
+      - cli
+      - admin
+      - reset-admin-password
+      - "{{ dotenv.get('GF_ADMIN_PASSWORD', '') }}"
+    chdir: "{{ app_dir }}/infra"
+  register: gf_reset
+  changed_when: "'Admin password changed successfully' in gf_reset.stdout"
+  retries: 10
+  delay: 6
+  until: gf_reset.rc == 0
+  no_log: true
 
 - name: Wait for the ingest server to become healthy on localhost
   ansible.builtin.uri:

@@ -14,21 +14,21 @@
 
 - name: Read edge configuration from the environment
   ansible.builtin.set_fact:
-    # .split() is called on the Python string directly rather than via a
-    # `split` filter, so this works on any ansible-core version.
+    # Values come from the dotenv dict loaded in site.yml, not the
+    # environment: Make's export mangles any value containing `$`.
     gf_allowed_ips: >-
-      {{ lookup('env', 'GF_ALLOWED_IPS').split(',')
+      {{ dotenv.get('GF_ALLOWED_IPS', '').split(',')
          | map('trim') | reject('equalto', '') | list }}
-    gf_public_port: "{{ lookup('env', 'GF_PUBLIC_PORT') | default('80', true) }}"
-    gf_server_name: "{{ lookup('env', 'GF_SERVER_NAME') | default('_', true) }}"
-    grafana_domain: "{{ lookup('env', 'GRAFANA_DOMAIN') | trim }}"
-    dashboard_domain: "{{ lookup('env', 'DASHBOARD_DOMAIN') | trim }}"
-    pi_wg_ip: "{{ lookup('env', 'PI_WG_IP') | default('10.77.0.10', true) }}"
-    pi_dashboard_port: "{{ lookup('env', 'PI_DASHBOARD_PORT') | default('8080', true) }}"
-    dashboard_auth_user: "{{ lookup('env', 'DASHBOARD_AUTH_USER') | default('f10', true) }}"
-    dashboard_auth_password: "{{ lookup('env', 'DASHBOARD_AUTH_PASSWORD') }}"
-    le_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | trim }}"
-    le_staging: "{{ lookup('env', 'LETSENCRYPT_STAGING') | default('0', true) }}"
+    gf_public_port: "{{ dotenv.get('GF_PUBLIC_PORT', '') | default('80', true) }}"
+    gf_server_name: "{{ dotenv.get('GF_SERVER_NAME', '') | default('_', true) }}"
+    grafana_domain: "{{ dotenv.get('GRAFANA_DOMAIN', '') | trim }}"
+    dashboard_domain: "{{ dotenv.get('DASHBOARD_DOMAIN', '') | trim }}"
+    pi_wg_ip: "{{ dotenv.get('PI_WG_IP', '') | default('10.77.0.10', true) }}"
+    pi_dashboard_port: "{{ dotenv.get('PI_DASHBOARD_PORT', '') | default('8080', true) }}"
+    dashboard_auth_user: "{{ dotenv.get('DASHBOARD_AUTH_USER', '') | default('f10', true) }}"
+    dashboard_auth_password: "{{ dotenv.get('DASHBOARD_AUTH_PASSWORD', '') }}"
+    le_email: "{{ dotenv.get('LETSENCRYPT_EMAIL', '') | trim }}"
+    le_staging: "{{ dotenv.get('LETSENCRYPT_STAGING', '') | default('0', true) }}"
 
 - name: Decide whether TLS is in play
   ansible.builtin.set_fact:
