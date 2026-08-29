@@ -44,6 +44,33 @@ def terraform_outputs() -> dict:
     return {k: v.get("value") for k, v in doc.items()}
 
 
+def git_origin_https() -> str:
+    """
+    This checkout's origin remote, normalised to an https:// clone URL.
+
+    Deploying should always ship the code you are standing in, so the server
+    clones from your own fork rather than a hardcoded upstream account. SSH
+    remotes (git@host:owner/repo.git) are rewritten to https so the server
+    needs no deploy key. Returns "" if there is no origin, in which case the
+    group_vars fallback applies.
+    """
+    try:
+        url = subprocess.run(
+            ["git", "-C", INFRA, "remote", "get-url", "origin"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+    if url.startswith("git@") and ":" in url:
+        host, _, path = url[4:].partition(":")
+        url = f"https://{host}/{path}"
+    elif url.startswith("ssh://git@"):
+        url = "https://" + url[len("ssh://git@"):]
+
+    return url
+
+
 def render_inventory(out: dict) -> str:
     ip = out.get("droplet_ip")
     user = out.get("ssh_user") or "root"
@@ -61,6 +88,15 @@ def render_inventory(out: dict) -> str:
         "    analytics:",
         f"      ansible_host: {ip}",
         f"      ansible_user: {user}",
+    ]
+
+    # Host var (highest precedence) so a fork deploys its own code without
+    # editing any tracked file.
+    origin = git_origin_https()
+    if origin:
+        lines.append(f"      repo_url: {json.dumps(origin)}")
+
+    lines += [
         "  vars:",
         f"    wireguard_port: {int(wg_port)}",
         "    admin_ssh_public_keys:",
