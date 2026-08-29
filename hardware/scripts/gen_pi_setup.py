@@ -143,12 +143,11 @@ def main():
     if not ingest_token:
         die("INGEST_TOKEN is not set in infra/.env")
 
+    # Wi-Fi is OPTIONAL. A Pi that already connects to its networks needs no
+    # Wi-Fi configuration at all, and rewriting its NetworkManager profiles
+    # would be a good way to lose contact with it. With no networks listed,
+    # the generated script leaves Wi-Fi completely alone (DO_WIFI=0).
     nets = wifi_networks(wifi_cfg)
-    if not nets:
-        die(f"no Wi-Fi networks configured.\n"
-            f"  cp {os.path.join(PI_CFG, 'wifi.example.env')} "
-            f"{os.path.join(PI_CFG, 'wifi.env')}\n"
-            f"  then fill in SSIDs/PSKs (it is gitignored)")
 
     pi_user = env.get("PI_USER", "f10")
     # Where the repo lives on the Pi. Detected by setup-pi.sh when there is
@@ -186,15 +185,22 @@ def main():
         )
     print(f"[gen] wrote {os.path.relpath(PEERS, ROOT)}")
 
-    wifi_block = "\n".join(
-        f"add_wifi {shlex.quote(s)} {shlex.quote(p)} {shlex.quote(str(pr))}"
-        for s, p, pr in nets
-    )
+    if nets:
+        wifi_block = "\n".join(
+            f"add_wifi {shlex.quote(s)} {shlex.quote(p)} {shlex.quote(str(pr))}"
+            for s, p, pr in nets
+        )
+        print(f"[gen] {len(nets)} Wi-Fi network(s) will be configured")
+    else:
+        wifi_block = ('log "no Wi-Fi networks given - leaving the Pi\'s '
+                      'existing Wi-Fi untouched"')
+        print("[gen] no Wi-Fi networks given - the Pi's Wi-Fi is left alone")
 
     script = TEMPLATE.format(
         hostname=hostname, pi_user=pi_user, repo_url=repo_url,
         repo_dir=repo_dir or f"/home/{pi_user}/f10-dashboard",
         eth_ll=eth_ll, wifi_block=wifi_block,
+        do_wifi=1 if nets else 0,
         pi_wg_ip=pi_wg_ip, wg_priv=priv, wg_srv_pub=srv_pub,
         endpoint=f"{droplet_ip}:{wg_port}",
         wg_subnet=env.get("WG_SUBNET", "10.77.0.0/24"),
@@ -275,7 +281,7 @@ WG_IF=wg0
 ETH_LINK_LOCAL={eth_ll}
 WG_SERVER_IP={wg_server_ip}
 DO_HOSTNAME=1
-DO_WIFI=1
+DO_WIFI={do_wifi}
 DO_WIREGUARD=1
 DO_SSH=1
 DO_ETH0_BMW=1
@@ -285,10 +291,14 @@ LOCALENV
 chmod 600 "$F10PI_DIR/config/local.env"
 
 # -------------------------------------------------------------- wifi.env
+# Only rewritten when networks were supplied; otherwise the Pi's existing
+# Wi-Fi configuration is left exactly as it is (DO_WIFI above is then 0, so
+# bootstrap.sh skips the Wi-Fi step entirely).
+WIFI_N=0
+if [[ {do_wifi} -eq 1 ]]; then
 log "writing config/wifi.env"
 : > "$F10PI_DIR/config/wifi.env"
 chmod 600 "$F10PI_DIR/config/wifi.env"
-WIFI_N=0
 add_wifi() {{   # ssid psk priority
   WIFI_N=$((WIFI_N + 1))
   {{
@@ -299,9 +309,13 @@ add_wifi() {{   # ssid psk priority
   log "  wifi $WIFI_N: priority $3"
 }}
 
+fi
+
 {wifi_block}
 
-printf 'WIFI_COUNT=%d\n' "$WIFI_N" >> "$F10PI_DIR/config/wifi.env"
+if [[ {do_wifi} -eq 1 ]]; then
+  printf 'WIFI_COUNT=%d\n' "$WIFI_N" >> "$F10PI_DIR/config/wifi.env"
+fi
 
 # --------------------------------------------------------- wireguard.conf
 log "writing config/wireguard.conf"
