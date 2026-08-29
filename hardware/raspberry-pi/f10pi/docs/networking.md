@@ -41,6 +41,24 @@ Configured from the gitignored `config/wifi.env` by
 [`configure-wifi.sh`](../scripts/configure-wifi.sh). Real SSIDs/PSKs never
 enter git.
 
+**One profile per SSID.** A Pi flashed with Wi-Fi preconfigured already has a
+profile for that network under a different name, and two profiles for one
+SSID carry independent priorities. If they tie, which one NetworkManager
+picks at boot is not deterministic — seen in the field, where a leftover
+profile tied with the in-car LTE router and the Pi could come up on either.
+`configure-wifi.sh` therefore deletes any other profile for an SSID it
+manages (never the active one). Check with:
+
+```bash
+nmcli -t -f NAME,AUTOCONNECT-PRIORITY,TYPE connection show \
+  | awk -F: '$3=="802-11-wireless"'
+```
+
+Priority decides which network is chosen **when connecting** — at boot, or
+after a drop. NetworkManager does not abandon a working connection just
+because a higher-priority profile appears, so a new profile takes effect on
+the next reboot rather than immediately.
+
 ```bash
 # inspect (no secrets printed)
 nmcli -f NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY connection show

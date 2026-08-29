@@ -20,6 +20,30 @@ upsert_wifi() {
   local ssid="$1" psk="$2" prio="$3" name="wifi-${1}"
   [[ -z "${ssid}" || "${ssid}" == "<"* ]] && { warn "skip unset SSID ('${ssid}')"; return; }
 
+  #
+  # Remove any OTHER profile for the same SSID before writing ours.
+  #
+  # A Pi flashed with Wi-Fi preconfigured (or set up by hand) already has a
+  # profile for that network under a different name. Left in place, two
+  # profiles compete for one SSID with independent priorities - and if they
+  # happen to tie, which one NetworkManager picks at boot is not
+  # deterministic. Observed in the field: a leftover profile tied with the
+  # in-car LTE router, so the Pi could come up on either.
+  #
+  local other
+  while read -r other; do
+    [[ -z "${other}" || "${other}" == "${name}" ]] && continue
+    if [[ "$(nmcli -g 802-11-wireless.ssid connection show "${other}" 2>/dev/null)" == "${ssid}" ]]; then
+      if [[ "$(nmcli -t -f NAME,DEVICE connection show --active \
+               | awk -F: -v d="${WLAN_IF}" '$2==d{print $1}')" == "${other}" ]]; then
+        warn "leaving ${other} in place: it is the ACTIVE connection"
+      else
+        log "removing duplicate profile ${other} (same SSID as ${name})"
+        nmcli connection delete "${other}" >/dev/null 2>&1 || true
+      fi
+    fi
+  done < <(nmcli -t -g NAME connection show)
+
   if nmcli -g NAME connection show | grep -Fxq "${name}"; then
     log "updating profile ${name}"
   else
