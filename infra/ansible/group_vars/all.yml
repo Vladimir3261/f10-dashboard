@@ -33,8 +33,25 @@ admin_user: f10
 disable_root_login: false
 
 # WireGuard gateway. wireguard_port comes from the inventory (terraform).
+#
+# PRIMARY PURPOSE: reach the Raspberry Pi by SSH when it is not on your LAN.
+# The Pi lives in the car behind CGNAT/mobile data and has no public address,
+# so it dials out to this server and the server relays between peers. Add BOTH
+# the Pi and your laptop as peers - the laptop is not a peer by default, and
+# without it there is nothing to SSH *from* over the tunnel.
+#
+# The lake ingest also runs over the same tunnel, so the bearer token and
+# telemetry never cross the public internet in the clear.
+#
+# On the server each peer is pinned to its own /32. On each CLIENT set
+# `AllowedIPs = 10.77.0.0/24` (the whole subnet, not just the server) or peers
+# cannot reach each other. Forwarding between peers is already enabled here
+# (ip_forward + the FORWARD rules in wg0.conf).
 wireguard_address: "10.77.0.1/24"     # the server's address on the VPN
-wireguard_peers: []                   # add peers later, e.g.:
-#   - name: f10pi
+wireguard_peers: []                   # e.g.:
+#   - name: f10pi                     # the in-car Raspberry Pi
 #     public_key: "<pi public key>"
 #     allowed_ips: "10.77.0.10/32"
+#   - name: laptop                    # you, so you can SSH to the Pi
+#     public_key: "<laptop public key>"
+#     allowed_ips: "10.77.0.20/32"

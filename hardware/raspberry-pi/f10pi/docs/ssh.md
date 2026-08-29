@@ -2,15 +2,28 @@
 
 Two directions:
 
-1. **Into the Pi** — you administer the Pi (from your laptop, over `wg0`
-   or the LAN via `f10pi.local`).
-2. **Pi → server** — the Pi opens outbound SSH to the telemetry server
-   (e.g. for the reverse dashboard tunnel), reached over `wg0`.
+1. **Into the Pi** — you administer the Pi, over `wg0` from anywhere or via
+   `f10pi.local` on the LAN. Reaching it remotely is the whole reason the
+   WireGuard tunnel exists; see [`wireguard.md`](wireguard.md).
+2. **Pi → server** — the Pi opens outbound SSH to the telemetry server when
+   you need it (a shell, a file copy), reached over `wg0`.
 
 ## Into the Pi
 
 - On the LAN: `ssh <PI_USER>@f10pi.local` (mDNS via avahi).
-- Remotely: over `wg0` at the Pi's management IP (`<WG_PI_IP>`).
+- **From anywhere:** over `wg0` at the Pi's VPN address:
+  ```bash
+  ssh <PI_USER>@<WG_PI_IP>        # e.g. 10.77.0.10
+  ```
+  This needs **your laptop to be a WireGuard peer too** — the tunnel relays
+  laptop↔Pi through the server, so a tunnel with only the Pi in it gives you
+  nothing to connect from. Add both to `wireguard_peers` in
+  `infra/ansible/group_vars/all.yml` and re-run `make deploy`, and make sure
+  the laptop's client config sets `AllowedIPs` to the whole VPN subnet.
+
+There is deliberately **no public SSH path to the Pi** — no port forwarding,
+no reverse tunnel. If the VPN is down, the fallback is physical access
+(monitor + keyboard) or the LAN; see [`recovery.md`](recovery.md).
 
 ### Hardening (do it only after keys work)
 
