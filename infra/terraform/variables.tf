@@ -1,10 +1,10 @@
 # Inputs. Copy terraform.tfvars.example -> terraform.tfvars (gitignored)
-# and adjust. The DigitalOcean API token is NOT a variable here: export it
-# as an environment variable so it never lands in a file:
+# and adjust. The DigitalOcean API token is NOT a variable here: the
+# provider reads it from the DIGITALOCEAN_TOKEN environment variable. Put it
+# in infra/.env (gitignored; the Makefile loads + exports it) or export it
+# in your shell:
 #
 #   export DIGITALOCEAN_TOKEN=dop_v1_xxx
-#
-# (the provider reads it automatically).
 
 variable "droplet_name" {
   description = "Name/hostname of the analytics droplet."
