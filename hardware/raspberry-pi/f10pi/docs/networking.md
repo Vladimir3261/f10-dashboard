@@ -33,9 +33,15 @@ highest-priority network in range and roams as they come and go:
 
 | network | example priority |
 |---|---|
+| in-vehicle LTE router | 110 |
 | home Wi-Fi | 100 |
-| phone hotspot | 80 |
-| in-vehicle LTE router | 70 |
+| phone hotspot | 70 |
+
+The in-car router usually wants to be **highest**: it is the link that is
+actually present while driving, and it is the one you want chosen at every
+boot. The trade-off is that it also wins when parked at home, so the Pi uses
+mobile data there — put it below home Wi-Fi instead if that matters more than
+a predictable in-car link.
 
 Configured from the gitignored `config/wifi.env` by
 [`configure-wifi.sh`](../scripts/configure-wifi.sh). Real SSIDs/PSKs never
