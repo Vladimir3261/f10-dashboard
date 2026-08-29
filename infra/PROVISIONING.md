@@ -298,11 +298,11 @@ order. It looks at the Pi first: if the repo is **already cloned** — anywhere,
 not just the default path — it reuses that checkout instead of cloning a
 second copy.
 
-**Wi-Fi is optional.** If the Pi already connects to the networks it needs -
-which is the normal case for a Pi that has been running - answer no and its
-Wi-Fi configuration is left completely alone. Supply networks only when you
-want the Pi to learn new ones. A list saved from a previous run is reused
-automatically; pass `--wifi` to enter it again.
+**Wi-Fi handling.** If `wifi.env` exists, the SSID questions are skipped and
+its networks are **applied to the Pi on every run** — edit that file to change
+them, or pass `--wifi` to re-enter them interactively. If the file does not
+exist you are asked once; answering no leaves the Pi's Wi-Fi completely
+untouched, which is the right choice when it already connects fine.
 
 The manual equivalent is below, if you prefer to drive the steps yourself.
 
