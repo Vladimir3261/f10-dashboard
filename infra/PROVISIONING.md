@@ -284,6 +284,24 @@ The Pi is provisioned from a **generated one-shot script**, so it always
 matches the infrastructure that exists right now — the droplet's address, the
 WireGuard endpoint and keys, the ingest token, your Wi-Fi networks.
 
+### The easy way: one interactive script
+
+From the repo root:
+
+```bash
+./setup-pi.sh
+```
+
+It asks for your Wi-Fi networks (add as many as you like), the Pi's login and
+where to reach it on your LAN, then runs the whole sequence in the right
+order. It looks at the Pi first: if the repo is **already cloned** — anywhere,
+not just the default path — it reuses that checkout instead of cloning a
+second copy.
+
+The manual equivalent is below, if you prefer to drive the steps yourself.
+
+### Manually
+
 First, list the Wi-Fi networks the Pi should join (as many as you like; the
 highest-priority one in range wins):
 
