@@ -1,0 +1,82 @@
+{#
+  Shown instead of a raw 502 when the Pi is not reachable through the tunnel.
+  Served only inside the authenticated vhost, so it is never public, and it
+  deliberately mentions no addresses, keys or vehicle identifiers.
+  Self-contained: no external CSS, fonts or scripts.
+#}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car offline</title>
+<style>
+  :root {
+    --bg: #0e1013; --panel: #16191e; --line: #23272e;
+    --fg: #e8eaed; --muted: #8b929c; --accent: #d4a24c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 1.5rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+  }
+  .card {
+    width: 100%; max-width: 30rem; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 14px; padding: 2rem;
+  }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+    display: inline-block; margin-right: .6rem; vertical-align: middle;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none } }
+  h1 { font-size: 1.35rem; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  p  { margin: 0 0 1rem; color: var(--muted); }
+  ul { margin: 0 0 1.5rem; padding-left: 1.1rem; color: var(--muted); }
+  li { margin: .3rem 0; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; border-top: 1px solid var(--line); padding-top: 1.1rem;
+  }
+  button {
+    font: inherit; font-weight: 600; color: #1a1c20; background: var(--accent);
+    border: 0; border-radius: 8px; padding: .55rem 1.1rem; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  .muted { color: var(--muted); font-size: .875rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="dot"></span>Car is offline</h1>
+    <p>
+      The dashboard is not reachable right now. This is normal when the car
+      is parked — the logger only runs with the ignition on.
+    </p>
+    <ul>
+      <li>Ignition off, or the logger is not running</li>
+      <li>No mobile signal where the car is parked</li>
+      <li>The diagnostic cable is unplugged</li>
+    </ul>
+    <div class="row">
+      <span class="muted">Retrying in <span id="t">30</span>s</span>
+      <button id="retry" type="button">Retry now</button>
+    </div>
+  </div>
+<script>
+  // Poll rather than hard-reloading on a timer, so the page comes back by
+  // itself the moment the car is up again.
+  var left = 30, out = document.getElementById('t');
+  function retry() { location.reload(); }
+  document.getElementById('retry').addEventListener('click', retry);
+  setInterval(function () {
+    left -= 1;
+    if (left <= 0) { retry(); return; }
+    out.textContent = left;
+  }, 1000);
+</script>
+</body>
+</html>
