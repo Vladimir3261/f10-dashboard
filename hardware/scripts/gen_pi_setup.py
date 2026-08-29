@@ -6,7 +6,7 @@ Reads the CURRENT infrastructure state - the droplet's address from Terraform,
 secrets from infra/.env, Wi-Fi networks from the Pi's wifi.env - and writes a
 self-contained bash script you copy to the Pi and run once.
 
-    python3 infra/scripts/gen_pi_setup.py        # or: make pi-setup
+    cd hardware && make pi-setup
 
 WIREGUARD KEYS ARE GENERATED ON THE SERVER, never here. The laptop has no
 WireGuard tooling and never holds a long-lived key: this script SSHes to the
@@ -17,8 +17,8 @@ re-rendering wg0.conf without it.
 
 Intended flow:
 
-    make pi-setup                  # here: writes local/pi-setup.sh
-    make deploy                    # server learns the peer
+    cd hardware && make pi-setup   # here: writes local/pi-setup.sh
+    cd infra && make deploy        # server learns the peer
     scp local/pi-setup.sh <pi>:    # over your LAN
     ssh <pi> 'sudo ./pi-setup.sh'  # Pi joins the new VPN
     ssh -J root@<droplet> f10@<pi-vpn-ip>     # from now on, via the VPS
@@ -34,11 +34,12 @@ import shlex
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-INFRA = os.path.dirname(HERE)
-ROOT = os.path.dirname(INFRA)
+HERE = os.path.dirname(os.path.abspath(__file__))       # hardware/scripts
+ROOT = os.path.dirname(os.path.dirname(HERE))           # repo root
+INFRA = os.path.join(ROOT, "infra")
 TF_DIR = os.path.join(INFRA, "terraform")
-PI_CFG = os.path.join(ROOT, "hardware", "raspberry-pi", "f10pi", "config")
+PI_CFG = os.path.join(HERE, "..", "raspberry-pi", "f10pi", "config")
+PI_CFG = os.path.normpath(PI_CFG)
 OUT = os.path.join(ROOT, "local", "pi-setup.sh")
 PEERS = os.path.join(INFRA, "ansible", "group_vars", "all", "peers.yml")
 
