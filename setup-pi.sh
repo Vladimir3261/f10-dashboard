@@ -112,10 +112,15 @@ fi
 declare -a SSIDS PSKS PRIOS
 priority=100
 
+SKIP_WIFI=0
 if [[ $WIFI_ALREADY_SAVED -eq 0 ]]; then
+echo "   Optional. If the Pi already connects to the networks it needs,"
+echo "   skip this and its Wi-Fi is left exactly as it is."
+echo
+if confirm "   Configure Wi-Fi networks?"; then
+echo
 echo "   The Pi joins the highest-priority network in range, so list your"
 echo "   home network first and the in-car hotspot after it."
-echo
 while :; do
   n=$(( ${#SSIDS[@]} + 1 ))
   echo
@@ -130,6 +135,10 @@ while :; do
   echo
   confirm "   Add another Wi-Fi network?" || break
 done
+else
+  SKIP_WIFI=1
+  echo "   skipping - the Pi's existing Wi-Fi will not be touched"
+fi
 fi
 
 # ------------------------------------------------------------------ the Pi
@@ -175,7 +184,9 @@ export PI_REPO_DIR
 
 echo
 bold "4. Review"
-if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+if [[ $SKIP_WIFI -eq 1 ]]; then
+  echo "   Wi-Fi networks:  not changing them"
+elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
   echo "   Wi-Fi networks:  reusing the saved list above"
 else
   echo "   Wi-Fi networks:"
@@ -188,7 +199,9 @@ echo "   Repo on the Pi:  $PI_REPO_DIR"
 echo "   Server:          $DROPLET_IP"
 echo
 echo "   Will now:"
-if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+if [[ $SKIP_WIFI -eq 1 ]]; then
+  echo "     - leave the Pi's Wi-Fi configuration alone"
+elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
   echo "     - keep the existing wifi.env untouched"
 else
   echo "     - write the Wi-Fi list to hardware/.../config/wifi.env (gitignored)"
@@ -203,7 +216,9 @@ confirm "   Proceed?" || { echo "   aborted."; exit 0; }
 # -------------------------------------------------------------- do the work
 
 echo
-if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+if [[ $SKIP_WIFI -eq 1 ]]; then
+  log "leaving the Pi's Wi-Fi alone"
+elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
   log "keeping the existing $(basename "$WIFI_ENV")"
 else
   log "writing $(basename "$WIFI_ENV")"

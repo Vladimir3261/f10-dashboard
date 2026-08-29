@@ -298,8 +298,11 @@ order. It looks at the Pi first: if the repo is **already cloned** — anywhere,
 not just the default path — it reuses that checkout instead of cloning a
 second copy.
 
-If the Wi-Fi list has already been saved from a previous run it is reused and
-those questions are skipped; pass `--wifi` to enter them again.
+**Wi-Fi is optional.** If the Pi already connects to the networks it needs -
+which is the normal case for a Pi that has been running - answer no and its
+Wi-Fi configuration is left completely alone. Supply networks only when you
+want the Pi to learn new ones. A list saved from a previous run is reused
+automatically; pass `--wifi` to enter it again.
 
 The manual equivalent is below, if you prefer to drive the steps yourself.
 
@@ -313,6 +316,9 @@ cp hardware/raspberry-pi/f10pi/config/wifi.example.env \
    hardware/raspberry-pi/f10pi/config/wifi.env
 $EDITOR hardware/raspberry-pi/f10pi/config/wifi.env      # gitignored
 ```
+
+Skip this entirely if the Pi's Wi-Fi is already set up: with no `wifi.env`,
+the generated script sets `DO_WIFI=0` and never touches NetworkManager.
 
 Then:
 
