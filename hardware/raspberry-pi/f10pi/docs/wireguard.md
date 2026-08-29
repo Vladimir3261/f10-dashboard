@@ -7,19 +7,23 @@ the one machine with a stable public address, so the Pi and your laptop both
 dial *out* to it and the server relays between them:
 
 ```
-  laptop 10.77.0.20  ──►  VPS 10.77.0.1  ◄──  Pi 10.77.0.10
-                          (relays)
+  laptop  ──public SSH──►  VPS 10.77.0.1  ──wg0──►  Pi 10.77.0.10
+                           (jump host)
 
-  ssh f10@10.77.0.10        # from any network, no port forwarding
+  ssh -J root@<vps> f10@<WG_PI_IP>     # one command, two hops
 ```
+
+**Only the Pi joins the VPN.** Your laptop does not: it reaches the VPS over
+ordinary public SSH, and the VPS — a tunnel endpoint itself — reaches the Pi
+directly. So the tunnel needs exactly one peer.
 
 The sync agent also reaches ingest over this tunnel, so the bearer token and
 telemetry never cross the public Internet in cleartext — useful, but
 secondary to remote access.
 
-> **Your laptop must be a peer too.** Adding only the Pi leaves you with a
-> tunnel and nothing to connect from. Add both to `wireguard_peers` in
-> `infra/ansible/group_vars/all.yml`, then `make deploy`.
+> **Bootstrap gap:** none of this works until WireGuard is configured on the
+> Pi. Do that first configuration over the LAN (`f10pi.local`) or with a
+> monitor and keyboard.
 
 ## Why WireGuard here
 

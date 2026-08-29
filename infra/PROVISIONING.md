@@ -40,9 +40,13 @@ Set at least:
 | `INGEST_TOKEN` | sync agent bearer token | `openssl rand -hex 32` |
 | `GF_ADMIN_PASSWORD` | Grafana admin password | `openssl rand -hex 16` |
 
-> The Makefile loads and exports `.env`, so Terraform gets the DO token and
-> Ansible gets the stack secrets with no manual `export`. Avoid `#` inside a
-> value (make treats it as a comment); hex values are always safe.
+> The Makefile loads `.env` and passes the DigitalOcean token (and the
+> Grafana allowlist / domains) to Terraform, so no manual `export` is needed.
+> **Ansible reads `infra/.env` directly**, not through Make — Make expands
+> `$` as a variable reference and would silently corrupt any secret
+> containing one. Values are taken literally, so `$`, `!` and `&` are all
+> safe; only a `#` in a value confuses the Terraform-bound variables (hex
+> secrets avoid the question entirely).
 
 ## 3. SSH access, region, size
 
@@ -224,10 +228,9 @@ Let's Encrypt's rate limit (5 certs per domain per week). Use
 
 **How the Pi dashboard is reached.** The Pi has no public address: it dials
 out over WireGuard, and nginx proxies back across the tunnel to
-`PI_WG_IP:8080`. No reverse SSH tunnel is needed — the VPN already provides
-the path, which is simpler than the `ssh -R` arrangement it replaces. If the
-car is off or out of signal, the vhost returns 502 quickly rather than
-hanging.
+`PI_WG_IP:8080`. The VPN already provides the path, so no port forwarding or
+tunnel of any other kind is involved. If the car is off or out of signal, the
+vhost returns 502 quickly rather than hanging.
 
 **Why Basic Auth and not the IP allowlist** for the dashboard: the point is
 viewing it from a phone on mobile data, where your address changes

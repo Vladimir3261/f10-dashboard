@@ -36,22 +36,19 @@ disable_root_login: false
 #
 # PRIMARY PURPOSE: reach the Raspberry Pi by SSH when it is not on your LAN.
 # The Pi lives in the car behind CGNAT/mobile data and has no public address,
-# so it dials out to this server and the server relays between peers. Add BOTH
-# the Pi and your laptop as peers - the laptop is not a peer by default, and
-# without it there is nothing to SSH *from* over the tunnel.
+# so it dials out to this server, and THIS SERVER IS THE JUMP HOST: you SSH
+# to the VPS over public SSH, then from the VPS to the Pi over the tunnel.
+#
+#   ssh -J root@<vps> f10@10.77.0.10
+#
+# Only the Pi needs to be a peer. Your laptop does not - it never joins the
+# VPN. (Adding it as a second peer is possible if you ever want to skip the
+# VPS hop, but it is not needed for this model.)
 #
 # The lake ingest also runs over the same tunnel, so the bearer token and
 # telemetry never cross the public internet in the clear.
-#
-# On the server each peer is pinned to its own /32. On each CLIENT set
-# `AllowedIPs = 10.77.0.0/24` (the whole subnet, not just the server) or peers
-# cannot reach each other. Forwarding between peers is already enabled here
-# (ip_forward + the FORWARD rules in wg0.conf).
 wireguard_address: "10.77.0.1/24"     # the server's address on the VPN
 wireguard_peers: []                   # e.g.:
 #   - name: f10pi                     # the in-car Raspberry Pi
 #     public_key: "<pi public key>"
 #     allowed_ips: "10.77.0.10/32"
-#   - name: laptop                    # you, so you can SSH to the Pi
-#     public_key: "<laptop public key>"
-#     allowed_ips: "10.77.0.20/32"

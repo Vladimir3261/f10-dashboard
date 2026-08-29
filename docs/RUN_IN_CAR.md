@@ -50,9 +50,9 @@ ClickHouse + the ingest server + Grafana). It accumulates every drive.
 
 - **Grafana** — the `f10-health` dashboard (DPF ΔP-vs-flow baseline, soot
   accumulation, boost/rail tracking, decode cross-check, data quality).
-  Reach it per `infra/README.md` (SSH tunnel by default, or the
-  IP-allowlisted `:3000` if you set that up). Pick the car with the
-  `Vehicle` (VIN) variable.
+  Reach it per [`infra/NETWORK.md`](../infra/NETWORK.md) — an SSH tunnel,
+  an IP-allowlisted port, or an HTTPS hostname, depending on how you
+  configured it. Pick the car with the `Vehicle` (VIN) variable.
 - **Ad-hoc SQL** — `analysis/clickhouse/insights.sql` is a ready battery;
   run it with `clickhouse-client --param_vin=<VIN> --multiquery < …`.
 - The **ingest server is the only writer** into ClickHouse; the sync
@@ -60,8 +60,10 @@ ClickHouse + the ingest server + Grafana). It accumulates every drive.
   server-side (`infra/ingest/channel_map.json`), and `channel_raw` is
   always kept so the map can change without re-uploading.
 
-Deploy/redeploy (on the VPS): `git pull && cd infra && docker compose up -d`.
-First boot needs `.env` (see `infra/.env.example`).
+The server is provisioned as code — Terraform for the droplet, Ansible for
+everything on it. Deploy or redeploy with `cd infra && make deploy`; the
+full procedure is [`infra/PROVISIONING.md`](../infra/PROVISIONING.md).
+Do not configure the VPS by hand: a `make deploy` will overwrite it.
 
 ## 3. Hosting it in the car
 
