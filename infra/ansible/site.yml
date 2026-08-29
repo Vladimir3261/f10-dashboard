@@ -10,6 +10,24 @@
   gather_facts: false
 
   pre_tasks:
+    # Read infra/.env HERE rather than relying on the Makefile's `export`.
+    # Make expands `$` as a variable reference, so a secret containing `$`
+    # silently loses that character and the one after it - which is exactly
+    # how a correct password ends up rejected. Splitting each line on the
+    # first `=` takes the value literally, whatever it contains.
+    - name: Load infra/.env
+      ansible.builtin.set_fact:
+        dotenv: >-
+          {{ dotenv | default({}) | combine({
+               (item.split('=', 1)[0] | trim): item.split('=', 1)[1]
+             }) }}
+      loop: "{{ lookup('file', playbook_dir + '/../.env', errors='ignore')
+                | default('', true) | split('\n') }}"
+      when: item is match('^[A-Za-z_][A-Za-z0-9_]*=')
+      no_log: true
+      delegate_to: localhost
+      run_once: true
+
     - name: Wait for SSH to come up (fresh droplets boot for a bit)
       ansible.builtin.wait_for_connection:
         timeout: 300
