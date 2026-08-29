@@ -29,10 +29,14 @@ After=default.target
 [Service]
 Type=forking
 WorkingDirectory=%h/f10-dashboard
-# The loop keeps the tmux session alive: if the agent exits, tmux would
-# otherwise close the window and the session would disappear with it.
+# --continue resumes the most recent conversation in that directory, so a
+# reboot does not start from scratch. The || fallback matters: on a box with
+# no previous conversation --continue has nothing to resume, and without it
+# the loop would crash every 5 seconds. The loop itself keeps the tmux
+# session alive when the agent exits.
 ExecStart=/usr/bin/tmux new-session -d -s claude -c %h/f10-dashboard \
-  'while true; do "$HOME/.local/bin/claude" --remote-control; sleep 5; done'
+  'while true; do "$HOME/.local/bin/claude" --continue --remote-control \
+     || "$HOME/.local/bin/claude" --remote-control; sleep 5; done'
 ExecStop=/usr/bin/tmux kill-session -t claude
 Restart=on-failure
 RestartSec=5
@@ -59,6 +63,13 @@ binary lives somewhere else.
 - **`--remote-control`** starts the session with Remote Control enabled, so
   it can be driven from a phone. The session name defaults to the hostname
   (`f10pi`); pass a name to override it.
+- **`--continue`** resumes the most recent conversation *in the working
+  directory*, so context carries across reboots instead of starting cold.
+  Note what this does not do: the Remote Control connection itself cannot
+  survive a power cycle, because the process died — the phone gets a fresh
+  connection under the same name. If you want a fixed identity rather than
+  "most recent", `--session-id <uuid>` / `--resume <id>` pin one explicitly,
+  at the cost of breaking if that session is ever pruned.
 - **It must be interactive**, which is why it runs inside `tmux` — a bare
   systemd service has no pty and the agent will not start properly.
 - **The `while` loop** means `/exit` brings the agent back after 5 seconds.
@@ -91,6 +102,19 @@ tmux ls
 If the session is missing, check in this order: `loginctl show-user $USER |
 grep Linger`, then whether the agent is still authenticated (below), then
 `journalctl --user -u claude-tmux`.
+
+To confirm the agent itself is alive rather than just the session:
+
+```bash
+systemctl --user is-active claude-tmux
+pgrep -af 'claude --continue --remote-control'
+```
+
+`tmux list-panes` is misleading here — it reports `bash`, because the `while`
+loop is the pane's foreground process, not the agent. If the loop is running
+but no agent PID exists, it is crash-looping every 5 seconds; the usual cause
+is lost authentication, and the output goes to the tmux pane rather than the
+journal, so attach and look.
 
 ## Things worth knowing before you enable it
 
