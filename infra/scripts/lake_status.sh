@@ -31,23 +31,29 @@ if [[ -z "$HOST" ]]; then
   HOST="root@${ip}"
 fi
 
+# Reuse one SSH connection for all four queries below (avoids tripping
+# SSH rate limiting, same reason migrate_lake.sh multiplexes).
+SSH_CTL="$(mktemp -d /tmp/f10st.XXXXXX)"
+SSH_OPTS=(-o BatchMode=yes -o ControlMaster=auto -o "ControlPath=${SSH_CTL}/%h" -o ControlPersist=60)
+trap 'ssh -o "ControlPath=${SSH_CTL}/%h" -O exit "$HOST" 2>/dev/null || true; rm -rf "$SSH_CTL"' EXIT
+
 echo "== $HOST =="
 
-ssh -o BatchMode=yes "$HOST" "cd '$DIR' && docker compose ps --format 'table {{.Service}}\t{{.Status}}'" \
+ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && docker compose ps --format 'table {{.Service}}\t{{.Status}}'" \
   || echo "  (could not read compose status)"
 
 echo
 echo "-- ingest health --"
-ssh -o BatchMode=yes "$HOST" "curl -s -m5 localhost:8090/health || echo unreachable"
+ssh "${SSH_OPTS[@]}" "$HOST" "curl -s -m5 localhost:8090/health || echo unreachable"
 
 echo
 echo "-- wireguard --"
-ssh -o BatchMode=yes "$HOST" \
+ssh "${SSH_OPTS[@]}" "$HOST" \
   "wg show wg0 2>/dev/null | grep -E 'listening port|peer|latest handshake' || echo '  wg0 not up'"
 
 echo
 echo "-- lake --"
-ssh -o BatchMode=yes "$HOST" "cd '$DIR' && set -a && . ./.env && set +a && \
+ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && set -a && . ./.env && set +a && \
   docker compose exec -T clickhouse clickhouse-client --user \"\$CH_USER\" --password \"\$CH_PASS\" \
     --query \"
       SELECT line FROM (
