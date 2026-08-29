@@ -230,6 +230,19 @@
 - name: Configure the dashboard (Raspberry Pi) vhost
   when: dashboard_domain | length > 0
   block:
+    - name: Ensure the offline-page directory exists
+      ansible.builtin.file:
+        path: /var/www/f10-offline
+        state: directory
+        mode: "0755"
+
+    - name: Install the "car is offline" page
+      ansible.builtin.template:
+        src: offline.html.j2
+        dest: /var/www/f10-offline/__offline.html
+        mode: "0644"
+      notify: reload nginx
+
     - name: Install the Basic Auth credentials
       community.general.htpasswd:
         path: /etc/nginx/.htpasswd-dashboard

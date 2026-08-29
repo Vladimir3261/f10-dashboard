@@ -24,9 +24,18 @@ server {
     auth_basic           "F10 dashboard";
     auth_basic_user_file /etc/nginx/.htpasswd-dashboard;
 
-    # The car is not always online: fail fast with a clear 502 rather than
-    # hanging when the Pi is parked, off, or out of signal.
+    # The car is not always online: fail fast rather than hanging when the Pi
+    # is parked, off, or out of signal...
     proxy_connect_timeout 5s;
+
+    # ...and show a page that explains it instead of nginx's bare 502.
+    # Inside the authenticated vhost, so the page is never public.
+    error_page 502 503 504 /__offline.html;
+    location = /__offline.html {
+        root /var/www/f10-offline;
+        internal;
+        add_header Cache-Control "no-store" always;
+    }
 
     location / {
         proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};

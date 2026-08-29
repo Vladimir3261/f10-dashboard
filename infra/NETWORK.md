@@ -149,7 +149,7 @@ else to HTTPS. It carries no application traffic.
 | Host | Protection | Proxies to |
 |---|---|---|
 | `grafana.example.com` | nginx IP allowlist (`GF_ALLOWED_IPS`) → `403` otherwise | `127.0.0.1:3000` |
-| `f10.example.com` | HTTP Basic Auth → `401` otherwise | `10.77.0.10:8080` over `wg0` |
+| `f10.example.com` | HTTP Basic Auth → `401` otherwise | `10.77.0.10:8080` over `wg0`; an "offline" page when the car is down |
 | anything else (incl. bare IP) | no matching vhost / no certificate | — |
 
 **Why Basic Auth for the dashboard and an allowlist for Grafana.** The

@@ -229,8 +229,9 @@ Let's Encrypt's rate limit (5 certs per domain per week). Use
 **How the Pi dashboard is reached.** The Pi has no public address: it dials
 out over WireGuard, and nginx proxies back across the tunnel to
 `PI_WG_IP:8080`. The VPN already provides the path, so no port forwarding or
-tunnel of any other kind is involved. If the car is off or out of signal, the
-vhost returns 502 quickly rather than hanging.
+tunnel of any other kind is involved. If the car is off or out of signal the
+vhost fails fast and serves a "Car is offline" page that retries by itself,
+rather than hanging or showing a bare 502.
 
 **Why Basic Auth and not the IP allowlist** for the dashboard: the point is
 viewing it from a phone on mobile data, where your address changes
