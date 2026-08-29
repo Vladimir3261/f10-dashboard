@@ -53,7 +53,9 @@ ssh "${SSH_OPTS[@]}" "$HOST" \
 
 echo
 echo "-- lake --"
-ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && set -a && . ./.env && set +a && \
+ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && \
+  CH_USER=\$(sed -n 's/^CH_USER=//p' .env | head -1) && \
+  CH_PASS=\$(sed -n 's/^CH_PASS=//p' .env | head -1) && \
   docker compose exec -T clickhouse clickhouse-client --user \"\$CH_USER\" --password \"\$CH_PASS\" \
     --query \"
       SELECT line FROM (

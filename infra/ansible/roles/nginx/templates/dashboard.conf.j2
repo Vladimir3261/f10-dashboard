@@ -11,9 +11,8 @@
 # VIN, so this vhost is never configured without credentials.
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name {{ dashboard_domain }};
 
     ssl_certificate     /etc/letsencrypt/live/{{ dashboard_domain }}/fullchain.pem;
