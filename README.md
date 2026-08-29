@@ -32,6 +32,11 @@ dependencies, deliberately: this runs on a laptop in a car, where
 
 ---
 
+## Setting it up
+
+Standing the whole system up from nothing — server, Raspberry Pi, first
+drive — is documented step by step in **[docs/SETUP.md](docs/SETUP.md)**.
+
 ## Layout
 
 ```
