@@ -181,7 +181,7 @@ tunnel, which is a bonus rather than the reason it exists.
        │                          │                              │
        │  ssh root@<DROPLET_IP>   │                              │
        ├─────────────────────────►│                              │
-       │      public, port 22     │   ssh f10@10.77.0.10         │
+       │      public, port 22     │   ssh pi@10.77.0.10         │
        │                          ├─────────────────────────────►│
        │                          │   over the WireGuard tunnel  │
                                   ▲                              │
@@ -199,9 +199,9 @@ Two hops, or one command with `ProxyJump`:
 
 ```bash
 ssh root@<DROPLET_IP>            # hop 1: laptop → VPS (public SSH)
-ssh f10@10.77.0.10               # hop 2: VPS → Pi (over wg0)
+ssh pi@10.77.0.10               # hop 2: VPS → Pi (over wg0)
 
-ssh -J root@<DROPLET_IP> f10@10.77.0.10     # both hops in one go
+ssh -J root@<DROPLET_IP> pi@10.77.0.10     # both hops in one go
 ```
 
 Put it in `~/.ssh/config` to make it a single name:

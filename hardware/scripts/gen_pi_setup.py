@@ -149,12 +149,15 @@ def main():
     # the generated script leaves Wi-Fi completely alone (DO_WIFI=0).
     nets = wifi_networks(wifi_cfg)
 
-    pi_user = env.get("PI_USER", "f10")
+    # setup-pi.sh asks for these interactively and exports them, so the
+    # environment must win over infra/.env - otherwise the answers you typed
+    # are silently ignored and the generated script targets the wrong user.
+    pi_user = os.environ.get("PI_USER") or env.get("PI_USER", "pi")
     # Where the repo lives on the Pi. Detected by setup-pi.sh when there is
     # already a clone (it may not be under the default path), so an existing
     # checkout is reused instead of a second copy being cloned beside it.
     repo_dir = os.environ.get("PI_REPO_DIR", "").strip()
-    hostname = env.get("PI_HOSTNAME", "f10pi")
+    hostname = os.environ.get("PI_HOSTNAME") or env.get("PI_HOSTNAME", "f10pi")
     eth_ll = env.get("ETH_LINK_LOCAL", "169.254.10.10/16")
 
     try:
@@ -175,6 +178,8 @@ def main():
         repo_url = ""
 
     print(f"[gen] droplet      {droplet_ip}:{wg_port}")
+    print(f"[gen] pi user      {pi_user}")
+    print(f"[gen] repo on pi   {repo_dir or f'/home/{pi_user}/f10-dashboard'}")
     print(f"[gen] minting the Pi's WireGuard keypair on the server ...")
     priv, pub, srv_pub = server_keys(host, hostname)
     print(f"[gen] Pi public key {pub}")
