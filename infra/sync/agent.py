@@ -203,6 +203,37 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
     ]
 
 
+def read_errors(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
+    """
+    Unsynced per-request faults. Absent on databases recorded before fault
+    logging existed, so a missing table is empty, not an error.
+    """
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+    try:
+        if not con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='errors'"
+        ).fetchone():
+            return []
+
+        rows = con.execute(
+            "SELECT e.rowid, r.vin, e.run_id, e.ts, e.request_id, e.kind, e.message "
+            "FROM errors e JOIN runs r ON r.id = e.run_id "
+            "WHERE e.rowid > ? ORDER BY e.rowid LIMIT ?",
+            (after_rowid, limit),
+        ).fetchall()
+    finally:
+        con.close()
+
+    return [
+        {"_rowid": rid, "vehicle_id": vin,
+         "session_id": global_session_id(db_path, run_id),
+         "ts": ts, "request_id": request_id, "kind": kind,
+         "message": (message or "")[:500]}
+        for rid, vin, run_id, ts, request_id, kind, message in rows
+    ]
+
+
 def max_sample_rowid(db_path: str) -> int:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
@@ -335,6 +366,29 @@ class Agent:
             if closed:
                 self.state.set(db, "sessions_id", max(closed) + 1)
 
+    def _sync_errors(self, db: str) -> None:
+        """
+        Ship per-request faults. Low volume next to samples, but it is what
+        makes an error RATE per channel computable - without it a failing
+        request and an unasked one both just have no rows.
+        """
+        wm = self.state.get(db, "errors_rowid")
+        rows = read_errors(db, wm, self.cfg["batch_rows"])
+
+        if not rows:
+            return
+
+        cursor = max(r["_rowid"] for r in rows)
+        batch = wire.columnar(
+            "channel_errors",
+            [{k: v for k, v in r.items() if k != "_rowid"} for r in rows],
+            cursor=cursor,
+            meta={"db": os.path.basename(db), "mapping_ver": self.cfg["mapping_ver"]},
+        )
+
+        if self._send_with_retry(batch):
+            self.state.set(db, "errors_rowid", cursor)
+
     def _sync_samples(self, db: str) -> bool:
         """Send one batch of samples. Returns True if there may be more."""
         wm = self.state.get(db, "samples_rowid")
@@ -380,6 +434,7 @@ class Agent:
                     break
 
                 self._sync_sessions(db)
+                self._sync_errors(db)
 
                 # drain this db one batch at a time (single in flight)
                 while self.enabled and not self.stop.is_set():

@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from bmwdiag.mapping import (
+    fault_kind,
     MappingError,
     MappingExecutor,
     MappingRegistry,
@@ -676,6 +677,21 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT
 );
 
+-- Per-request faults, so a channel that fails is distinguishable from one
+-- that is merely quiet. Without this a timing-out request looks exactly like
+-- a healthy one nobody asked about: both simply have no rows.
+--
+-- Keyed by request_id, not channel: a request carries several signals and
+-- fails as a unit. Resolving request -> channels needs the mappings, which
+-- the analysis side already loads.
+CREATE TABLE IF NOT EXISTS errors (
+    run_id     INTEGER NOT NULL,
+    ts         REAL NOT NULL,
+    request_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    message    TEXT
+);
+
 CREATE INDEX IF NOT EXISTS samples_run_param_ts ON samples(run_id, param_id, ts);
 CREATE INDEX IF NOT EXISTS samples_ts           ON samples(ts);
 """
@@ -717,6 +733,16 @@ class Recorder:
 
     def start_run(self, vin, gateway, ecu, ecu_addr) -> None:
         self.q.put(("run", (time.time(), vin, gateway, ecu, ecu_addr)))
+
+    def error(self, request_id: str, kind: str, message: str) -> None:
+        """Record one per-request fault. Dropped silently if the queue is
+        full - a fault storm must never stall the poll loop."""
+        try:
+            self.q.put_nowait(
+                ("error", (time.time(), request_id, kind, message[:500]))
+            )
+        except queue.Full:
+            pass
 
     def event(self, kind: str, message: str) -> None:
         try:
@@ -868,6 +894,15 @@ class Recorder:
                         ],
                     )
 
+                self.db.commit()
+
+            elif kind == "error" and self.run_id is not None:
+                ts, request_id, err_kind, message = payload
+                self.db.execute(
+                    "INSERT INTO errors(run_id, ts, request_id, kind, message) "
+                    "VALUES (?,?,?,?,?)",
+                    (self.run_id, ts, request_id, err_kind, message),
+                )
                 self.db.commit()
 
             elif kind == "event" and self.run_id is not None:
@@ -1275,10 +1310,23 @@ def poll_loop(
 
             session = ObdSession(client, profile.obd_pid_lengths())
             plan = PollingPlan(profile.requests, polling_classes(registry, args))
+            #
+            # Record every per-request fault. Until this was wired the
+            # executor's on_error hook went nowhere, so a request that timed
+            # out or was refused left no trace at all - indistinguishable
+            # from a channel nobody asked about, since both simply have no
+            # rows. `fault_kind` gives a stable name to group by rather than
+            # an exception message to parse.
+            #
+            def note_fault(request_id: str, exc: Exception) -> None:
+                if rec is not None:
+                    rec.error(request_id, fault_kind(exc), str(exc))
+
             executor = MappingExecutor(
                 profile,
                 transport=HsfzTransport(client),
                 obd_reader=session,
+                on_error=note_fault,
             )
 
             tel.set_meta(profile.meta())

@@ -59,6 +59,30 @@ def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
 TRANSPORT_FAULT_BUDGET = 6
 
 
+def fault_kind(exc: Exception) -> str:
+    """
+    A stable, structured name for what went wrong.
+
+    Returned so callers can record and aggregate faults without parsing
+    exception messages - a message is prose that changes; a kind is data you
+    can group by. Used to attribute errors per request in the lake, which is
+    what makes "this channel fails 8% of the time" answerable at all.
+    """
+    if isinstance(exc, (DecodeError, MappingError)):
+        return "decode"
+
+    if isinstance(exc, (ConnectionError, BrokenPipeError)):
+        return "transport_link"
+
+    if isinstance(exc, TimeoutError):
+        return "transport_timeout"
+
+    if exc.__class__.__name__.endswith("Nack"):
+        return "transport_nack"
+
+    return "other"
+
+
 def _is_request_fault(exc: Exception) -> bool:
     """
     Did ONE exchange fail, or has the link died?

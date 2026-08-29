@@ -81,6 +81,41 @@ CREATE TABLE IF NOT EXISTS telemetry.vehicles
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY vehicle_id;
 
+-- -- per-request faults ------------------------------------------------
+--
+-- Why this exists: without it a request that times out or is refused leaves
+-- no trace, and is indistinguishable from a channel nobody asked about -
+-- both simply have no rows in `samples`. That makes "how often does this
+-- channel actually fail?" unanswerable, which is the question that tells you
+-- whether a decode is unreliable or an ECU is asleep.
+--
+-- Keyed by request_id, not channel: a request carries several signals and
+-- fails as a unit. Resolving request -> channels needs the mapping files,
+-- which the analysis side loads anyway - so the join happens there rather
+-- than being denormalised into every row here.
+--
+-- MergeTree, not Replacing: two identical faults a second apart are two
+-- real events, not a duplicate. TTL'd because fault volume is bursty (a
+-- sleeping ECU polled at 4 Hz produces a lot) and the value is in the rate,
+-- not in keeping every row forever.
+CREATE TABLE IF NOT EXISTS telemetry.channel_errors
+(
+    vehicle_id   LowCardinality(String),
+    session_id   UInt64,
+    ts           DateTime64(3, 'UTC'),
+    request_id   LowCardinality(String),
+    kind         LowCardinality(String),      -- transport_nack | transport_timeout
+                                              -- | transport_link | decode | other
+    message      String,
+    mapping_ver  LowCardinality(String) DEFAULT '',
+    ingested_at  DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY (vehicle_id, toYYYYMM(ts))
+ORDER BY (vehicle_id, request_id, ts)
+TTL toDateTime(ts) + INTERVAL 180 DAY
+SETTINGS index_granularity = 8192;
+
 -- -- ingest audit: every accepted batch, for observability -----------
 CREATE TABLE IF NOT EXISTS telemetry.ingest_log
 (
