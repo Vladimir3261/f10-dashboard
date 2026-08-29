@@ -62,13 +62,21 @@ inventory: ## Write the Ansible inventory from terraform output
 provision: apply inventory ## Stage 1 + seam: create the droplet and build the inventory
 
 # ---------------------------------------------------------------- stage 2
+.PHONY: galaxy
+galaxy: ## Install the Ansible collections the playbook needs
+	cd $(ANSIBLE_DIR) && ansible-galaxy collection install -r requirements.yml
+
 .PHONY: ping
 ping: ## Check Ansible can reach the droplet
 	cd $(ANSIBLE_DIR) && ansible all -m ping
 
 .PHONY: deploy
-deploy: ## Configure the droplet (run the playbook)
+deploy: galaxy ## Configure the droplet: hardening + Docker + stack + WireGuard
 	cd $(ANSIBLE_DIR) && ansible-playbook site.yml
+
+.PHONY: deploy-check
+deploy-check: galaxy ## Dry-run the playbook (--check, no changes)
+	cd $(ANSIBLE_DIR) && ansible-playbook site.yml --check
 
 # ------------------------------------------------------------------ checks
 .PHONY: validate

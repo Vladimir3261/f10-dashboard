@@ -1,32 +1,24 @@
 ---
-# Analytics server configuration.
+# Configure the analytics server: hardening + Docker + the telemetry stack
+# (ClickHouse, ingest, Grafana) + the WireGuard gateway for the Pi tunnel.
 #
-# SCAFFOLD: for now this only proves the Terraform -> Ansible seam works -
-# it connects to the droplet Terraform created and reports facts. The real
-# roles land next:
-#   - base hardening + a non-root admin user (from admin_ssh_public_keys)
-#   - Docker + the compose stack (ClickHouse, ingest, Grafana)
-#   - WireGuard gateway for the Raspberry Pi tunnel
-#   - ufw (SSH + WireGuard only; app ports stay on localhost / the tunnel)
-#
-# Run with: make deploy   (or ansible-playbook site.yml)
+# Run with: make deploy   (installs collections, then this playbook)
+# Inventory is generated from terraform output by `make inventory`.
 
 - name: Analytics server
   hosts: all
-  gather_facts: true
+  gather_facts: false
 
-  tasks:
-    - name: Confirm connectivity
-      ansible.builtin.ping:
+  pre_tasks:
+    - name: Wait for SSH to come up (fresh droplets boot for a bit)
+      ansible.builtin.wait_for_connection:
+        timeout: 300
 
-    - name: Report what we connected to
-      ansible.builtin.debug:
-        msg: >-
-          Connected to {{ inventory_hostname }}
-          ({{ ansible_host | default('?') }}) as {{ ansible_user }};
-          {{ ansible_distribution | default('?') }}
-          {{ ansible_distribution_version | default('') }}.
-          WireGuard port {{ wireguard_port | default('unset') }},
-          {{ admin_ssh_public_keys | default([]) | length }} admin key(s).
+    - name: Gather facts
+      ansible.builtin.setup:
 
-    # TODO(next): include_role base / docker / stack / wireguard here.
+  roles:
+    - base        # admin user, key management, SSH hardening, ufw
+    - docker      # Docker engine + compose plugin
+    - stack       # clone the repo, render .env, docker compose up
+    - wireguard   # WireGuard gateway for the Raspberry Pi tunnel

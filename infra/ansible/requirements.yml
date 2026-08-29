@@ -1,0 +1,7 @@
+# Ansible collections the playbook needs. Install with `make galaxy`
+# (the deploy target does this automatically). Keeps the playbook working
+# on plain ansible-core, not only the batteries-included `ansible` package.
+---
+collections:
+  - name: community.general      # the ufw firewall module
+    version: ">=8.0.0"

@@ -1,0 +1,47 @@
+---
+# Deploy the telemetry stack: clone the repo, render infra/.env from the
+# secrets in the (exported) local environment, and bring the compose stack
+# up (ClickHouse + ingest + Grafana).
+
+- name: Require stack secrets in the environment
+  ansible.builtin.assert:
+    that:
+      - lookup('env', 'CH_PASS') | length > 0
+      - lookup('env', 'INGEST_TOKEN') | length > 0
+      - lookup('env', 'GF_ADMIN_PASSWORD') | length > 0
+    fail_msg: >-
+      CH_PASS, INGEST_TOKEN and GF_ADMIN_PASSWORD must be set. Fill
+      infra/.env on your machine (the Makefile exports it) - see
+      infra/.env.example.
+    quiet: true
+
+- name: Clone/update the repo on the server
+  ansible.builtin.git:
+    repo: "{{ repo_url }}"
+    dest: "{{ app_dir }}"
+    version: "{{ repo_version }}"
+    force: true
+
+- name: Render infra/.env on the server
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ app_dir }}/infra/.env"
+    mode: "0600"
+
+- name: Bring the compose stack up
+  ansible.builtin.command:
+    cmd: docker compose up -d --build --remove-orphans
+    chdir: "{{ app_dir }}/infra"
+  register: compose_up
+  changed_when: >-
+    ('Started' in compose_up.stderr) or ('Created' in compose_up.stderr)
+    or ('Recreated' in compose_up.stderr) or ('Built' in compose_up.stderr)
+
+- name: Wait for the ingest server to become healthy on localhost
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8090/health
+    status_code: [200, 503]     # 503 = up but ClickHouse not ready yet
+  register: ingest_health
+  retries: 20
+  delay: 6
+  until: ingest_health.status == 200

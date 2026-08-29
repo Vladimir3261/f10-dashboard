@@ -1,0 +1,32 @@
+---
+# Non-secret configuration for the analytics server.
+#
+# SECRETS ARE NOT HERE. CH_PASS / INGEST_TOKEN / GF_ADMIN_PASSWORD come from
+# your local infra/.env (the Makefile exports it into the environment) and
+# the stack role reads them with lookup('env', ...). See infra/.env.example.
+#
+# Host-specific values (droplet IP, ansible_user, wireguard_port, and the
+# admin public keys) come from the generated inventory - see
+# inventory/hosts.yml.example.
+
+# Repo deployed on the server. Override for a fork.
+repo_url: "https://github.com/Vladimir3261/f10-dashboard.git"
+repo_version: "master"
+app_dir: /opt/f10-dashboard
+
+# Non-root admin login created on the server. Its authorized_keys (and
+# root's) are managed from admin_ssh_public_keys, so rotating keys is just
+# another `make deploy` - no droplet recreate needed.
+admin_user: f10
+
+# Keep root reachable by key so Ansible (which logs in as root) keeps
+# working. Flip to true ONLY after switching the inventory to the admin
+# user, or you can lock yourself out.
+disable_root_login: false
+
+# WireGuard gateway. wireguard_port comes from the inventory (terraform).
+wireguard_address: "10.77.0.1/24"     # the server's address on the VPN
+wireguard_peers: []                   # add peers later, e.g.:
+#   - name: f10pi
+#     public_key: "<pi public key>"
+#     allowed_ips: "10.77.0.10/32"
