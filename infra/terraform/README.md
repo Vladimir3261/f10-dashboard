@@ -17,7 +17,9 @@ on your account, so referencing the registry would break `apply`.
 ## Prerequisites
 
 - `terraform` installed.
-- A DigitalOcean API token, exported (never put it in a file):
+- A DigitalOcean API token. Put it in `infra/.env` (gitignored;
+  `DIGITALOCEAN_TOKEN=...` — the Makefile loads and exports it), or export
+  it in your shell:
   ```bash
   export DIGITALOCEAN_TOKEN=dop_v1_your_token
   ```

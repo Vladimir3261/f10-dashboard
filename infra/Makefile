@@ -4,11 +4,19 @@
 #   (seam)   gen_inventory  terraform -> ansible     make inventory
 #   Stage 2  Ansible    configure the droplet        make deploy
 #
-# `make provision` runs stage 1 + the seam in one go. The DigitalOcean API
-# token comes from the environment, never a file:
-#   export DIGITALOCEAN_TOKEN=dop_v1_xxx
+# `make provision` runs stage 1 + the seam in one go.
+#
+# Secrets: copy .env.example -> .env (gitignored) and fill it in. This
+# Makefile loads .env and exports it, so DIGITALOCEAN_TOKEN (and the rest)
+# reach terraform/ansible with no manual `export`. You can still export the
+# token in your shell instead if you prefer.
 #
 # Requires: terraform. Stage 2 also requires ansible (ansible-playbook).
+
+# Load infra/.env if present and export every value to recipe commands.
+# `-include` is a no-op when the file is absent. .env uses KEY=value lines.
+-include .env
+export
 
 TF      := terraform -chdir=terraform
 ANSIBLE_DIR := ansible
