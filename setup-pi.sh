@@ -96,8 +96,9 @@ if [[ -f "$WIFI_ENV" && $RECONFIGURE_WIFI -eq 0 ]]; then
   saved_count="$(sed -n 's/^WIFI_COUNT=//p' "$WIFI_ENV" | head -1)"
   if [[ -n "${saved_count:-}" && "$saved_count" -gt 0 ]]; then
     WIFI_ALREADY_SAVED=1
-    echo "   Already configured - reusing $(basename "$WIFI_ENV")."
-    echo "   (run with --wifi to enter them again)"
+    echo "   Using the saved $(basename "$WIFI_ENV") - no questions needed."
+    echo "   These ARE applied to the Pi on every run; edit that file to"
+    echo "   change them, or pass --wifi to re-enter them here."
     echo
     i=1
     while [[ $i -le $saved_count ]]; do
@@ -114,10 +115,13 @@ priority=100
 
 SKIP_WIFI=0
 if [[ $WIFI_ALREADY_SAVED -eq 0 ]]; then
-echo "   Optional. If the Pi already connects to the networks it needs,"
-echo "   skip this and its Wi-Fi is left exactly as it is."
+echo "   No $(basename "$WIFI_ENV") found."
 echo
-if confirm "   Configure Wi-Fi networks?"; then
+echo "   Answer yes to enter the networks now (saved to that file and"
+echo "   applied on every future run). Answer no to leave the Pi's Wi-Fi"
+echo "   completely untouched - right if it already connects fine."
+echo
+if confirm "   Enter Wi-Fi networks now?"; then
 echo
 echo "   The Pi joins the highest-priority network in range, so list your"
 echo "   home network first and the in-car hotspot after it."
@@ -187,7 +191,7 @@ bold "4. Review"
 if [[ $SKIP_WIFI -eq 1 ]]; then
   echo "   Wi-Fi networks:  not changing them"
 elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
-  echo "   Wi-Fi networks:  reusing the saved list above"
+  echo "   Wi-Fi networks:  from wifi.env, applied to the Pi (listed above)"
 else
   echo "   Wi-Fi networks:"
   for i in "${!SSIDS[@]}"; do
@@ -202,7 +206,7 @@ echo "   Will now:"
 if [[ $SKIP_WIFI -eq 1 ]]; then
   echo "     - leave the Pi's Wi-Fi configuration alone"
 elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
-  echo "     - keep the existing wifi.env untouched"
+  echo "     - apply the Wi-Fi networks from the existing wifi.env"
 else
   echo "     - write the Wi-Fi list to hardware/.../config/wifi.env (gitignored)"
 fi
@@ -219,7 +223,7 @@ echo
 if [[ $SKIP_WIFI -eq 1 ]]; then
   log "leaving the Pi's Wi-Fi alone"
 elif [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
-  log "keeping the existing $(basename "$WIFI_ENV")"
+  log "using the existing $(basename "$WIFI_ENV") (its networks will be applied)"
 else
   log "writing $(basename "$WIFI_ENV")"
   install -d -m 700 "$(dirname "$WIFI_ENV")"
