@@ -120,6 +120,7 @@ peer).
 | `make deploy` | run `site.yml`: base → docker → stack → nginx → wireguard |
 | `make deploy-check` | dry-run the playbook (`--check`) |
 | `make lake-status` | stack health + lake row counts |
+| `make pi-setup` | generate `local/pi-setup.sh` for the Raspberry Pi |
 | `make migrate-lake FROM=...` | copy a lake from an older server |
 | `make destroy` | tear the droplet down |
 
@@ -278,18 +279,66 @@ that host's own `infra/.env` at run time).
 If the old stack lives somewhere other than `/root/f10-dashboard/infra`,
 pass `ARGS='--src-dir /path/to/infra'`.
 
-## 7. Connect a Raspberry Pi (next)
+## 7. Connect the Raspberry Pi
 
-The WireGuard server is up but has no peers yet. To add the Pi:
+The Pi is provisioned from a **generated one-shot script**, so it always
+matches the infrastructure that exists right now — the droplet's address, the
+WireGuard endpoint and keys, the ingest token, your Wi-Fi networks.
 
-1. Get the **server public key** from the end of `make deploy` output (and
-   the endpoint `<droplet-ip>:51820`).
-2. On the Pi, fill `hardware/raspberry-pi/f10pi/config/wireguard.conf` with
-   that endpoint + key and run its `configure-wireguard.sh`.
-3. Add the Pi back as a peer on the server: put its public key in
-   `ansible/group_vars/all.yml` under `wireguard_peers`, then `make deploy`.
+First, list the Wi-Fi networks the Pi should join (as many as you like; the
+highest-priority one in range wins):
 
-(See `hardware/raspberry-pi/f10pi/docs/wireguard.md`.)
+```bash
+cp hardware/raspberry-pi/f10pi/config/wifi.example.env \
+   hardware/raspberry-pi/f10pi/config/wifi.env
+$EDITOR hardware/raspberry-pi/f10pi/config/wifi.env      # gitignored
+```
+
+Then:
+
+```bash
+cd infra
+make pi-setup          # writes local/pi-setup.sh from the current state
+make deploy            # server registers the Pi as a WireGuard peer
+
+scp ../local/pi-setup.sh <pi-on-your-lan>:
+ssh <pi-on-your-lan> 'sudo ./pi-setup.sh'
+```
+
+Afterwards the Pi is reachable through the server, from anywhere:
+
+```bash
+ssh -J root@<droplet-ip> f10@10.77.0.10
+```
+
+### How the keys are handled
+
+**WireGuard keys are minted on the server, never on your laptop.** `make
+pi-setup` SSHes to the droplet, has it run `wg genkey` (reusing the existing
+pair on re-runs, so the peer identity is stable), and copies the values into
+the generated script. Your laptop needs no WireGuard tooling and stores no
+long-lived key.
+
+The peer is written to `ansible/group_vars/all/peers.yml`, which is
+**gitignored** — device public keys are not secrets, but they identify your
+hardware, and this repo is public. That file overrides the empty default in
+`group_vars/all/main.yml`, so `make deploy` renders `wg0.conf` *with* the
+peer instead of dropping it.
+
+### What the generated script does
+
+It writes the Pi's config (`local.env`, `wifi.env`, `wireguard.conf`, the
+sync agent's `config.json`) and then hands over to the repo's own
+`bootstrap.sh` — hostname, Wi-Fi profiles, WireGuard, SSH, the BMW `eth0`
+link, and the systemd services. The provisioning logic stays in one tested
+place rather than being duplicated into the generated file.
+
+`local/pi-setup.sh` contains a **WireGuard private key and your Wi-Fi
+passwords in plain text**. It is gitignored and written mode 700. Delete it
+once the Pi is up; `make pi-setup` regenerates it whenever you need it.
+
+> **Ordering:** run `make deploy` before the Pi script, or the server will
+> not yet know the peer and the tunnel will never hand shake.
 
 ## 8. Tear down
 

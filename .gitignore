@@ -100,3 +100,10 @@ hardware/**/config/ssh_config
 hardware/**/*.key
 hardware/**/*.pem
 hardware/**/*_wg0.conf
+
+# Generated WireGuard peer list — device public keys, kept out of git.
+infra/ansible/group_vars/all/peers.yml
+!infra/ansible/group_vars/all/peers.yml.example
+
+# Generated one-shot Pi provisioning script (contains PSKs + WG private key).
+local/pi-setup.sh
