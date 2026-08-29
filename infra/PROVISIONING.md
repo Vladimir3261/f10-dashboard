@@ -44,29 +44,42 @@ Set at least:
 > Ansible gets the stack secrets with no manual `export`. Avoid `#` inside a
 > value (make treats it as a comment); hex values are always safe.
 
-## 3. Choose region / size / keys (optional)
+## 3. SSH access, region, size
 
-Defaults: region `fra1`, size `s-2vcpu-4gb`, Ubuntu 24.04, key
-`~/.ssh/id_ed25519.pub`. To change anything (or authorise more than one
-key):
+**Get this right before the first apply** — it's what lets you log in.
+Create the file and set your keys:
 
 ```bash
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+make do-keys        # lists the SSH keys already on your DO account
 ```
 
 ```hcl
-region       = "ams3"
+# PREFERRED — keys already on your DigitalOcean account, by name.
+do_ssh_key_names = ["my-laptop"]
+
+# Optional fallback — a local key that is NOT on your DO account.
+ssh_public_key_files = ["~/.ssh/id_ed25519.pub"]
+
+region       = "fra1"
 droplet_size = "s-2vcpu-4gb"
-ssh_public_key_files = [
-  "~/.ssh/id_ed25519.pub",
-  "~/.ssh/laptop.pub",
-]
 ```
 
-> SSH keys are injected at **first boot** via cloud-init. Set them here
-> before the first apply. Adding a key later is done by Ansible (it manages
-> `authorized_keys` on every `make deploy`) — not by changing this, which
-> would force the droplet to be recreated.
+Two independent mechanisms, and you can use either or both:
+
+| | how | why |
+|---|---|---|
+| `do_ssh_key_names` | DO attaches the key itself (looked up read-only, so no "key already exists" error) | **preferred** — and because the droplet has keys, DO does *not* set or email a root password, so the box is key-only from first boot |
+| `ssh_public_key_files` | injected via cloud-init `user_data` | for a key that isn't registered on your DO account |
+
+> **If neither is set you will get a password prompt instead of key login.**
+> With no keys attached, DigitalOcean falls back to a root password. The
+> plan will fail with a precondition error rather than build a box you
+> can't reach.
+>
+> SSH keys are applied at **first boot**. Set them before the first apply;
+> adding one later is done by Ansible (it manages `authorized_keys` on
+> every `make deploy`) — changing them here would force a droplet recreate.
 
 ---
 
@@ -92,6 +105,7 @@ peer).
 
 | command | effect |
 |---|---|
+| `make do-keys` | list SSH keys registered on your DigitalOcean account |
 | `make init` | `terraform init` — fetch the provider, write the lock |
 | `make plan` | show the plan; nothing is created |
 | `make apply` | create the droplet + firewall (SSH + WireGuard only) |
@@ -158,6 +172,40 @@ Removes the droplet and firewall. Your `.env`, `terraform.tfvars` and local
 state stay on your machine.
 
 ---
+
+## Troubleshooting
+
+### SSH asks for a password instead of using my key
+
+A password *prompt* means the droplet still has `PasswordAuthentication
+yes` — i.e. DigitalOcean set a root password because **no SSH key was
+attached at create time**, and Ansible (which turns password auth off)
+hasn't run yet. Check, in order:
+
+1. **Was a key attached?** `cd terraform && terraform state show
+   digitalocean_droplet.analytics | grep -A3 ssh_keys`. Empty means no DO
+   key was attached — set `do_ssh_key_names` (see §3) and recreate.
+2. **Is your client offering the right key?** With several keys loaded,
+   ssh-agent can exhaust the server's `MaxAuthTries` before reaching the
+   right one, and you fall through to a password prompt. Force it:
+   ```bash
+   ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes root@<droplet-ip>
+   ```
+3. **Did cloud-init apply?** If you relied only on `ssh_public_key_files`,
+   log in via the DigitalOcean web console and check:
+   ```bash
+   cloud-init status --long
+   cat /root/.ssh/authorized_keys
+   ```
+
+The reliable fix is to set **`do_ssh_key_names`** — with a key attached, DO
+never sets a root password in the first place.
+
+### `make deploy` fails to connect
+
+`make ping` first. Fresh droplets take a minute to boot; the playbook waits
+up to 5 minutes for SSH. Also confirm `ansible/inventory/hosts.yml` has the
+right IP (`make inventory` regenerates it).
 
 ## Notes & safety
 

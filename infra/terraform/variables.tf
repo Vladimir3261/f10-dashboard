@@ -34,6 +34,19 @@ variable "droplet_image" {
   default     = "ubuntu-24-04-x64"
 }
 
+variable "do_ssh_key_names" {
+  description = <<-EOT
+    Names of SSH keys ALREADY registered on your DigitalOcean account to
+    authorise on the droplet. Looked up with a data source (read-only), so
+    there is never an "SSH key already exists" error. This is the preferred
+    path: DO installs them for root itself and, because the droplet has keys,
+    skips setting/emailing a root password - so the box is key-only from
+    first boot. List the names available on your account with `make do-keys`.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 variable "ssh_public_key_files" {
   description = <<-EOT
     Local SSH PUBLIC key files. Their contents are injected as plain text

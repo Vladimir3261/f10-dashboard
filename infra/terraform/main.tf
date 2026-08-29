@@ -8,35 +8,79 @@
 
 provider "digitalocean" {}
 
+# Look up SSH keys that ALREADY EXIST on the DigitalOcean account, by name.
+# A data source only reads - it never tries to create, so there is no
+# "SSH key already exists" error (which is why this is not a resource).
+# Attaching these is the native DO path: DO installs them into root's
+# authorized_keys itself AND skips setting/emailing a root password, so the
+# droplet comes up key-only. List their names with:
+#   make do-keys
+data "digitalocean_ssh_key" "existing" {
+  for_each = toset(var.do_ssh_key_names)
+  name     = each.value
+}
+
 locals {
   # Read each local public key file once, as plain text. pathexpand handles
-  # a leading ~.
+  # a leading ~. These are injected via cloud-init - useful for a key that
+  # is NOT registered on the DO account.
   ssh_public_keys = [for f in var.ssh_public_key_files : trimspace(file(pathexpand(f)))]
 
-  # Authorise the keys by injecting them as PLAIN TEXT via cloud-init,
-  # rather than registering them as digitalocean_ssh_key resources: DO
-  # refuses to create a key that already exists on the account (a manually
-  # added one), which would break `apply`. cloud-init writes them straight
-  # into the default user's authorized_keys, so no DO key registry is
-  # touched and no name collisions are possible.
+  do_key_fingerprints = [for k in data.digitalocean_ssh_key.existing : k.fingerprint]
+
+  # Belt and braces: write the keys straight into root's authorized_keys.
+  # `users:` sets them the normal way; `write_files` with defer:true runs in
+  # the final cloud-init stage and guarantees the file exists with the right
+  # content/permissions even if the image's default-user handling differs.
+  #
+  # Built line by line with join() rather than a heredoc: YAML indentation is
+  # significant, and heredoc + indent() silently produces a mangled document
+  # that cloud-init then ignores.
   cloud_init = join("\n", concat(
-    ["#cloud-config", "ssh_authorized_keys:"],
-    [for k in local.ssh_public_keys : "  - ${k}"],
+    [
+      "#cloud-config",
+      "disable_root: false",
+      "ssh_pwauth: false",
+      "users:",
+      "  - name: root",
+      "    ssh_authorized_keys:",
+    ],
+    [for k in local.ssh_public_keys : "      - ${k}"],
+    [
+      "write_files:",
+      "  - path: /root/.ssh/authorized_keys",
+      "    owner: \"root:root\"",
+      "    permissions: \"0600\"",
+      "    defer: true",
+      "    content: |",
+    ],
+    [for k in local.ssh_public_keys : "      ${k}"],
+    [""],
   ))
 }
 
 resource "digitalocean_droplet" "analytics" {
-  name      = var.droplet_name
-  region    = var.region
-  size      = var.droplet_size
-  image     = var.droplet_image
-  user_data = local.cloud_init
-  tags      = var.tags
+  name   = var.droplet_name
+  region = var.region
+  size   = var.droplet_size
+  image  = var.droplet_image
+  tags   = var.tags
+
+  # Native DO keys (preferred - also stops DO setting a root password).
+  ssh_keys = local.do_key_fingerprints
+
+  # cloud-init keys, for any local key not registered on the DO account.
+  user_data = length(local.ssh_public_keys) > 0 ? local.cloud_init : null
 
   # Keep the box minimal; Ansible installs Docker, the stack and WireGuard.
   # Recreate only when these change - not on every software change.
   lifecycle {
     ignore_changes = [image]
+
+    precondition {
+      condition     = length(var.do_ssh_key_names) > 0 || length(var.ssh_public_key_files) > 0
+      error_message = "Set do_ssh_key_names (existing DO account keys) and/or ssh_public_key_files, or you will not be able to log in."
+    }
   }
 }
 
