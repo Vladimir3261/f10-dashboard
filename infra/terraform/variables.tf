@@ -36,9 +36,11 @@ variable "droplet_image" {
 
 variable "ssh_public_key_files" {
   description = <<-EOT
-    Local SSH PUBLIC key files to load into the droplet's authorized_keys
-    (via DigitalOcean SSH keys). The matching private keys let you - and
-    later the same keys let you reach the Raspberry Pi. Never a private key.
+    Local SSH PUBLIC key files. Their contents are injected as plain text
+    into the droplet's authorized_keys via cloud-init (NOT registered as
+    DigitalOcean SSH keys - DO refuses to re-create a key already on your
+    account). The matching private keys let you in, and the same keys later
+    authorise you on the Raspberry Pi. Never a private key.
   EOT
   type        = list(string)
   default     = ["~/.ssh/id_ed25519.pub"]
