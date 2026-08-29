@@ -93,6 +93,7 @@ def from_mappings(mapping_dir: str) -> Dict[str, Dict[str, Any]]:
 
             for signal in request.signals:
                 out[signal.key] = {
+                    "request_id": request.id,
                     "purpose": signal.label,
                     "ecu": FAMILY_LABEL.get(m.ecu.family, m.ecu.family),
                     "how": request.protocol.upper(),
@@ -155,6 +156,46 @@ def from_lake(host: str, days: int) -> Dict[str, Dict[str, int]]:
     return rows
 
 
+def errors_from_lake(host: str, days: int) -> Dict[str, int]:
+    """
+    Faults per request over the same window.
+
+    Attributed by request, not channel: a request fails as a unit, so every
+    channel it carries shares the fault. Empty when the table does not exist
+    yet - an older lake simply has no fault history, which is not an error.
+    """
+    query = (
+        "SELECT request_id, count() AS errors FROM telemetry.channel_errors "
+        "WHERE vehicle_id NOT LIKE 'DEM%' "
+        f"AND ts > now() - INTERVAL {int(days)} DAY "
+        "GROUP BY request_id FORMAT JSONEachRow"
+    )
+    remote = (
+        "cd /opt/f10-dashboard/infra && "
+        "U=$(sed -n 's/^CH_USER=//p' .env | head -1) && "
+        "P=$(sed -n 's/^CH_PASS=//p' .env | head -1) && "
+        'docker compose exec -T clickhouse clickhouse-client '
+        '--user "$U" --password "$P" -q ' + json.dumps(query)
+    )
+    result = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=25", host, remote],
+        capture_output=True, text=True,
+    )
+
+    out: Dict[str, int] = {}
+
+    if result.returncode != 0:
+        return out                     # table absent on an older lake
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            row = json.loads(line)
+            out[row["request_id"]] = int(row["errors"])
+
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--days", type=int, default=3)
@@ -177,13 +218,22 @@ def main() -> int:
 
     defs = from_mappings(args.mappings)
     counts = from_lake(host, args.days)
+    errors = errors_from_lake(host, args.days)
 
     rows: List[Dict[str, Any]] = []
 
     for key, count in counts.items():
         meta = defs.get(key, {})
         samples, distinct = count["samples"], count["distinct"]
+        request_id = meta.get("request_id")
+        failures = errors.get(request_id, 0) if request_id else 0
+        attempts = samples + failures
         rows.append({
+            "errors": failures,
+            # Share of ATTEMPTS that failed. Samples are successes, so
+            # attempts = successes + failures for the channels this request
+            # carries.
+            "err_pct": 100.0 * failures / attempts if attempts else 0.0,
             "channel": key,
             "purpose": meta.get("purpose", "(not in any loaded mapping)"),
             "ecu": meta.get("ecu", "?"),
@@ -200,14 +250,15 @@ def main() -> int:
     print(f"{len(rows)} channels, {sum(r['samples'] for r in rows):,} samples. "
           "`distinct %` is how much of the storage carries information that "
           "was not already there.\n")
-    print("| channel | purpose | answered by | how | polled | samples | distinct | distinct % |")
-    print("|---|---|---|---|---|---:|---:|---:|")
+    print("| channel | purpose | answered by | how | polled | samples | distinct | distinct % | errors | error % |")
+    print("|---|---|---|---|---|---:|---:|---:|---:|---:|")
 
     for r in rows:
         hz = f"{r['hz']:.2f} Hz" if r["hz"] else "—"
         print(
             f"| `{r['channel']}` | {r['purpose']} | {r['ecu']} | {r['how']} | "
-            f"{hz} | {r['samples']:,} | {r['distinct']:,} | {r['pct']:.3f}% |"
+            f"{hz} | {r['samples']:,} | {r['distinct']:,} | {r['pct']:.3f}% | "
+            f"{r['errors']:,} | {r['err_pct']:.2f}% |"
         )
 
     missing = [r["channel"] for r in rows if r["ecu"] == "?"]

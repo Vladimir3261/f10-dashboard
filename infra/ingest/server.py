@@ -177,7 +177,35 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-BUILDERS = {"samples": build_samples, "sessions": build_sessions}
+def build_channel_errors(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Per-request faults. Kept keyed by request_id: a request carries several
+    signals and fails as a unit, and resolving request -> channels needs the
+    mapping files, which the analysis side loads anyway.
+    """
+    rows = wire.rows_of(batch)
+    meta = batch.get("meta", {})
+    out = []
+
+    for r in rows:
+        out.append({
+            "vehicle_id": r.get("vehicle_id") or "",
+            "session_id": int(r.get("session_id") or 0),
+            "ts": _ts(r.get("ts")),
+            "request_id": r.get("request_id") or "",
+            "kind": r.get("kind") or "other",
+            "message": (r.get("message") or "")[:500],
+            "mapping_ver": r.get("mapping_ver") or meta.get("mapping_ver", ""),
+        })
+
+    return out
+
+
+BUILDERS = {
+    "samples": build_samples,
+    "sessions": build_sessions,
+    "channel_errors": build_channel_errors,
+}
 
 
 # ------------------------------------------------------------- server
