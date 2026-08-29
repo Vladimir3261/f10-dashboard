@@ -197,6 +197,52 @@ bound to `127.0.0.1:3000` and is never published to the world.
 > Let's Encrypt, or a self-signed cert) before relying on this over
 > untrusted networks. The SSH tunnel in §4 remains the encrypted option.
 
+### Optional: real domains + Let's Encrypt TLS
+
+Entirely optional — leave both domain variables empty and everything above
+works unchanged. Set them to serve proper HTTPS instead:
+
+```bash
+GRAFANA_DOMAIN=grafana.example.com     # Grafana, still IP-allowlisted
+DASHBOARD_DOMAIN=f10.example.com       # the Pi dashboard, Basic Auth
+LETSENCRYPT_EMAIL=you@example.com
+DASHBOARD_AUTH_USER=f10
+DASHBOARD_AUTH_PASSWORD=<a real password>
+PI_WG_IP=10.77.0.10                    # must match the Pi's wireguard_peers entry
+LETSENCRYPT_STAGING=1                  # 1 while testing, 0 for real certs
+```
+
+```bash
+make apply && make deploy
+```
+
+**Point the DNS A records at the droplet first.** The playbook resolves each
+name and refuses to run certbot if it doesn't match, because a wrong record
+only produces a cryptic certbot error — and repeated failures burn
+Let's Encrypt's rate limit (5 certs per domain per week). Use
+`LETSENCRYPT_STAGING=1` while you get it working, then flip to `0`.
+
+**How the Pi dashboard is reached.** The Pi has no public address: it dials
+out over WireGuard, and nginx proxies back across the tunnel to
+`PI_WG_IP:8080`. No reverse SSH tunnel is needed — the VPN already provides
+the path, which is simpler than the `ssh -R` arrangement it replaces. If the
+car is off or out of signal, the vhost returns 502 quickly rather than
+hanging.
+
+**Why Basic Auth and not the IP allowlist** for the dashboard: the point is
+viewing it from a phone on mobile data, where your address changes
+constantly. The dashboard has no login of its own and serves the VIN, so the
+playbook refuses to publish it without a real `DASHBOARD_AUTH_PASSWORD`.
+(`live.py --redact-vin` will additionally mask the VIN in the HTTP/SSE API if
+you ever want that; it's off by default and never affects stored data.)
+
+**Ports with TLS on.** 80 and 443 open to the world, and nginx does the
+filtering: port 80 serves *only* the ACME challenge and redirects everything
+else to HTTPS, while each 443 vhost enforces its own allowlist or Basic Auth.
+Port 80 has to be world-reachable because Let's Encrypt validates from many
+global IPs. Renewal is certbot's own systemd timer, with a deploy hook that
+reloads nginx.
+
 ## 6. Migrating an existing lake
 
 Replacing an older server? Copy its data across before decommissioning it —

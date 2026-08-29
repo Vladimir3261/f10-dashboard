@@ -23,7 +23,10 @@ export
 # allow/deny rules (Ansible reads the env var directly).
 TF_VAR_grafana_allowed_cidrs := $(GF_ALLOWED_IPS)
 TF_VAR_grafana_public_port   := $(if $(GF_PUBLIC_PORT),$(GF_PUBLIC_PORT),80)
-export TF_VAR_grafana_allowed_cidrs TF_VAR_grafana_public_port
+# Both domains as one comma-separated value; Terraform compacts the empties,
+# so "", "a," and "," all behave correctly.
+TF_VAR_tls_domains := $(GRAFANA_DOMAIN),$(DASHBOARD_DOMAIN)
+export TF_VAR_grafana_allowed_cidrs TF_VAR_grafana_public_port TF_VAR_tls_domains
 
 TF      := terraform -chdir=terraform
 ANSIBLE_DIR := ansible
