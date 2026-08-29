@@ -220,6 +220,42 @@ Each stage is small enough to validate on the car before the next.
 - **Risks:** modest storage overhead; defining sentinels per channel.
 - **NOT yet:** automatic anomaly flags (that's Stage 6).
 
+#### TECH DEBT — the host clock can rewrite the timeline (open)
+
+**Raised 2026-08-29 (drive 8). Not fixed; deliberately deferred.**
+
+The Pi has no RTC. On 2026-08-29 it booted with a stale clock, began
+recording immediately, and `systemd-timesyncd` corrected the clock
+**forward by ~76.5 minutes 47 seconds later** — mid-run. The result is a
+session whose run 1 contains a phantom 4578.1s gap, a fictitious 5064s
+duration for what was really ~8 minutes, and ~18 seconds of samples
+stamped 76 minutes in the past. All of it shipped to ClickHouse with
+those timestamps.
+
+This is a data-quality defect of exactly the kind Stage 1 exists to
+prevent, and it is more dangerous than a bad *value*: a bad *clock*
+silently corrupts every rate, gradient and trend derived from the data,
+which is the entire premise of the long-term behavioural model. A drive
+that looks like a 76-minute idle never happened.
+
+Options, cheapest first:
+
+1. **Gate recording on clock sync.** Refuse to open a session until
+   `timedatectl show -p NTPSynchronized` reports yes, or hold samples in
+   memory until it does.
+2. **Stamp from a monotonic clock** plus one corrected epoch resolved at
+   sync time, so a mid-run correction cannot stretch the timeline.
+3. **Flag it instead of hiding it** — record NTP-sync state as a run-level
+   field so the lake can exclude pre-sync samples. Fits the Stage 1 quality
+   flag work directly.
+4. **Fit a hardware RTC.** The real fix for a host that is routinely
+   powered on while offline, and the only one that also fixes the session
+   *filename* being stamped from a bad clock.
+
+Until this is done, treat any run whose timestamps predate its host's
+first NTP sync as suspect for anything time-derived. See
+`drive-sessions/20260829T183627Z-session/NOTES.md` for the worked example.
+
 ### Stage 2 — Expand high-value DDE telemetry
 
 - **Objective:** capture the signals that actually track N47 health.
