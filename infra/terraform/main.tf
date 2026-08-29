@@ -1,7 +1,7 @@
 # The analytics droplet: ClickHouse lake + ingest server + WireGuard
 # gateway for the (NATed) Raspberry Pi tunnel. Terraform only creates the
-# bare VM, its SSH keys and its firewall; all software configuration is the
-# Ansible layer's job (infra/ansible), so this stays small and re-runnable.
+# bare VM and its firewall; all software configuration is the Ansible
+# layer's job (infra/ansible), so this stays small and re-runnable.
 #
 # The API token comes from the DIGITALOCEAN_TOKEN environment variable -
 # never a file. See variables.tf.
@@ -9,25 +9,29 @@
 provider "digitalocean" {}
 
 locals {
-  # Read each local public key file once. pathexpand handles a leading ~.
+  # Read each local public key file once, as plain text. pathexpand handles
+  # a leading ~.
   ssh_public_keys = [for f in var.ssh_public_key_files : trimspace(file(pathexpand(f)))]
-}
 
-# Upload each local public key to DigitalOcean so the droplet trusts it.
-# Named after the droplet + index to keep names unique per deployment.
-resource "digitalocean_ssh_key" "admin" {
-  count      = length(local.ssh_public_keys)
-  name       = "${var.droplet_name}-key-${count.index}"
-  public_key = local.ssh_public_keys[count.index]
+  # Authorise the keys by injecting them as PLAIN TEXT via cloud-init,
+  # rather than registering them as digitalocean_ssh_key resources: DO
+  # refuses to create a key that already exists on the account (a manually
+  # added one), which would break `apply`. cloud-init writes them straight
+  # into the default user's authorized_keys, so no DO key registry is
+  # touched and no name collisions are possible.
+  cloud_init = join("\n", concat(
+    ["#cloud-config", "ssh_authorized_keys:"],
+    [for k in local.ssh_public_keys : "  - ${k}"],
+  ))
 }
 
 resource "digitalocean_droplet" "analytics" {
-  name     = var.droplet_name
-  region   = var.region
-  size     = var.droplet_size
-  image    = var.droplet_image
-  ssh_keys = digitalocean_ssh_key.admin[*].fingerprint
-  tags     = var.tags
+  name      = var.droplet_name
+  region    = var.region
+  size      = var.droplet_size
+  image     = var.droplet_image
+  user_data = local.cloud_init
+  tags      = var.tags
 
   # Keep the box minimal; Ansible installs Docker, the stack and WireGuard.
   # Recreate only when these change - not on every software change.

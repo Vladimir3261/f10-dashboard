@@ -7,8 +7,12 @@ without sharing its LAN.
 
 This is a **simple quickstart, not the only way.** Only this directory is
 DigitalOcean-specific; swap it for any provider (or a bare VM) and the
-Ansible layer still applies. Terraform creates just the VM, its SSH keys
-and its firewall — all software config is [`../ansible/`](../ansible).
+Ansible layer still applies. Terraform creates just the VM and its
+firewall — all software config is [`../ansible/`](../ansible).
+
+Your SSH public keys are injected as **plain text via cloud-init**, not
+registered as DigitalOcean SSH keys — DO refuses to re-create a key already
+on your account, so referencing the registry would break `apply`.
 
 ## Prerequisites
 
