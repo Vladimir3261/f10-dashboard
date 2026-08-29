@@ -31,6 +31,7 @@ import sqlite3
 import struct
 import subprocess
 import urllib.parse
+import urllib.request
 import sys
 import threading
 import time
@@ -2026,12 +2027,17 @@ el("reload").onclick = () => { loadRuns(); loadHistory(); };
    watched and paused during a drive. If the agent is not running the
    chip just shows "off". This talks to a separate process; live.py's
    recording path is untouched. */
+/* Same-origin: live.py proxies the agent's status at /api/sync, so this
+   works both on the Pi and through the server's reverse proxy. Pause and
+   resume still go straight to the agent, which only works when the page is
+   opened on the Pi itself - deliberately, so a public vhost cannot pause
+   syncing. */
 const SYNC_BASE = `http://${location.hostname || "localhost"}:8091`;
 let syncEnabled = null;
 async function pollSync() {
   try {
-    const s = await (await fetch(SYNC_BASE + "/sync/status", {cache: "no-store"})).json();
-    syncEnabled = s.enabled;
+    const s = await (await fetch("/api/sync", {cache: "no-store"})).json();
+    syncEnabled = (s.state === "unreachable") ? null : s.enabled;
     el("syncdot").className = "dot " + (s.enabled && s.state !== "offline" ? "on" : "off");
     el("syncstate").textContent = s.state || "-";
     let pend = 0;
@@ -2277,6 +2283,35 @@ def make_handler(tel: Telemetry, db_path: Optional[str]):
                     )).encode()
                 except sqlite3.Error as exc:
                     payload = json.dumps({"error": str(exc), "series": {}}).encode()
+
+                self._body("application/json", payload)
+                return
+
+            if path == "/api/sync":
+                #
+                # Same-origin, READ-ONLY view of the sync agent's status.
+                #
+                # The page used to fetch http://<host>:8091 directly, which
+                # only works when the dashboard is opened on the Pi itself.
+                # Through the server's reverse proxy that hostname resolves
+                # to the proxy, port 8091 is not published there, and the
+                # fetch fails - so the chip read "off" while sync was in fact
+                # healthy.
+                #
+                # Only /sync/status is proxied. The agent also exposes
+                # unauthenticated pause/resume on 8091; those must NOT become
+                # reachable through a public vhost, so they are not forwarded.
+                #
+                try:
+                    with urllib.request.urlopen(
+                        "http://127.0.0.1:8091/sync/status", timeout=2.0
+                    ) as response:
+                        payload = response.read()
+                except Exception as exc:
+                    payload = json.dumps(
+                        {"enabled": False, "state": "unreachable",
+                         "last_error": str(exc), "databases": {}}
+                    ).encode()
 
                 self._body("application/json", payload)
                 return

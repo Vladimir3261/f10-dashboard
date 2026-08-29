@@ -98,10 +98,11 @@ reports is **generic-sensor saturation, not a decode error**, and
   only a clean SIGINT shutdown writes `ended_at`, while a transport
   reconnect starts a new run and leaves the old one open. Cosmetic now, but
   it will skew any session-duration analytics.
-- **The dashboard's sync indicator is wrong when proxied.** The page
-  hardcodes `http://<location.hostname>:8091/sync/status`. Reached through
-  the server's reverse proxy that resolves to the wrong host and the fetch
-  fails, painting the indicator red. Sync itself is unaffected. **Fix:** add
-  a same-origin, read-only `/api/sync` endpoint to `live.py` that proxies
-  status from `127.0.0.1:8091`, and point the page at it — one origin, no
-  extra port exposed.
+- ~~**The dashboard's sync indicator is wrong when proxied.**~~ **Fixed.**
+  The page hardcoded `http://<location.hostname>:8091/sync/status`, which
+  only resolves when the dashboard is opened on the Pi itself; through the
+  reverse proxy the fetch failed and the chip read "off" while sync was
+  healthy. `live.py` now serves a same-origin, read-only `/api/sync` that
+  proxies status from `127.0.0.1:8091`. Pause/resume are deliberately NOT
+  proxied — the agent exposes them unauthenticated, so they stay reachable
+  only from the Pi itself.
