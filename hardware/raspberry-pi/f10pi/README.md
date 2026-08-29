@@ -29,7 +29,6 @@ git clone <REPO_URL> ~/f10-dashboard && cd ~/f10-dashboard/hardware/raspberry-pi
 cp config/local.env.example        config/local.env
 cp config/wifi.example.env         config/wifi.env
 cp config/wireguard.example.conf   config/wireguard.conf
-cp config/clickhouse.example.env   config/clickhouse.env
 $EDITOR config/*.env config/*.conf   # put your real SSIDs/PSKs/keys here
 
 # 3. provision (idempotent — safe to re-run)
@@ -65,7 +64,6 @@ fill it in; the real files are gitignored:
 | `local.env.example` | `local.env` | hostname, paths, toggles |
 | `wifi.example.env` | `wifi.env` | Wi-Fi SSIDs + PSKs + priorities |
 | `wireguard.example.conf` | `wireguard.conf` | WireGuard keys + endpoint |
-| `clickhouse.example.env` | `clickhouse.env` | ClickHouse host/user/pass |
 
 ## Status
 

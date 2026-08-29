@@ -1,4 +1,5 @@
-# f10 infrastructure - one entrypoint for the provisioning stages.
+# f10 infrastructure - the ANALYTICS SERVER. Provisioning the Raspberry Pi
+# lives in ../hardware (`cd hardware && make pi-setup`).
 #
 #   Stage 1  Terraform  create the droplet          make apply
 #   (seam)   gen_inventory  terraform -> ansible     make inventory
@@ -95,11 +96,6 @@ deploy: galaxy ## Configure the droplet: hardening + Docker + stack + WireGuard
 .PHONY: deploy-check
 deploy-check: galaxy ## Dry-run the playbook (--check, no changes)
 	cd $(ANSIBLE_DIR) && ansible-playbook site.yml --check
-
-# ----------------------------------------------------------------- the Pi
-.PHONY: pi-setup
-pi-setup: ## Generate local/pi-setup.sh for the Raspberry Pi from current infra state
-	python3 scripts/gen_pi_setup.py
 
 # ------------------------------------------------------------------- lake
 .PHONY: lake-status

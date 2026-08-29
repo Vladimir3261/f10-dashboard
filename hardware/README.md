@@ -16,6 +16,17 @@ variables** (`<WG_PI_IP>`, `<HOME_WIFI_SSID>`, `<SERVER_USER>`, …). Real
 values are injected outside git via gitignored `config/*.env` /
 `config/*.conf` files. See each subproject's `config/*.example`.
 
+## Provisioning the Pi
+
+```bash
+cd hardware && make pi-setup     # generate local/pi-setup.sh from live infra state
+```
+
+Targets in this `Makefile` run on **your laptop** and produce something you
+apply to a device. The scripts under `raspberry-pi/f10pi/scripts/` run **on
+the Pi** and are invoked by that generated script. Full procedure:
+[`infra/PROVISIONING.md`](../infra/PROVISIONING.md) §7.
+
 ## Subprojects
 
 | Path | What |

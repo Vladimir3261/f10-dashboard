@@ -120,7 +120,6 @@ peer).
 | `make deploy` | run `site.yml`: base → docker → stack → nginx → wireguard |
 | `make deploy-check` | dry-run the playbook (`--check`) |
 | `make lake-status` | stack health + lake row counts |
-| `make pi-setup` | generate `local/pi-setup.sh` for the Raspberry Pi |
 | `make migrate-lake FROM=...` | copy a lake from an older server |
 | `make destroy` | tear the droplet down |
 
@@ -297,13 +296,15 @@ $EDITOR hardware/raspberry-pi/f10pi/config/wifi.env      # gitignored
 Then:
 
 ```bash
-cd infra
-make pi-setup          # writes local/pi-setup.sh from the current state
-make deploy            # server registers the Pi as a WireGuard peer
+cd hardware && make pi-setup    # writes local/pi-setup.sh from the current state
+cd ../infra   && make deploy    # server registers the Pi as a WireGuard peer
 
 scp ../local/pi-setup.sh <pi-on-your-lan>:
 ssh <pi-on-your-lan> 'sudo ./pi-setup.sh'
 ```
+
+> Pi provisioning lives in **`hardware/`**, not here — `infra/` is the
+> server. The generator reads this server's state to build the Pi's script.
 
 Afterwards the Pi is reachable through the server, from anywhere:
 

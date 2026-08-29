@@ -7,11 +7,11 @@ network interfaces, each with one job, kept strictly separate:
                        ┌────────────────────────────────────────┐
                        │            Raspberry Pi 4 (f10pi)        │
                        │                                          │
-  Internet  ~~wifi~~►  │  wlan0 ── default route ── cloud/lake    │
-  (home / hotspot /    │           (ClickHouse lake, git, updates)│
+  Internet  ~~wifi~~►  │  wlan0 ── default route ── the server    │
+  (home / hotspot /    │           (telemetry upload, git, updates)│
    in-car LTE)         │                                          │
-                       │  wg0   ── management VPN ── your laptop   │
-  admin  ~~wg~~►       │           (SSH, ClickHouse over tunnel)  │
+                       │  wg0   ── tunnel to the server ───────── │
+  admin  ~~wg~~►       │           (inbound SSH; telemetry out)   │
                        │                                          │
   BMW F10   ──cable──► │  eth0  ── link-local ONLY ── BMW ENET    │
   (ENET/OBD)           │           (169.254.x.x, no default route)│
@@ -28,7 +28,7 @@ network interfaces, each with one job, kept strictly separate:
 | iface | role | route | notes |
 |---|---|---|---|
 | `wlan0` | Internet | **default** | home Wi-Fi / hotspot / LTE, by priority |
-| `wg0` | management VPN | management subnet only | reach the Pi + reach the server privately |
+| `wg0` | tunnel to the server | VPN subnet only | how the server SSHes IN, and how telemetry goes OUT |
 | `eth0` | BMW ENET | **never default**, link-local | 169.254.x.x, no DNS, dedicated to the car |
 
 The one hard rule that makes this safe: **`eth0` must never carry the
@@ -43,8 +43,9 @@ isolated link; all real Internet traffic goes out `wlan0`.
   to SQLite, and serves the dashboard on `:8080`. Launched via
   `run_car.sh` (loads every verified channel) by `f10-dashboard.service`.
 - **sync agent** (`infra/sync/agent.py`) — reads the SQLite logs
-  read-only and ships drives to the ClickHouse lake over `wlan0` (reaching
-  the server via its `wg0` address). Runs as `f10-sync.service`.
+  read-only and ships drives to the ingest server over the `wg0` tunnel.
+  It never talks to ClickHouse directly: ClickHouse publishes no host port,
+  and the ingest server is the only writer. Runs as `f10-sync.service`.
 
 Because the runtime is stdlib-only, provisioning needs **no pip installs
 and no virtualenv** — a major portability win for an embedded host.
