@@ -71,6 +71,22 @@ desktop.ini
 /infra/sync/config.json
 /local/sync-state.json
 
+# ------------------------------------------------------------ infra IaC
+# Terraform state can contain secrets; tfvars holds your own values; the
+# generated Ansible inventory holds the droplet's public IP. Only the
+# tracked *.example / *.tf templates belong in git.
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.tfvars
+!infra/terraform/*.tfvars.example
+infra/terraform/crash.log
+infra/terraform/override.tf
+infra/terraform/override.tf.json
+infra/ansible/inventory/hosts.yml
+!infra/ansible/inventory/hosts.yml.example
+infra/ansible/*.retry
+
 # --------------------------------------------------------- hardware secrets
 # Per-device config + secrets for the Pi and other hardware. Only the
 # tracked *.example / *.template files belong in git; the real files

@@ -1,0 +1,32 @@
+---
+# Analytics server configuration.
+#
+# SCAFFOLD: for now this only proves the Terraform -> Ansible seam works -
+# it connects to the droplet Terraform created and reports facts. The real
+# roles land next:
+#   - base hardening + a non-root admin user (from admin_ssh_public_keys)
+#   - Docker + the compose stack (ClickHouse, ingest, Grafana)
+#   - WireGuard gateway for the Raspberry Pi tunnel
+#   - ufw (SSH + WireGuard only; app ports stay on localhost / the tunnel)
+#
+# Run with: make deploy   (or ansible-playbook site.yml)
+
+- name: Analytics server
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Confirm connectivity
+      ansible.builtin.ping:
+
+    - name: Report what we connected to
+      ansible.builtin.debug:
+        msg: >-
+          Connected to {{ inventory_hostname }}
+          ({{ ansible_host | default('?') }}) as {{ ansible_user }};
+          {{ ansible_distribution | default('?') }}
+          {{ ansible_distribution_version | default('') }}.
+          WireGuard port {{ wireguard_port | default('unset') }},
+          {{ admin_ssh_public_keys | default([]) | length }} admin key(s).
+
+    # TODO(next): include_role base / docker / stack / wireguard here.

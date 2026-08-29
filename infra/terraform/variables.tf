@@ -1,0 +1,67 @@
+# Inputs. Copy terraform.tfvars.example -> terraform.tfvars (gitignored)
+# and adjust. The DigitalOcean API token is NOT a variable here: export it
+# as an environment variable so it never lands in a file:
+#
+#   export DIGITALOCEAN_TOKEN=dop_v1_xxx
+#
+# (the provider reads it automatically).
+
+variable "droplet_name" {
+  description = "Name/hostname of the analytics droplet."
+  type        = string
+  default     = "f10-analytics"
+}
+
+variable "region" {
+  description = "DigitalOcean region slug (e.g. fra1, ams3, nyc3, sgp1). Pick one near you."
+  type        = string
+  default     = "fra1"
+}
+
+variable "droplet_size" {
+  description = <<-EOT
+    Droplet size slug. ClickHouse + ingest + Grafana + WireGuard on one box
+    wants headroom - 4 GB is a sane floor (ClickHouse OOMs on background
+    merges at ~2 GB). Shrink at your own risk.
+  EOT
+  type        = string
+  default     = "s-2vcpu-4gb"
+}
+
+variable "droplet_image" {
+  description = "Base image slug. Ubuntu LTS is what the Ansible layer targets."
+  type        = string
+  default     = "ubuntu-24-04-x64"
+}
+
+variable "ssh_public_key_files" {
+  description = <<-EOT
+    Local SSH PUBLIC key files to load into the droplet's authorized_keys
+    (via DigitalOcean SSH keys). The matching private keys let you - and
+    later the same keys let you reach the Raspberry Pi. Never a private key.
+  EOT
+  type        = list(string)
+  default     = ["~/.ssh/id_ed25519.pub"]
+}
+
+variable "ssh_allowed_cidrs" {
+  description = <<-EOT
+    Source CIDRs allowed to reach SSH (22/tcp). Default is open because auth
+    is key-only, but restricting this to your own address(es) is strongly
+    recommended, e.g. ["203.0.113.4/32"].
+  EOT
+  type        = list(string)
+  default     = ["0.0.0.0/0", "::/0"]
+}
+
+variable "wireguard_port" {
+  description = "UDP port the WireGuard gateway listens on (opened to the world so a NATed Pi can reach it)."
+  type        = number
+  default     = 51820
+}
+
+variable "tags" {
+  description = "DigitalOcean tags applied to the droplet and firewall."
+  type        = list(string)
+  default     = ["f10", "analytics"]
+}

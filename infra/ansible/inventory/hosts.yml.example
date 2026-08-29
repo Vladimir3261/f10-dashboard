@@ -1,0 +1,13 @@
+# Example inventory shape. The REAL inventory/hosts.yml is generated from
+# terraform output by `make inventory` (or scripts/gen_inventory.py) and is
+# gitignored - it holds the droplet's public IP. Never edit the real one by
+# hand.
+all:
+  hosts:
+    analytics:
+      ansible_host: 203.0.113.10        # <- filled from terraform output
+      ansible_user: root
+  vars:
+    wireguard_port: 51820
+    admin_ssh_public_keys:
+      - "ssh-ed25519 AAAA...example... admin@example"

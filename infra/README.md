@@ -26,7 +26,29 @@ gets data there from the car over a mobile network. Two sides:
 - **`common/wire.py`** — the shared columnar + LZMA batch format
   (~4 bytes/sample on the wire; ~3% of row-JSON).
 
-## Deploy the lake (on the VPS)
+## Provision a server from scratch (IaC)
+
+To stand up the VPS reproducibly instead of by hand, use the two staged
+layers, driven by [`Makefile`](Makefile):
+
+```bash
+cd infra
+export DIGITALOCEAN_TOKEN=dop_v1_xxx          # never stored in a file
+make init && make provision                   # Terraform: create droplet + inventory
+make deploy                                    # Ansible: configure it (WIP)
+```
+
+- **[`terraform/`](terraform/README.md)** — stage 1: a DigitalOcean
+  droplet (analytics + WireGuard gateway), its SSH keys, and a firewall
+  that opens only SSH + WireGuard. Provider-specific; a simple quickstart.
+- **[`ansible/`](ansible/README.md)** — stage 2: configures the droplet
+  (stack + WireGuard + hardening). Provider-agnostic. The inventory is
+  generated from Terraform output, so the IP is never typed by hand.
+
+The manual `docker compose` flow below still works and is what the Ansible
+layer automates.
+
+## Deploy the lake manually (on the VPS)
 
 ```bash
 git clone <this repo> && cd f10-dashboard/infra
