@@ -172,16 +172,30 @@ def polling_classes(registry: MappingRegistry, args) -> Dict[str, PollingClassDe
     )
 
 
-def numeric_only(values: Dict[str, Any]) -> Dict[str, float]:
+def numeric_only(
+    values: Dict[str, Any], profile: Optional[ResolvedProfile] = None
+) -> Dict[str, float]:
     """
-    Samples the recorder can store.
+    Samples the recorder should store.
 
-    `samples.value` is REAL, so a future enum or ASCII channel is shown on
-    the dashboard but not logged. No production mapping has one today.
+    Two things are filtered out:
+
+    * Non-numeric values. `samples.value` is REAL, so an enum or ASCII
+      channel is shown on the dashboard but not logged.
+    * Channels declared `log: false` in their mapping - decoded and shown,
+      deliberately not persisted. That is for a channel whose finding is
+      that it never changes: `egs_da2e_b0` cost 124,485 stored rows over
+      three days carrying exactly one distinct value. Reading it is free
+      (it shares a response with the gear), storing it is not.
+
+    With no profile the log flag cannot be consulted and everything numeric
+    is kept, which is the safe direction: a missing profile must not silently
+    drop channels.
     """
     return {
         key: value for key, value in values.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
+        and (profile is None or profile.is_logged(key))
     }
 
 
@@ -1301,7 +1315,7 @@ def poll_loop(
                 fresh.update(derived)
 
                 if rec is not None and fresh:
-                    rec.write(time.time(), numeric_only(fresh))
+                    rec.write(time.time(), numeric_only(fresh, profile))
 
                 latency = (time.monotonic() - started) * 1000.0
                 hz_count += 1
@@ -1432,7 +1446,7 @@ def demo_loop(
         }
 
         if rec is not None:
-            rec.write(time.time(), numeric_only(values))
+            rec.write(time.time(), numeric_only(values, profile))
 
         tel.update(
             values=values, latency_ms=round(6 + drive * 4, 1), hz=10.0,

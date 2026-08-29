@@ -199,6 +199,33 @@ be attacked.
 
 ---
 
+### Decoded but not stored — `log: false`
+
+A signal or derived channel may declare `log: false`. It is still read,
+still decoded and still shown on the dashboard; the recorder simply never
+writes a row for it.
+
+```yaml
+      egs_da2e_b0:
+        decode: {type: uint8, offset: 0}
+        log: false
+```
+
+This is for a channel whose *finding is that it does not change*.
+`egs_da2e_b0` shares one 2-byte response with `gear`, so reading it costs
+nothing on the wire — but it wrote 124,485 rows carrying a single distinct
+value over three days. Deleting the channel would discard a documented
+result and stop us noticing if it ever became non-zero; storing it forever
+buys nothing. `log: false` keeps the observation and drops the cost.
+
+Two deliberate properties:
+
+- **It never affects decoding.** Like everything else in the format it is
+  data, not behaviour — the decoder does not consult it.
+- **The safe direction is to log.** An unknown channel, or a recorder with no
+  resolved profile, stores everything. Silently dropping data has to be
+  something a mapping asks for explicitly.
+
 ## Derived signals
 
 Channels computed from other channels are declared, not coded:

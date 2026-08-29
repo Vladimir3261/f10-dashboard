@@ -119,6 +119,19 @@ def _mapping_version(meta: Dict[str, Any], source: str) -> int:
     return raw
 
 
+def _as_bool(value: Any, source: str, path: str, default: bool) -> bool:
+    """A YAML boolean, strictly. `log: maybe` is a mistake, not a truthy value."""
+    if value is None:
+        return default
+
+    if not isinstance(value, bool):
+        raise InvalidFieldError(
+            f"expected true or false, got {value!r}", source, path
+        )
+
+    return value
+
+
 def _as_float(value: Any, source: str, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidFieldError(
@@ -518,6 +531,7 @@ def _signal(
         ),
         display=_display(data.get("display"), source, f"{path}.display"),
         source_name=data.get("source_name"),
+        log=_as_bool(data.get("log"), source, f"{path}.log", True),
         provenance=_provenance(
             data.get("source"), source, f"{path}.source", base_provenance
         ),
@@ -921,6 +935,7 @@ def _derived(
         add=_as_float(data.get("add", 0.0), source, f"{path}.add"),
         pre_add=_as_float(data.get("pre_add", 0.0), source, f"{path}.pre_add"),
         round=rounding,
+        log=_as_bool(data.get("log"), source, f"{path}.log", True),
         trigger=trigger,
         position=position,
         provenance=_provenance(

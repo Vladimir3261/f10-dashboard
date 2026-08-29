@@ -16,7 +16,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-egs-transmission
-  version: 2
+  version: 3
   production: false
   description: >
     CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)
@@ -83,6 +83,14 @@ requests:
         unit: ""
         display: {digits: 0, min: 0, max: 8}
         decode: {type: uint8, offset: 0, round: 0}
+        # Decoded and shown, never stored. It shares this response with
+        # `gear`, so reading it is free - but it produced 124,485 rows
+        # carrying ONE distinct value over three days (2026-08-26..29). The
+        # finding is that it is constant on this car, and that finding is now
+        # made; re-recording it forever adds nothing. Keeping the channel live
+        # means a future non-zero value still shows up on the dashboard
+        # rather than going unnoticed.
+        log: false
       # byte 1: the ENGAGED GEAR. Verified on a road drive - steps 1..8
       # with speed (45-70 km/h -> 3..8, 70+ -> 5..8). At standstill it is
       # not meaningful (a ZF 8HP won't engage high gears parked), which is

@@ -218,6 +218,14 @@ class SignalDef:
     decode: Decode
     display: Display = field(default_factory=Display)
     source_name: Optional[str] = None
+    #: Whether recorded runs should store this channel.
+    #:
+    #: False means "decode and display, but do not persist". The channel is
+    #: still read (it usually shares a request with one that matters, so it
+    #: costs nothing on the wire) and still appears on the dashboard, but no
+    #: row is written for it. For a channel whose finding is that it never
+    #: changes, storing millions of identical rows adds no information.
+    log: bool = True
     provenance: Provenance = field(default_factory=Provenance)
     verification: Verification = field(default_factory=Verification)
     order: int = 0
@@ -312,6 +320,8 @@ class DerivedDef:
     add: float = 0.0
     pre_add: float = 0.0
     round: Optional[int] = None
+    #: As SignalDef.log - compute and display, but do not persist.
+    log: bool = True
     trigger: Tuple[str, ...] = ()                # recompute when these are fresh
     position: str = "last"                       # ordering hint for the UI
     provenance: Provenance = field(default_factory=Provenance)

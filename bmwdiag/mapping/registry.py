@@ -114,6 +114,23 @@ class ResolvedProfile:
     def has(self, key: str) -> bool:
         return key in self._signal_by_key or key in self._derived_by_key
 
+    def is_logged(self, key: str) -> bool:
+        """
+        Should a recorded run store this channel?
+
+        False for a channel declared `log: false` - decoded and shown, but
+        never persisted. An unknown key is logged: a channel the profile does
+        not know about is not something to silently discard.
+        """
+        signal = self._signal_by_key.get(key)
+
+        if signal is not None:
+            return signal.log
+
+        definition = self._derived_by_key.get(key)
+
+        return True if definition is None else definition.log
+
     # -- data versioning --------------------------------------------
 
     def channel_version(self, key: str) -> Optional[int]:
