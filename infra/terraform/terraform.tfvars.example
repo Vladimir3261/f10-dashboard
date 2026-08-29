@@ -10,7 +10,16 @@ region       = "fra1"                     # pick a region near you
 droplet_size = "s-2vcpu-4gb"
 droplet_image = "ubuntu-24-04-x64"
 
-# Local PUBLIC key(s) to authorise on the droplet (and later the Pi).
+# --- SSH access (set at least one of the two) -----------------------------
+#
+# PREFERRED: names of keys ALREADY on your DigitalOcean account. Looked up
+# read-only (no "key already exists" error). DO installs them for root and
+# skips setting a root password, so the droplet is key-only from first boot.
+# List what's on your account:  make do-keys
+do_ssh_key_names = ["my-laptop"]
+
+# Local PUBLIC key file(s), injected via cloud-init. Use for a key that is
+# NOT registered on your DO account. Also re-used to authorise the Pi.
 ssh_public_key_files = ["~/.ssh/id_ed25519.pub"]
 
 # Lock SSH down to your own address in production, e.g. ["203.0.113.4/32"].

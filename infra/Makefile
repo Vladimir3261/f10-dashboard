@@ -53,6 +53,14 @@ destroy: ## Tear the droplet down
 output: ## Show terraform outputs
 	$(TF) output
 
+.PHONY: do-keys
+do-keys: ## List SSH keys registered on your DigitalOcean account
+	@curl -sS -H "Authorization: Bearer $$DIGITALOCEAN_TOKEN" \
+	  "https://api.digitalocean.com/v2/account/keys?per_page=100" \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); \
+[print('  %-24s %s' % (k['name'], k['fingerprint'])) for k in d.get('ssh_keys', [])] \
+or print('  (no keys, or API error: %s)' % d.get('message',''))"
+
 # ------------------------------------------------------------------- seam
 .PHONY: inventory
 inventory: ## Write the Ansible inventory from terraform output
