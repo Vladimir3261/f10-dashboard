@@ -6,10 +6,19 @@
 # is redirected to HTTPS. All real access control (IP allowlist, Basic Auth)
 # lives on the 443 vhosts.
 
+#
+# This vhost claims ONLY the TLS domains. It becomes the port-80
+# default_server just when Grafana has its own domain - because then no
+# plain-HTTP vhost exists. If Grafana is still served by IP, that vhost is
+# the default instead, so reaching the droplet by address keeps working
+# rather than being redirected to an HTTPS name it has no certificate for.
+
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+    listen 80{% if grafana_domain %} default_server{% endif %};
+
+    listen [::]:80{% if grafana_domain %} default_server{% endif %};
+
+    server_name {{ tls_domains | join(' ') }};
 
     location /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;

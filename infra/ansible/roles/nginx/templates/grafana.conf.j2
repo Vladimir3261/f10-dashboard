@@ -18,9 +18,13 @@ server {
 {% else %}
 # No domain configured: plain HTTP on the configured port, by IP.
 
+#
+# default_server so that reaching the droplet by bare IP lands here, even
+# when an ACME vhost is also bound to port 80 for the dashboard's domain.
+
 server {
-    listen {{ gf_public_port }};
-    listen [::]:{{ gf_public_port }};
+    listen {{ gf_public_port }} default_server;
+    listen [::]:{{ gf_public_port }} default_server;
     server_name {{ gf_server_name }};
 {% endif %}
 
