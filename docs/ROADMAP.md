@@ -168,6 +168,15 @@ tears down the whole HSFZ link instead of failing that one request. Cost is
 summarised in one report without stitching. Cheap to fix, and it should be
 fixed *before* collecting much more data.
 
+### Open threads (2026-08-30)
+
+Raw notes captured in [`POLLING_AND_SAFETY.md`](POLLING_AND_SAFETY.md), to
+pick up next session: whether sustained polling can harm the car (the
+overnight battery test is the one that matters), dropping most channels to
+far longer intervals now that the census shows where the volume goes, and a
+switchable drive mode — off / debug / normal / long drive / duty-cycled
+sampling.
+
 ### Recommended order
 
 1. **Resolve the soot channel** (research + the captured regen event).
