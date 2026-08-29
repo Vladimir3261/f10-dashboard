@@ -50,6 +50,10 @@ The telemetry runtime (`live.py` + `bmwdiag`) is **stdlib-only** — no
 `f10-sync.service` runs the sync agent that ships drives to the ClickHouse
 lake over `wlan0`. Both are read-only on the car.
 
+Optional, and not part of the telemetry system:
+[`docs/claude-code.md`](docs/claude-code.md) — keeping a coding agent alive
+on the Pi in `tmux`, reachable from a phone.
+
 See [`docs/architecture.md`](docs/architecture.md) for the whole picture,
 then the topic docs (`networking`, `wireguard`, `ssh`, `bmw-enet`) and
 [`docs/recovery.md`](docs/recovery.md) for unattended-recovery scenarios.
