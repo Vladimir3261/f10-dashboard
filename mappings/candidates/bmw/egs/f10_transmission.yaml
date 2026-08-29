@@ -16,7 +16,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-egs-transmission
-  version: 1
+  version: 2
   production: false
   description: >
     CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)
@@ -53,11 +53,27 @@ defaults:
     target: 0x18
     timeout: 0.4
 
+# The EGS is polled on its OWN class, not the shared `fast`.
+#
+# It was on `fast` (every cycle, ~10 Hz), which made the transmission the
+# most aggressively polled target we have - and it is the one ECU that goes
+# to sleep. A sleeping EGS answers a routing NACK or nothing at all, so at
+# 10 Hz we generated up to ten failed exchanges a second, each of which used
+# to tear down the whole HSFZ link (see execute.py).
+#
+# The rate bought nothing. Over three days that request produced 122,595
+# `gear` samples carrying 8 distinct values, and 124,485 `egs_da2e_b0`
+# samples carrying exactly ONE - the constant this file already documents as
+# unused. A ZF 8HP shift takes ~200-400 ms, so 4 Hz still captures every
+# gear the box selects.
+polling_classes:
+  egs: {hz: 4, priority: 2}
+
 requests:
 
   egs.selector.DA2E:
     did: 0xDA2E
-    polling: {class: fast}
+    polling: {class: egs}
     response: {data_length: 2}
     signals:
       # byte 0: constant 0 through P/R/N/D and while driving - reserved/
