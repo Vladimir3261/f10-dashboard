@@ -149,7 +149,7 @@ fi
 
 echo
 bold "2. The Raspberry Pi"
-PI_USER="$(ask "   Login user on the Pi" "f10")"
+PI_USER="$(ask "   Login user on the Pi" "pi")"
 PI_HOST="$(ask "   Where to reach it on your LAN (hostname or IP)" "f10pi.local")"
 
 # --------------------------------------------------- look at the Pi first
@@ -182,7 +182,9 @@ else
   warn "cannot log in without a password yet - you will be prompted later"
   echo "   assuming the repo path $PI_REPO_DIR"
 fi
-export PI_REPO_DIR
+# The generator must see the answers given above, not the defaults in
+# infra/.env - otherwise it targets the wrong user on the Pi.
+export PI_USER PI_REPO_DIR
 
 # ----------------------------------------------------------------- confirm
 

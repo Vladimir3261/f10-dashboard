@@ -10,7 +10,7 @@ dial *out* to it and the server relays between them:
   laptop  ──public SSH──►  VPS 10.77.0.1  ──wg0──►  Pi 10.77.0.10
                            (jump host)
 
-  ssh -J root@<vps> f10@<WG_PI_IP>     # one command, two hops
+  ssh -J root@<vps> pi@<WG_PI_IP>     # one command, two hops
 ```
 
 **Only the Pi joins the VPN.** Your laptop does not: it reaches the VPS over

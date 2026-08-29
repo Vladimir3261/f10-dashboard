@@ -336,7 +336,7 @@ ssh <pi-on-your-lan> 'sudo ./pi-setup.sh'
 Afterwards the Pi is reachable through the server, from anywhere:
 
 ```bash
-ssh -J root@<droplet-ip> f10@10.77.0.10
+ssh -J root@<droplet-ip> pi@10.77.0.10
 ```
 
 ### How the keys are handled
