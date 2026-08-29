@@ -115,6 +115,8 @@ peer).
 | `make ping` | check Ansible can reach the droplet |
 | `make deploy` | run `site.yml`: base → docker → stack → wireguard |
 | `make deploy-check` | dry-run the playbook (`--check`) |
+| `make lake-status` | stack health + lake row counts |
+| `make migrate-lake FROM=...` | copy a lake from an older server |
 | `make destroy` | tear the droplet down |
 
 ### The Ansible roles (`make deploy`)
@@ -149,7 +151,39 @@ publicly — only SSH and WireGuard are. Reach Grafana over an SSH tunnel:
 ssh -L 3000:localhost:3000 root@<droplet-ip>   # then open http://localhost:3000
 ```
 
-## 5. Connect a Raspberry Pi (next)
+## 5. Migrating an existing lake
+
+Replacing an older server? Copy its data across before decommissioning it —
+historical telemetry is the point of the project and cannot be re-collected.
+
+```bash
+make migrate-lake FROM=root@old-host ARGS='--dry-run'   # review first
+make migrate-lake FROM=root@old-host                     # do it
+make lake-status                                         # verify
+```
+
+Rows stream **old → your machine → new** over two SSH connections, so the
+two servers never need to reach each other, nothing is written to disk, and
+neither ClickHouse password is passed on a command line (each is read from
+that host's own `infra/.env` at run time).
+
+- **Safe to re-run.** `samples`/`sessions` are `ReplacingMergeTree`, so
+  re-inserted rows collapse on merge instead of duplicating — an interrupted
+  transfer just gets repeated. Verified: a duplicated copy showed `raw 4 /
+  FINAL 2`, and `OPTIMIZE ... FINAL` settled it to 2.
+- **Counts look inflated until merges run.** `SELECT count()` includes
+  not-yet-collapsed duplicates; `count() FROM t FINAL` gives the true number.
+- **Schema drift is handled.** Only columns present on *both* sides are
+  copied, so a newer destination column (e.g. `sessions.mappings`, added by
+  the mapping-versioning work) simply takes its default on migrated rows
+  rather than breaking the transfer.
+- **`samples` is copied one month at a time**, so a large table cannot trip
+  the memory limit on a small old box.
+
+If the old stack lives somewhere other than `/root/f10-dashboard/infra`,
+pass `ARGS='--src-dir /path/to/infra'`.
+
+## 6. Connect a Raspberry Pi (next)
 
 The WireGuard server is up but has no peers yet. To add the Pi:
 
@@ -162,7 +196,7 @@ The WireGuard server is up but has no peers yet. To add the Pi:
 
 (See `hardware/raspberry-pi/f10pi/docs/wireguard.md`.)
 
-## 6. Tear down
+## 7. Tear down
 
 ```bash
 make destroy
