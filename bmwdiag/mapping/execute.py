@@ -51,6 +51,40 @@ def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
     return prefix + bytes(data)
 
 
+#: How many consecutive per-request transport faults to absorb before
+#: concluding the link itself is gone and letting the error propagate to the
+#: reconnect logic. Sized so a couple of unreachable ECUs (an EGS that will
+#: not route, a slow DDE) never cost a reconnect, while a dead socket is
+#: noticed within one polling cycle - failing requests return immediately.
+TRANSPORT_FAULT_BUDGET = 6
+
+
+def _is_request_fault(exc: Exception) -> bool:
+    """
+    Did ONE exchange fail, or has the link died?
+
+    Skipping a request is only safe while the link is still good; otherwise
+    every later request fails identically and the reconnect never happens.
+
+    Classified structurally rather than by importing the transport's own
+    exceptions: `bmwdiag` deliberately knows nothing about HSFZ, imports
+    nothing outside the standard library and opens no sockets, so it cannot
+    reference `HsfzNack` by type. Anything unrecognised counts as a link
+    fault, which is the conservative direction - a needless reconnect costs
+    a few seconds, whereas mistaking a dead link for a slow ECU means polling
+    a closed socket forever.
+    """
+    if isinstance(exc, (ConnectionError, BrokenPipeError)):
+        return False                    # socket gone: let it reconnect
+
+    if isinstance(exc, TimeoutError):
+        return True                     # this ECU did not answer in time
+
+    # A negative acknowledgement: the gateway is alive and refused to route
+    # to one target (e.g. "gateway will not route to 0x18" for the EGS).
+    return exc.__class__.__name__.endswith("Nack")
+
+
 class MappingExecutor:
     """
     Runs a set of due requests and returns normalised signal values.
@@ -83,6 +117,15 @@ class MappingExecutor:
         # everything automatically.
         #
         self._armed: Dict[int, tuple] = {}
+        #
+        # Consecutive per-request transport faults. One ECU that is slow or
+        # absent must not tear down a link that is otherwise fine, but a link
+        # that has genuinely died has to reach the reconnect logic - and it
+        # looks the same from a single request. So faults are tolerated per
+        # request and counted; enough of them in a row means the link, not
+        # the ECU, and the error is re-raised. Any success resets it.
+        #
+        self._transport_faults = 0
 
     # -- helpers ----------------------------------------------------
 
@@ -184,21 +227,59 @@ class MappingExecutor:
             # when the currently-armed define is not already this
             # request's - so a repeatedly-polled channel arms once, while
             # channels sharing one dynamic DID re-arm each time they take
-            # a turn. A transport failure here propagates like any other:
-            # it belongs to the reconnect logic, and the next connection's
-            # fresh executor re-arms from scratch.
+            # a turn.
             #
-            if request.setup and self._armed.get(bound.dst) != request.setup:
-                for frame in request.setup:
-                    self.transport.request(
-                        bytes(frame), dst=bound.dst, timeout=bound.timeout
-                    )
+            # Transport faults here are handled with the poll below: one
+            # unreachable ECU is skipped, a dead link still propagates.
+            #
+            try:
+                if request.setup and self._armed.get(bound.dst) != request.setup:
+                    for frame in request.setup:
+                        self.transport.request(
+                            bytes(frame), dst=bound.dst, timeout=bound.timeout
+                        )
 
-                self._armed[bound.dst] = request.setup
+                    self._armed[bound.dst] = request.setup
 
-            response = self.transport.request(
-                bound.payload, dst=bound.dst, timeout=bound.timeout
-            )
+                response = self.transport.request(
+                    bound.payload, dst=bound.dst, timeout=bound.timeout
+                )
+            except Exception as exc:
+                if not _is_request_fault(exc):
+                    #
+                    # The socket itself is gone (closed, reset, never
+                    # connected). That is the reconnect logic's job, not
+                    # something to skip - every subsequent request would
+                    # fail the same way.
+                    #
+                    raise
+
+                #
+                # This ONE exchange failed: the gateway refused to route to
+                # that ECU, or it did not answer in time. Skipping it keeps
+                # the other ~45 channels flowing. Before this, a single
+                # `HsfzNack: gateway will not route to 0x18` tore down the
+                # whole link and split the drive into a new run - 1.35% of
+                # wall time lost, but every drive needing to be stitched
+                # back together before it could be analysed.
+                #
+                self._transport_faults += 1
+                self._note(request.id, exc)
+
+                if self._transport_faults >= TRANSPORT_FAULT_BUDGET:
+                    #
+                    # Too many in a row to be individual ECUs - the link is
+                    # the common factor. Let it reach the reconnect logic.
+                    #
+                    raise
+
+                continue
+
+            #
+            # A completed exchange means the link is healthy, whatever
+            # individual ECUs are doing.
+            #
+            self._transport_faults = 0
             self.last_responses[request.id] = bytes(response)
 
             try:
