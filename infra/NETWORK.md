@@ -170,39 +170,72 @@ end by design. Use the hostnames.
 **Its main job is SSH access to the Raspberry Pi.** The Pi lives in the car
 behind CGNAT or a phone hotspot: no public address, no inbound ports, and
 almost never on the same LAN as your laptop. The VPS is the one machine with
-a stable public address, so both the Pi and your laptop dial *out* to it, and
-the server relays between them. Telemetry ingest happens to use the same
+a stable public address, so the Pi dials *out* to it and the VPS becomes the
+jump host you reach the Pi through. Telemetry ingest happens to use the same
 tunnel, which is a bonus rather than the reason it exists.
 
 ```
-   LAPTOP  10.77.0.20 ──┐                    ┌── 10.77.0.10  RASPBERRY PI
-   (anywhere)           │                    │   (in the car, NATed)
-                        ▼                    ▼
-                 ┌──────────────────────────────┐
-                 │   VPS  wg0 10.77.0.1         │   both sides dial OUT;
-                 │   ListenPort 51820/udp       │   the server relays
-                 │   ip_forward + FORWARD rules │
-                 └──────────────────────────────┘
-
-   ssh f10@10.77.0.10        # laptop → Pi, from any network
+   LAPTOP                    VPS                        RASPBERRY PI
+   (anywhere)                <DROPLET_IP>               (in the car, NATed)
+       │                     wg0 10.77.0.1                  wg0 10.77.0.10
+       │                          │                              │
+       │  ssh root@<DROPLET_IP>   │                              │
+       ├─────────────────────────►│                              │
+       │      public, port 22     │   ssh f10@10.77.0.10         │
+       │                          ├─────────────────────────────►│
+       │                          │   over the WireGuard tunnel  │
+                                  ▲                              │
+                                  └──── tunnel dialled OUT ──────┘
+                                        by the Pi, 51820/udp
 ```
 
-**Your laptop must be a peer too.** This is the step people miss: adding only
-the Pi gives you a tunnel with nothing to connect *from*. Add both in
-`ansible/group_vars/all.yml` (`wireguard_peers`) and re-run `make deploy`.
+**Only the Pi is a WireGuard peer.** Your laptop is not, and does not need to
+be: it reaches the VPS over ordinary public SSH, and the VPS — being a tunnel
+endpoint itself — reaches the Pi directly at `10.77.0.10`. Nothing is
+forwarded between peers, so the `ip_forward` and `FORWARD` rules in
+`wg0.conf` are not involved in this path at all.
 
-**On each client set `AllowedIPs = 10.77.0.0/24`** — the whole VPN subnet, not
-just the server's `/32`. With only the server's address routed, packets to
-another peer never enter the tunnel. On the server each peer is pinned to its
-own `/32`; forwarding between peers is already enabled (`ip_forward=1` plus
-the `FORWARD` rules in `wg0.conf`).
+Two hops, or one command with `ProxyJump`:
+
+```bash
+ssh root@<DROPLET_IP>            # hop 1: laptop → VPS (public SSH)
+ssh f10@10.77.0.10               # hop 2: VPS → Pi (over wg0)
+
+ssh -J root@<DROPLET_IP> f10@10.77.0.10     # both hops in one go
+```
+
+Put it in `~/.ssh/config` to make it a single name:
+
+```
+Host f10pi
+    HostName 10.77.0.10
+    User f10
+    ProxyJump root@<DROPLET_IP>
+```
+
+The Pi's client config still needs the server's VPN address in `AllowedIPs`
+(`10.77.0.0/24` covers it), and `PersistentKeepalive = 25` so the NAT mapping
+stays open and the VPS can reach back into the tunnel.
 
 | Flow | Path | Notes |
 |---|---|---|
-| **SSH to the Pi** | laptop `10.77.0.20` → VPS → Pi `10.77.0.10:22` | **the point of the tunnel**; works from any network |
-| Tunnel establishment | each peer → `<DROPLET_IP>:51820/udp` | `PersistentKeepalive = 25` holds the NAT mapping open so the server can reach back |
+| **SSH to the Pi** | laptop → VPS (public 22) → Pi `10.77.0.10:22` (wg0) | **the point of the tunnel**; VPS is the jump host, laptop needs no VPN |
+| Tunnel establishment | Pi → `<DROPLET_IP>:51820/udp` | dialled outbound; keepalive holds the NAT mapping open |
 | Telemetry upload | Pi → `10.77.0.1:8090` over `wg0` | bearer token; never crosses the public internet in the clear |
-| Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | Case B only; the public path, no VPN needed on the phone |
+| Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | Case B only; public path, no VPN on the phone |
+
+Adding your laptop as a second peer is possible but unnecessary for this
+model; it only helps if you want the Pi reachable without the VPS SSH hop.
+That variant needs `AllowedIPs = 10.77.0.0/24` on every client and relies on
+the peer-to-peer forwarding rules.
+
+### First-time setup (before the tunnel exists)
+
+There is a bootstrap gap: until WireGuard is configured on the Pi, none of
+the above works. For that first configuration use the LAN
+(`ssh <PI_USER>@f10pi.local`) or a monitor and keyboard. The same applies if
+the tunnel ever breaks — see
+[`recovery.md`](../hardware/raspberry-pi/f10pi/docs/recovery.md).
 
 Note the asymmetry: **viewing the dashboard needs no VPN** (nginx proxies it
 over the tunnel on your behalf), whereas **SSH does** — there is no public SSH

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Enable the SSH server, install the Pi->server client config, and
-# (optionally) harden to key-only auth. Idempotent.
+# Enable and harden the SSH server on the Pi. Idempotent.
+#
+# You reach the Pi through the server as a jump host:
+#   ssh -J <admin>@<server> <PI_USER>@<PI_WG_IP>
+# so the Pi needs no outbound SSH config of its own.
 #
 # SSH_DISABLE_PASSWORD_AUTH=1 disables password login — ONLY set that after
 # you've confirmed key auth works, or you can lock yourself out.
@@ -34,24 +37,6 @@ if [[ "${SSH_DISABLE_PASSWORD_AUTH}" == "1" ]]; then
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
 else
   log "leaving password auth enabled (set SSH_DISABLE_PASSWORD_AUTH=1 after keys work)"
-fi
-
-# --- client: Pi -> telemetry server ---------------------------------------
-src="${CONFIG_DIR}/ssh_config"
-if [[ -f "${src}" ]]; then
-  ssh_home="/home/${PI_USER}/.ssh"
-  install -d -m 0700 -o "${PI_USER}" -g "${PI_USER}" "${ssh_home}" "${ssh_home}/config.d"
-  install -m 0600 -o "${PI_USER}" -g "${PI_USER}" "${src}" "${ssh_home}/config.d/telemetry-server"
-  # Ensure ~/.ssh/config includes config.d/*
-  cfg="${ssh_home}/config"
-  if ! grep -qs 'Include config.d/\*' "${cfg}" 2>/dev/null; then
-    { echo 'Include config.d/*'; [[ -f "${cfg}" ]] && cat "${cfg}"; } > "${cfg}.new"
-    mv "${cfg}.new" "${cfg}"
-    chown "${PI_USER}:${PI_USER}" "${cfg}"; chmod 0600 "${cfg}"
-  fi
-  log "installed Pi->server SSH client config (alias telemetry-server)"
-else
-  warn "no config/ssh_config — skipping Pi->server client config"
 fi
 
 log "ssh configured"

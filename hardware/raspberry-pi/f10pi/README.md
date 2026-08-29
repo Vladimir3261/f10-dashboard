@@ -65,7 +65,6 @@ fill it in; the real files are gitignored:
 | `local.env.example` | `local.env` | hostname, paths, toggles |
 | `wifi.example.env` | `wifi.env` | Wi-Fi SSIDs + PSKs + priorities |
 | `wireguard.example.conf` | `wireguard.conf` | WireGuard keys + endpoint |
-| `ssh_config.example` | `ssh_config` | Pi→server SSH alias |
 | `clickhouse.example.env` | `clickhouse.env` | ClickHouse host/user/pass |
 
 ## Status

@@ -1,25 +1,24 @@
 # SSH
 
-Two directions:
+Administering the Pi, from the LAN or from anywhere. Reaching it remotely is
+the whole reason the WireGuard tunnel exists — see
+[`wireguard.md`](wireguard.md).
 
-1. **Into the Pi** — you administer the Pi, over `wg0` from anywhere or via
-   `f10pi.local` on the LAN. Reaching it remotely is the whole reason the
-   WireGuard tunnel exists; see [`wireguard.md`](wireguard.md).
-2. **Pi → server** — the Pi opens outbound SSH to the telemetry server when
-   you need it (a shell, a file copy), reached over `wg0`.
+The Pi needs no outbound SSH of its own: telemetry reaches the server over
+HTTP through the tunnel, not over SSH.
 
 ## Into the Pi
 
 - On the LAN: `ssh <PI_USER>@f10pi.local` (mDNS via avahi).
-- **From anywhere:** over `wg0` at the Pi's VPN address:
+- **From anywhere:** through the VPS as a jump host. Your laptop does NOT
+  join the VPN — it reaches the VPS over public SSH, and the VPS reaches the
+  Pi over `wg0`:
   ```bash
-  ssh <PI_USER>@<WG_PI_IP>        # e.g. 10.77.0.10
+  ssh -J root@<VPS_HOST> <PI_USER>@<WG_PI_IP>     # e.g. 10.77.0.10
   ```
-  This needs **your laptop to be a WireGuard peer too** — the tunnel relays
-  laptop↔Pi through the server, so a tunnel with only the Pi in it gives you
-  nothing to connect from. Add both to `wireguard_peers` in
-  `infra/ansible/group_vars/all.yml` and re-run `make deploy`, and make sure
-  the laptop's client config sets `AllowedIPs` to the whole VPN subnet.
+  Or as two plain hops: `ssh root@<VPS_HOST>`, then
+  `ssh <PI_USER>@<WG_PI_IP>`. Add a `ProxyJump` entry to `~/.ssh/config` to
+  reduce it to `ssh f10pi`.
 
 There is deliberately **no public SSH path to the Pi** — no port forwarding,
 no reverse tunnel. If the VPN is down, the fallback is physical access
@@ -42,38 +41,20 @@ That drops in `/etc/ssh/sshd_config.d/10-f10pi.conf` with
 session before closing your current one** — otherwise you can lock
 yourself out (recovery: [`recovery.md`](recovery.md#ssh-lockout)).
 
-## Pi → server
+## The "Too many authentication failures" gotcha
 
-Uses a **dedicated key** for this hop and a generic host alias, so no real
-server hostname/IP is committed. Template: `config/ssh_config.example` →
-`config/ssh_config` (gitignored), installed by `configure-ssh.sh` into
-`~/.ssh/config.d/telemetry-server`.
-
-```bash
-# generate the dedicated key on the Pi
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_f10pi -C f10pi
-# add id_ed25519_f10pi.pub to the server's authorized_keys, then:
-ssh telemetry-server        # resolves to <WG_SERVER_IP> over wg0
-```
-
-### The "Too many authentication failures" gotcha
-
-If your agent offers many keys, the server may cut you off before trying
-the right one. The alias pins the identity:
-
-```
-IdentityFile ~/.ssh/id_ed25519_f10pi
-IdentitiesOnly yes
-```
-
-For a one-off manual connection you can force it directly:
+If your agent offers many keys, a server may cut you off before it reaches
+the right one — and you then fall through to a password prompt. Pin the
+identity:
 
 ```bash
-ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_f10pi telemetry-server
+ssh -o IdentitiesOnly=yes -i ~/.ssh/<your-key> <PI_USER>@<WG_PI_IP>
 ```
+
+Or set `IdentityFile` + `IdentitiesOnly yes` in the `~/.ssh/config` entry.
 
 ## Secrets rule
 
 Private keys stay on the device that generated them and never enter git.
-The `ssh_config` template references only `<WG_SERVER_IP>` and
-`<SERVER_USER>` placeholders; the real file is gitignored.
+Only your **public** key goes onto the Pi, and it is placed there by the
+provisioning scripts from `admin_ssh_public_keys` / your local `.pub` files.
