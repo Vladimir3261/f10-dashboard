@@ -13,7 +13,10 @@ datasources:
       host: clickhouse
       port: 8123
       protocol: http
-      username: default
+      # Must match CH_USER. The ClickHouse entrypoint REMOVES the built-in
+      # `default` user once a custom CLICKHOUSE_USER is set, so hardcoding
+      # `default` here fails authentication even with the right password.
+      username: $CH_USER
       defaultDatabase: telemetry
     secureJsonData:
       password: $CH_PASS
