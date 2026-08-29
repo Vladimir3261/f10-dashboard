@@ -44,7 +44,11 @@ ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && docker compose ps --format 'table {{.
 
 echo
 echo "-- ingest health --"
-ssh "${SSH_OPTS[@]}" "$HOST" "curl -s -m5 localhost:8090/health || echo unreachable"
+# ingest is published on INGEST_BIND (normally the WireGuard address), so ask
+# the server where that is rather than assuming loopback.
+ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && \
+  B=\$(sed -n 's/^INGEST_BIND=//p' .env | head -1); B=\${B:-127.0.0.1}; \
+  curl -s -m5 \"http://\$B:8090/health\" || echo unreachable"
 
 echo
 echo "-- wireguard --"

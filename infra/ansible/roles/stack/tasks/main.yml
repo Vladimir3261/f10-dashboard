@@ -73,9 +73,12 @@
   until: gf_reset.rc == 0
   no_log: true
 
-- name: Wait for the ingest server to become healthy on localhost
+# Probe wherever ingest is actually published. INGEST_BIND is normally the
+# WireGuard address (so the Pi can reach it), NOT loopback - hardcoding
+# 127.0.0.1 here fails the deploy even though the stack is fine.
+- name: Wait for the ingest server to become healthy
   ansible.builtin.uri:
-    url: http://127.0.0.1:8090/health
+    url: "http://{{ dotenv.get('INGEST_BIND', '127.0.0.1') }}:8090/health"
     status_code: [200, 503]     # 503 = up but ClickHouse not ready yet
   register: ingest_health
   retries: 20
