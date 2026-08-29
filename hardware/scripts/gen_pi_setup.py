@@ -151,6 +151,10 @@ def main():
             f"  then fill in SSIDs/PSKs (it is gitignored)")
 
     pi_user = env.get("PI_USER", "f10")
+    # Where the repo lives on the Pi. Detected by setup-pi.sh when there is
+    # already a clone (it may not be under the default path), so an existing
+    # checkout is reused instead of a second copy being cloned beside it.
+    repo_dir = os.environ.get("PI_REPO_DIR", "").strip()
     hostname = env.get("PI_HOSTNAME", "f10pi")
     eth_ll = env.get("ETH_LINK_LOCAL", "169.254.10.10/16")
 
@@ -189,6 +193,7 @@ def main():
 
     script = TEMPLATE.format(
         hostname=hostname, pi_user=pi_user, repo_url=repo_url,
+        repo_dir=repo_dir or f"/home/{pi_user}/f10-dashboard",
         eth_ll=eth_ll, wifi_block=wifi_block,
         pi_wg_ip=pi_wg_ip, wg_priv=priv, wg_srv_pub=srv_pub,
         endpoint=f"{droplet_ip}:{wg_port}",
@@ -230,7 +235,7 @@ set -euo pipefail
 HOSTNAME_WANTED="{hostname}"
 PI_USER="{pi_user}"
 REPO_URL="{repo_url}"
-REPO_DIR="/home/{pi_user}/f10-dashboard"
+REPO_DIR="{repo_dir}"
 F10PI_DIR="$REPO_DIR/hardware/raspberry-pi/f10pi"
 
 log()  {{ printf '\033[1;34m[pi-setup]\033[0m %s\n' "$*"; }}
@@ -240,12 +245,18 @@ die()  {{ printf '\033[1;31m[pi-setup] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }}
 
 # ---------------------------------------------------------------- the repo
 if [[ -d "$REPO_DIR/.git" ]]; then
-  log "updating the repo in $REPO_DIR"
-  sudo -u "$PI_USER" git -C "$REPO_DIR" pull --ff-only || \
-    log "could not fast-forward (local changes?) - continuing with what is there"
+  log "repo already cloned at $REPO_DIR - skipping clone"
+  # Fast-forward only, and never fatal: a Pi with local edits or a detached
+  # checkout keeps working rather than aborting provisioning.
+  if sudo -u "$PI_USER" git -C "$REPO_DIR" pull --ff-only >/dev/null 2>&1; then
+    log "  updated to latest $(sudo -u "$PI_USER" git -C "$REPO_DIR" rev-parse --short HEAD)"
+  else
+    log "  could not fast-forward (local changes or offline) - using what is there"
+  fi
 else
-  [[ -n "$REPO_URL" ]] || die "no repo present and REPO_URL is empty"
-  log "cloning $REPO_URL"
+  [[ -n "$REPO_URL" ]] || die "no repo at $REPO_DIR and REPO_URL is empty"
+  log "cloning $REPO_URL -> $REPO_DIR"
+  install -d -o "$PI_USER" -g "$PI_USER" "$(dirname "$REPO_DIR")"
   sudo -u "$PI_USER" git clone "$REPO_URL" "$REPO_DIR"
 fi
 
