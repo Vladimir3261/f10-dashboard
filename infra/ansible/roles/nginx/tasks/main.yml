@@ -1,0 +1,81 @@
+---
+# nginx on the HOST as the public edge for Grafana.
+#
+# Why a host reverse proxy rather than publishing Grafana's container port:
+# Docker inserts its own iptables rules ahead of ufw's INPUT chain, so a
+# published container port is reachable even when ufw says otherwise. nginx
+# is an ordinary host process, so ufw governs it normally - and the IP
+# allowlist lives in one readable place instead of a raw iptables chain.
+#
+# Grafana itself stays bound to 127.0.0.1:3000 (GF_BIND) and is never
+# published to the world; only nginx talks to it.
+
+- name: Parse the Grafana IP allowlist from the environment
+  ansible.builtin.set_fact:
+    # .split() is called on the Python string directly rather than via a
+    # `split` filter, so this works on any ansible-core version.
+    gf_allowed_ips: >-
+      {{ lookup('env', 'GF_ALLOWED_IPS').split(',')
+         | map('trim') | reject('equalto', '') | list }}
+    gf_public_port: "{{ lookup('env', 'GF_PUBLIC_PORT') | default('80', true) }}"
+    gf_server_name: "{{ lookup('env', 'GF_SERVER_NAME') | default('_', true) }}"
+
+- name: Warn when the allowlist is empty
+  ansible.builtin.debug:
+    msg: >-
+      GF_ALLOWED_IPS is empty - nginx will DENY everyone. Set it in
+      infra/.env (comma-separated IPs/CIDRs) to allow access.
+  when: gf_allowed_ips | length == 0
+
+- name: Install nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+
+- name: Remove the default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Configure the Grafana vhost
+  ansible.builtin.template:
+    src: grafana.conf.j2
+    dest: /etc/nginx/sites-available/grafana.conf
+    mode: "0644"
+  notify: reload nginx
+
+- name: Enable the Grafana vhost
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/grafana.conf
+    dest: /etc/nginx/sites-enabled/grafana.conf
+    state: link
+  notify: reload nginx
+
+# A vhost cannot be validated on its own (it needs the surrounding http
+# context), so check the assembled config here instead. This fails the play
+# before the handler would reload a broken config.
+- name: Validate the assembled nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Allow the public Grafana port through ufw (allowlisted sources only)
+  community.general.ufw:
+    rule: allow
+    port: "{{ gf_public_port }}"
+    proto: tcp
+    src: "{{ item }}"
+  loop: "{{ gf_allowed_ips }}"
+
+- name: Enable and start nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Report how Grafana is reachable
+  ansible.builtin.debug:
+    msg: >-
+      Grafana proxied on port {{ gf_public_port }};
+      {{ gf_allowed_ips | length }} allowlisted source(s).
+      Grafana itself stays on 127.0.0.1:3000.

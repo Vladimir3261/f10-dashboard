@@ -1,0 +1,41 @@
+# Managed by Ansible (nginx role) - do not edit on the server.
+# Public edge for Grafana. Grafana itself listens only on 127.0.0.1:3000.
+
+server {
+    listen {{ gf_public_port }};
+    listen [::]:{{ gf_public_port }};
+    server_name {{ gf_server_name }};
+
+    # --- IP allowlist (from GF_ALLOWED_IPS in infra/.env) ---------------
+    # Evaluated in order; anything not listed is refused. An empty list
+    # means nobody gets in, which is the safe default.
+{% for cidr in gf_allowed_ips %}
+    allow {{ cidr }};
+{% endfor %}
+    deny all;
+
+    # Grafana serves its own auth; keep proxy buffers sane for dashboards.
+    client_max_body_size 32m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 120s;
+    }
+
+    # Grafana Live (dashboard streaming) needs a websocket upgrade.
+    location /api/live/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+    }
+}

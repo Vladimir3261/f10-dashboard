@@ -18,6 +18,13 @@
 -include .env
 export
 
+# One source of truth for the Grafana allowlist: GF_ALLOWED_IPS in .env
+# drives BOTH the DigitalOcean firewall (through Terraform) and the nginx
+# allow/deny rules (Ansible reads the env var directly).
+TF_VAR_grafana_allowed_cidrs := $(GF_ALLOWED_IPS)
+TF_VAR_grafana_public_port   := $(if $(GF_PUBLIC_PORT),$(GF_PUBLIC_PORT),80)
+export TF_VAR_grafana_allowed_cidrs TF_VAR_grafana_public_port
+
 TF      := terraform -chdir=terraform
 ANSIBLE_DIR := ansible
 

@@ -113,7 +113,7 @@ peer).
 | `make provision` | `apply` + `inventory` in one go |
 | `make galaxy` | install the Ansible collections (`deploy` does this for you) |
 | `make ping` | check Ansible can reach the droplet |
-| `make deploy` | run `site.yml`: base → docker → stack → wireguard |
+| `make deploy` | run `site.yml`: base → docker → stack → nginx → wireguard |
 | `make deploy-check` | dry-run the playbook (`--check`) |
 | `make lake-status` | stack health + lake row counts |
 | `make migrate-lake FROM=...` | copy a lake from an older server |
@@ -128,7 +128,9 @@ peer).
 3. **stack** — clones the repo to `/opt/f10-dashboard`, renders
    `infra/.env` from your local secrets, `docker compose up -d --build`
    (ClickHouse + ingest + Grafana), and waits for ingest to report healthy.
-4. **wireguard** — installs WireGuard, generates the server keypair, enables
+4. **nginx** — host reverse proxy for Grafana with an IP allowlist (see §5);
+   does nothing until `GF_ALLOWED_IPS` is set.
+5. **wireguard** — installs WireGuard, generates the server keypair, enables
    forwarding, and starts `wg-quick@wg0`.
 
 ---
@@ -151,7 +153,51 @@ publicly — only SSH and WireGuard are. Reach Grafana over an SSH tunnel:
 ssh -L 3000:localhost:3000 root@<droplet-ip>   # then open http://localhost:3000
 ```
 
-## 5. Migrating an existing lake
+## 5. Exposing Grafana to specific IPs
+
+By default nothing but SSH and WireGuard faces the internet, and you reach
+Grafana over an SSH tunnel. To publish it to a few known addresses instead,
+set **one** value in `infra/.env`:
+
+```bash
+GF_ALLOWED_IPS=203.0.113.4,198.51.100.0/24    # bare IP = that address only
+GF_PUBLIC_PORT=80
+```
+
+Then apply both layers — the cloud firewall and the host:
+
+```bash
+make apply     # DigitalOcean firewall: opens the port to those CIDRs only
+make deploy    # installs/configures nginx with the same allowlist
+```
+
+**Empty `GF_ALLOWED_IPS` means nobody** — nginx denies all and the firewall
+port is never opened. That's the default.
+
+### How it's enforced
+
+A host **nginx** reverse proxy is the public edge; Grafana's container stays
+bound to `127.0.0.1:3000` and is never published to the world.
+
+| layer | does |
+|---|---|
+| DigitalOcean firewall | drops traffic to the port from anywhere else |
+| `ufw` | per-source allow rules for the port |
+| nginx `allow`/`deny` | refuses non-allowlisted clients at the proxy |
+
+> **Why nginx and not just publishing the container port?** Docker inserts
+> its own iptables rules *ahead* of ufw's INPUT chain, so a published
+> container port stays reachable even when ufw says otherwise. nginx is an
+> ordinary host process, so ufw governs it normally — and the allowlist
+> lives in one readable config instead of a raw iptables chain.
+
+> ⚠️ **Port 80 is plain HTTP.** The allowlist controls *who* can connect,
+> not whether traffic is readable in transit — your Grafana login password
+> crosses the internet in cleartext. Put TLS in front (a domain +
+> Let's Encrypt, or a self-signed cert) before relying on this over
+> untrusted networks. The SSH tunnel in §4 remains the encrypted option.
+
+## 6. Migrating an existing lake
 
 Replacing an older server? Copy its data across before decommissioning it —
 historical telemetry is the point of the project and cannot be re-collected.
@@ -183,7 +229,7 @@ that host's own `infra/.env` at run time).
 If the old stack lives somewhere other than `/root/f10-dashboard/infra`,
 pass `ARGS='--src-dir /path/to/infra'`.
 
-## 6. Connect a Raspberry Pi (next)
+## 7. Connect a Raspberry Pi (next)
 
 The WireGuard server is up but has no peers yet. To add the Pi:
 
@@ -196,7 +242,7 @@ The WireGuard server is up but has no peers yet. To add the Pi:
 
 (See `hardware/raspberry-pi/f10pi/docs/wireguard.md`.)
 
-## 7. Tear down
+## 8. Tear down
 
 ```bash
 make destroy

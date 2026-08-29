@@ -69,6 +69,25 @@ variable "ssh_allowed_cidrs" {
   default     = ["0.0.0.0/0", "::/0"]
 }
 
+variable "grafana_allowed_cidrs" {
+  description = <<-EOT
+    Comma-separated IPs/CIDRs allowed to reach Grafana through the host
+    nginx proxy. Normally NOT set here: the Makefile passes GF_ALLOWED_IPS
+    from infra/.env as TF_VAR_grafana_allowed_cidrs, so one value drives
+    both this cloud firewall rule and the nginx allowlist. Empty means the
+    port is not opened at all.
+    A bare IP is treated as /32.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "grafana_public_port" {
+  description = "Port the host nginx proxy serves Grafana on (opened only to grafana_allowed_cidrs)."
+  type        = number
+  default     = 80
+}
+
 variable "wireguard_port" {
   description = "UDP port the WireGuard gateway listens on (opened to the world so a NATed Pi can reach it)."
   type        = number
