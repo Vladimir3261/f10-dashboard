@@ -298,6 +298,9 @@ order. It looks at the Pi first: if the repo is **already cloned** — anywhere,
 not just the default path — it reuses that checkout instead of cloning a
 second copy.
 
+If the Wi-Fi list has already been saved from a previous run it is reused and
+those questions are skipped; pass `--wifi` to enter them again.
+
 The manual equivalent is below, if you prefer to drive the steps yourself.
 
 ### Manually

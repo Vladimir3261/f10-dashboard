@@ -55,6 +55,19 @@ confirm() {  # prompt -> 0 if yes
   [[ "$reply" =~ ^[Yy] ]]
 }
 
+RECONFIGURE_WIFI=0
+for arg in "$@"; do
+  case "$arg" in
+    --wifi)      RECONFIGURE_WIFI=1 ;;
+    -h|--help)
+      awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "${BASH_SOURCE[0]}"
+      echo "Options:"
+      echo "  --wifi    re-enter the Wi-Fi networks even if they are already saved"
+      exit 0 ;;
+    *) die "unknown option: $arg (try --help)" ;;
+  esac
+done
+
 # ------------------------------------------------------------- preflight
 
 command -v terraform >/dev/null || die "terraform not found on PATH"
@@ -77,12 +90,32 @@ echo
 # ------------------------------------------------------------------ Wi-Fi
 
 bold "1. Wi-Fi networks"
-echo "   The Pi joins the highest-priority network in range, so list your"
-echo "   home network first and the in-car hotspot after it."
-echo
+
+WIFI_ALREADY_SAVED=0
+if [[ -f "$WIFI_ENV" && $RECONFIGURE_WIFI -eq 0 ]]; then
+  saved_count="$(sed -n 's/^WIFI_COUNT=//p' "$WIFI_ENV" | head -1)"
+  if [[ -n "${saved_count:-}" && "$saved_count" -gt 0 ]]; then
+    WIFI_ALREADY_SAVED=1
+    echo "   Already configured - reusing $(basename "$WIFI_ENV")."
+    echo "   (run with --wifi to enter them again)"
+    echo
+    i=1
+    while [[ $i -le $saved_count ]]; do
+      printf '     %d. %-28s priority %s\n' "$i" \
+        "$(sed -n "s/^WIFI_${i}_SSID=//p" "$WIFI_ENV" | head -1)" \
+        "$(sed -n "s/^WIFI_${i}_PRIORITY=//p" "$WIFI_ENV" | head -1)"
+      i=$(( i + 1 ))
+    done
+  fi
+fi
 
 declare -a SSIDS PSKS PRIOS
 priority=100
+
+if [[ $WIFI_ALREADY_SAVED -eq 0 ]]; then
+echo "   The Pi joins the highest-priority network in range, so list your"
+echo "   home network first and the in-car hotspot after it."
+echo
 while :; do
   n=$(( ${#SSIDS[@]} + 1 ))
   echo
@@ -97,6 +130,7 @@ while :; do
   echo
   confirm "   Add another Wi-Fi network?" || break
 done
+fi
 
 # ------------------------------------------------------------------ the Pi
 
@@ -141,16 +175,24 @@ export PI_REPO_DIR
 
 echo
 bold "4. Review"
-echo "   Wi-Fi networks:"
-for i in "${!SSIDS[@]}"; do
-  printf '     %d. %-28s priority %s\n' "$(( i + 1 ))" "${SSIDS[$i]}" "${PRIOS[$i]}"
-done
+if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+  echo "   Wi-Fi networks:  reusing the saved list above"
+else
+  echo "   Wi-Fi networks:"
+  for i in "${!SSIDS[@]}"; do
+    printf '     %d. %-28s priority %s\n' "$(( i + 1 ))" "${SSIDS[$i]}" "${PRIOS[$i]}"
+  done
+fi
 echo "   Pi login:        $PI_USER@$PI_HOST"
 echo "   Repo on the Pi:  $PI_REPO_DIR"
 echo "   Server:          $DROPLET_IP"
 echo
 echo "   Will now:"
-echo "     - write the Wi-Fi list to hardware/.../config/wifi.env (gitignored)"
+if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+  echo "     - keep the existing wifi.env untouched"
+else
+  echo "     - write the Wi-Fi list to hardware/.../config/wifi.env (gitignored)"
+fi
 echo "     - generate local/pi-setup.sh from the live infrastructure"
 echo "     - run 'make deploy' so the server registers the Pi as a peer"
 echo "     - copy the script to the Pi and run it there (needs sudo on the Pi)"
@@ -161,19 +203,23 @@ confirm "   Proceed?" || { echo "   aborted."; exit 0; }
 # -------------------------------------------------------------- do the work
 
 echo
-log "writing $(basename "$WIFI_ENV")"
-install -d -m 700 "$(dirname "$WIFI_ENV")"
-: > "$WIFI_ENV"
-chmod 600 "$WIFI_ENV"
-for i in "${!SSIDS[@]}"; do
-  n=$(( i + 1 ))
-  {
-    printf 'WIFI_%d_SSID=%s\n'     "$n" "${SSIDS[$i]}"
-    printf 'WIFI_%d_PSK=%s\n'      "$n" "${PSKS[$i]}"
-    printf 'WIFI_%d_PRIORITY=%s\n' "$n" "${PRIOS[$i]}"
-  } >> "$WIFI_ENV"
-done
-printf 'WIFI_COUNT=%d\n' "${#SSIDS[@]}" >> "$WIFI_ENV"
+if [[ $WIFI_ALREADY_SAVED -eq 1 ]]; then
+  log "keeping the existing $(basename "$WIFI_ENV")"
+else
+  log "writing $(basename "$WIFI_ENV")"
+  install -d -m 700 "$(dirname "$WIFI_ENV")"
+  : > "$WIFI_ENV"
+  chmod 600 "$WIFI_ENV"
+  for i in "${!SSIDS[@]}"; do
+    n=$(( i + 1 ))
+    {
+      printf 'WIFI_%d_SSID=%s\n'     "$n" "${SSIDS[$i]}"
+      printf 'WIFI_%d_PSK=%s\n'      "$n" "${PSKS[$i]}"
+      printf 'WIFI_%d_PRIORITY=%s\n' "$n" "${PRIOS[$i]}"
+    } >> "$WIFI_ENV"
+  done
+  printf 'WIFI_COUNT=%d\n' "${#SSIDS[@]}" >> "$WIFI_ENV"
+fi
 
 log "generating the Pi setup script"
 make -C "$ROOT/hardware" pi-setup
