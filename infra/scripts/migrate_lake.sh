@@ -65,6 +65,30 @@ if [[ -z "$DST" ]]; then
   log "destination from terraform output: $DST"
 fi
 
+# SSH connection multiplexing. A migration runs many queries; without this
+# each one is a fresh TCP+auth handshake, and a server with fail2ban or
+# sshd rate limiting starts REJECTing partway through ("Connection
+# refused"). ControlMaster reuses ONE connection per host for the whole run.
+# Deliberately under /tmp, not $TMPDIR: a unix socket path must stay under
+# ~104 bytes and macOS $TMPDIR alone is already ~50.
+SSH_CTL="$(mktemp -d /tmp/f10mig.XXXXXX)"
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ControlMaster=auto
+  -o "ControlPath=${SSH_CTL}/%h"
+  -o ControlPersist=300
+  -o ServerAliveInterval=30
+)
+
+cleanup() {
+  local h
+  for h in "$SRC" "$DST"; do
+    [[ -n "$h" ]] && ssh -o "ControlPath=${SSH_CTL}/%h" -O exit "$h" 2>/dev/null || true
+  done
+  rm -rf "$SSH_CTL"
+}
+trap cleanup EXIT
+
 # Run a ClickHouse query on a host. The query travels base64-encoded so no
 # quoting can mangle it; credentials come from that host's own .env and are
 # never echoed. Any extra args (e.g. --format) are appended.
@@ -72,14 +96,36 @@ ch() {
   local host="$1" dir="$2" query="$3"; shift 3
   local q64
   q64="$(printf '%s' "$query" | base64 | tr -d '\n')"
-  ssh -o BatchMode=yes "$host" \
+  ssh "${SSH_OPTS[@]}" "$host" \
     "cd '$dir' && set -a && . ./.env && set +a && \
      docker compose exec -T clickhouse clickhouse-client \
        --user \"\$CH_USER\" --password \"\$CH_PASS\" \
        --query \"\$(printf %s '$q64' | base64 -d)\" $*"
 }
 
+# Open (and keep) the shared master connection to a host, retrying a few
+# times. A server that rate-limits SSH may refuse briefly; backing off and
+# retrying is far better than losing a part-finished migration.
+connect() {
+  local host="$1" attempt
+  for attempt in 1 2 3 4 5; do
+    if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 -N -f "$host" 2>/dev/null \
+       || ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 "$host" true 2>/dev/null; then
+      return 0
+    fi
+    warn "cannot reach $host (attempt $attempt/5) - backing off $((attempt * 10))s"
+    warn "  if this persists, the host may be rate-limiting SSH (fail2ban):"
+    warn "  check with:  ssh $host 'fail2ban-client status sshd'"
+    sleep $((attempt * 10))
+  done
+  return 1
+}
+
 # --- pre-flight ------------------------------------------------------------
+
+log "opening shared SSH connections..."
+connect "$SRC" || die "cannot establish an SSH connection to $SRC"
+connect "$DST" || die "cannot establish an SSH connection to $DST"
 
 log "checking both ends are reachable and ClickHouse answers..."
 src_v="$(ch "$SRC" "$SRC_DIR" "SELECT version()")" || die "cannot query source ClickHouse on $SRC"
@@ -128,9 +174,15 @@ for table in $TABLES; do
   # in one stream.
   chunks=("")
   if [[ "$table" == "samples" ]]; then
-    mapfile -t months < <(ch "$SRC" "$SRC_DIR" \
-      "SELECT DISTINCT toYYYYMM(ts) FROM telemetry.samples ORDER BY 1" | tr -d '\r')
-    chunks=("${months[@]}")
+    # Read the month list without `mapfile`, which is bash 4+ only - macOS
+    # still ships bash 3.2, where it would fail exactly here, mid-migration.
+    months_raw="$(ch "$SRC" "$SRC_DIR" \
+      "SELECT DISTINCT toYYYYMM(ts) FROM telemetry.samples ORDER BY 1" | tr -d '\r')"
+    chunks=()
+    while IFS= read -r m; do
+      [[ -n "$m" ]] && chunks+=("$m")
+    done <<< "$months_raw"
+    [[ ${#chunks[@]} -gt 0 ]] || chunks=("")
     log "copying in ${#chunks[@]} monthly chunk(s): ${chunks[*]}"
   fi
 
