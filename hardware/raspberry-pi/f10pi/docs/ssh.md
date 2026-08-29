@@ -20,9 +20,14 @@ HTTP through the tunnel, not over SSH.
   `ssh <PI_USER>@<WG_PI_IP>`. Add a `ProxyJump` entry to `~/.ssh/config` to
   reduce it to `ssh f10pi`.
 
+- **Direct cable:** laptop ↔ Pi over Ethernet, useful for first setup and
+  when Wi-Fi is misconfigured — `ssh <PI_USER>@169.254.10.10`. See
+  [`recovery.md`](recovery.md#direct-cable-laptop--pi-over-ethernet) for the
+  caveat on a stock image.
+
 There is deliberately **no public SSH path to the Pi** — no port forwarding,
-no reverse tunnel. If the VPN is down, the fallback is physical access
-(monitor + keyboard) or the LAN; see [`recovery.md`](recovery.md).
+no reverse tunnel. If the VPN is down, the fallbacks are the LAN, a direct
+cable, or a monitor and keyboard; see [`recovery.md`](recovery.md).
 
 ### Hardening (do it only after keys work)
 
