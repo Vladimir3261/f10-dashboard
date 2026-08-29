@@ -97,7 +97,9 @@ ch() {
   local q64
   q64="$(printf '%s' "$query" | base64 | tr -d '\n')"
   ssh "${SSH_OPTS[@]}" "$host" \
-    "cd '$dir' && set -a && . ./.env && set +a && \
+    "cd '$dir' && \
+     CH_USER=\$(sed -n 's/^CH_USER=//p' .env | head -1) && \
+     CH_PASS=\$(sed -n 's/^CH_PASS=//p' .env | head -1) && \
      docker compose exec -T clickhouse clickhouse-client \
        --user \"\$CH_USER\" --password \"\$CH_PASS\" \
        --query \"\$(printf %s '$q64' | base64 -d)\" $*"

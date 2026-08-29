@@ -5,9 +5,8 @@
 # HTTPS vhost. Port 80 is handled by 00-acme.conf (challenge + redirect).
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name {{ grafana_domain }};
 
     ssl_certificate     /etc/letsencrypt/live/{{ grafana_domain }}/fullchain.pem;

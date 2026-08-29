@@ -101,8 +101,9 @@
 
     - name: Ensure the ACME webroot exists
       ansible.builtin.file:
-        path: /var/www/letsencrypt
+        path: /var/www/letsencrypt/.well-known/acme-challenge
         state: directory
+        recurse: true
         mode: "0755"
 
     # Port 80 must be reachable from ANY address for the HTTP-01 challenge -
@@ -127,10 +128,61 @@
         port: "80"
         proto: tcp
 
+    # Take the domain vhosts out of the way for the ACME phase. They are
+    # re-created further down, once the certificates exist. This keeps the
+    # challenge phase working from any starting state: on a first run the
+    # vhosts reference certificates that do not exist yet, and after a failed
+    # run a stale or broken vhost would otherwise make nginx refuse to
+    # reload - blocking the very step that would fix it.
+    - name: Disable the domain vhosts during certificate issuance
+      ansible.builtin.file:
+        path: "/etc/nginx/sites-enabled/{{ item }}"
+        state: absent
+      loop: [grafana.conf, dashboard.conf]
+
     - name: Reload nginx so the challenge path is served
       ansible.builtin.service:
         name: nginx
         state: reloaded
+
+    # Prove port 80 is reachable FROM THE INTERNET before calling certbot.
+    # The check runs from the control machine, not the server, because the
+    # server cannot test its own external reachability. Without this, a
+    # closed cloud firewall surfaces only as certbot's opaque "Timeout
+    # during connect", after a failed attempt has already been charged
+    # against the Let's Encrypt rate limit.
+    - name: Place a reachability probe in the ACME webroot
+      ansible.builtin.copy:
+        dest: /var/www/letsencrypt/.well-known/acme-challenge/f10-preflight
+        content: "f10-preflight\n"
+        mode: "0644"
+
+    - name: Check each domain answers on port 80 from outside
+      ansible.builtin.uri:
+        url: "http://{{ item }}/.well-known/acme-challenge/f10-preflight"
+        return_content: true
+        follow_redirects: none
+        timeout: 15
+      register: acme_probe
+      failed_when: false
+      changed_when: false
+      delegate_to: localhost
+      loop: "{{ tls_domains }}"
+
+    - name: Require port 80 to be reachable before issuing certificates
+      ansible.builtin.assert:
+        that: "'f10-preflight' in (item.content | default(''))"
+        fail_msg: >-
+          {{ item.item }} is not reachable on port 80 from the internet, so
+          the Let's Encrypt HTTP-01 challenge cannot succeed.
+          Most likely the cloud firewall has not been updated - run
+          `make apply` (Terraform opens 80/443 once a domain is configured),
+          then re-run `make deploy`.
+          Probe result: {{ item.status | default('no response') }}
+        quiet: true
+      loop: "{{ acme_probe.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Obtain a certificate for each domain
       ansible.builtin.command:
