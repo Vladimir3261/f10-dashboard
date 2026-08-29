@@ -1,16 +1,18 @@
 ---
-# nginx on the HOST as the public edge for Grafana.
+# nginx on the HOST as the public edge.
 #
-# Why a host reverse proxy rather than publishing Grafana's container port:
-# Docker inserts its own iptables rules ahead of ufw's INPUT chain, so a
-# published container port is reachable even when ufw says otherwise. nginx
-# is an ordinary host process, so ufw governs it normally - and the IP
-# allowlist lives in one readable place instead of a raw iptables chain.
+# Why a host reverse proxy rather than publishing container ports: Docker
+# inserts its own iptables rules ahead of ufw's INPUT chain, so a published
+# container port is reachable even when ufw says otherwise. nginx is an
+# ordinary host process, so ufw governs it normally - and the IP allowlist
+# lives in one readable place instead of a raw iptables chain.
 #
-# Grafana itself stays bound to 127.0.0.1:3000 (GF_BIND) and is never
-# published to the world; only nginx talks to it.
+# Two optional vhosts, each enabled only when its domain is set:
+#   GRAFANA_DOMAIN    -> 127.0.0.1:3000        (IP-allowlisted)
+#   DASHBOARD_DOMAIN  -> <PI_WG_IP>:8080       (Basic Auth, over WireGuard)
+# With no domains set, a plain-HTTP IP vhost for Grafana is used instead.
 
-- name: Parse the Grafana IP allowlist from the environment
+- name: Read edge configuration from the environment
   ansible.builtin.set_fact:
     # .split() is called on the Python string directly rather than via a
     # `split` filter, so this works on any ansible-core version.
@@ -19,17 +21,22 @@
          | map('trim') | reject('equalto', '') | list }}
     gf_public_port: "{{ lookup('env', 'GF_PUBLIC_PORT') | default('80', true) }}"
     gf_server_name: "{{ lookup('env', 'GF_SERVER_NAME') | default('_', true) }}"
+    grafana_domain: "{{ lookup('env', 'GRAFANA_DOMAIN') | trim }}"
+    dashboard_domain: "{{ lookup('env', 'DASHBOARD_DOMAIN') | trim }}"
+    pi_wg_ip: "{{ lookup('env', 'PI_WG_IP') | default('10.77.0.10', true) }}"
+    pi_dashboard_port: "{{ lookup('env', 'PI_DASHBOARD_PORT') | default('8080', true) }}"
+    dashboard_auth_user: "{{ lookup('env', 'DASHBOARD_AUTH_USER') | default('f10', true) }}"
+    dashboard_auth_password: "{{ lookup('env', 'DASHBOARD_AUTH_PASSWORD') }}"
+    le_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | trim }}"
+    le_staging: "{{ lookup('env', 'LETSENCRYPT_STAGING') | default('0', true) }}"
 
-- name: Warn when the allowlist is empty
-  ansible.builtin.debug:
-    msg: >-
-      GF_ALLOWED_IPS is empty - nginx will DENY everyone. Set it in
-      infra/.env (comma-separated IPs/CIDRs) to allow access.
-  when: gf_allowed_ips | length == 0
+- name: Decide whether TLS is in play
+  ansible.builtin.set_fact:
+    tls_domains: "{{ [grafana_domain, dashboard_domain] | reject('equalto', '') | list }}"
 
-- name: Install nginx
+- name: Install nginx (and passlib, needed by the htpasswd module)
   ansible.builtin.apt:
-    name: nginx
+    name: [nginx, python3-passlib]
     state: present
 
 - name: Remove the default site
@@ -37,6 +44,122 @@
     path: /etc/nginx/sites-enabled/default
     state: absent
   notify: reload nginx
+
+# --- guard rails before touching Let's Encrypt -----------------------------
+
+- name: Validate the TLS configuration
+  when: tls_domains | length > 0
+  block:
+    - name: Require a Let's Encrypt contact address
+      ansible.builtin.assert:
+        that: le_email | length > 0
+        fail_msg: "LETSENCRYPT_EMAIL must be set in infra/.env when a domain is configured."
+        quiet: true
+
+    - name: Require Basic Auth credentials for the dashboard
+      ansible.builtin.assert:
+        that:
+          - dashboard_auth_password | length > 0
+          - dashboard_auth_password != 'change-me-dashboard-password'
+        fail_msg: >-
+          DASHBOARD_AUTH_PASSWORD must be set to a real value in infra/.env.
+          The dashboard has no login of its own and serves the VIN, so it is
+          never published without authentication.
+        quiet: true
+      when: dashboard_domain | length > 0
+
+    # A wrong A record is the usual cause of a cryptic certbot failure, and
+    # repeated failures burn the Let's Encrypt rate limit. Check first.
+    - name: Resolve each domain
+      ansible.builtin.command: "getent hosts {{ item }}"
+      register: dns_check
+      changed_when: false
+      failed_when: false
+      loop: "{{ tls_domains }}"
+
+    - name: Require each domain to resolve to this droplet
+      ansible.builtin.assert:
+        that: ansible_host in (item.stdout | default(''))
+        fail_msg: >-
+          {{ item.item }} does not resolve to this droplet ({{ ansible_host }}).
+          Point an A record at it and wait for propagation before deploying.
+          Resolved: "{{ item.stdout | default('(nothing)') | trim }}"
+        quiet: true
+      loop: "{{ dns_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+# --- certificates ----------------------------------------------------------
+
+- name: Set up TLS with Let's Encrypt
+  when: tls_domains | length > 0
+  block:
+    - name: Install certbot
+      ansible.builtin.apt:
+        name: [certbot, python3-certbot-nginx]
+        state: present
+
+    - name: Ensure the ACME webroot exists
+      ansible.builtin.file:
+        path: /var/www/letsencrypt
+        state: directory
+        mode: "0755"
+
+    # Port 80 must be reachable from ANY address for the HTTP-01 challenge -
+    # Let's Encrypt validates from many global IPs. This vhost therefore
+    # serves ONLY the challenge path and redirects everything else to HTTPS;
+    # the real access control lives on the 443 vhosts.
+    - name: Install the ACME/redirect vhost on port 80
+      ansible.builtin.template:
+        src: acme-redirect.conf.j2
+        dest: /etc/nginx/sites-available/00-acme.conf
+        mode: "0644"
+
+    - name: Enable the ACME vhost
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/00-acme.conf
+        dest: /etc/nginx/sites-enabled/00-acme.conf
+        state: link
+
+    - name: Open port 80 for ACME validation
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+
+    - name: Reload nginx so the challenge path is served
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Obtain a certificate for each domain
+      ansible.builtin.command:
+        argv: >-
+          {{ ['certbot', 'certonly', '--webroot', '-w', '/var/www/letsencrypt',
+              '-d', item, '--email', le_email, '--agree-tos',
+              '--non-interactive', '--keep-until-expiring']
+             + (['--staging'] if le_staging == '1' else []) }}
+        creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
+      loop: "{{ tls_domains }}"
+
+    # certbot's own systemd timer handles renewal; make sure nginx picks up
+    # the new certificate afterwards.
+    - name: Reload nginx after renewals
+      ansible.builtin.copy:
+        dest: /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Managed by Ansible (nginx role).
+          systemctl reload nginx
+
+    - name: Ensure the renewal timer is enabled
+      ansible.builtin.service:
+        name: certbot.timer
+        enabled: true
+        state: started
+
+# --- vhosts ----------------------------------------------------------------
 
 - name: Configure the Grafana vhost
   ansible.builtin.template:
@@ -52,20 +175,57 @@
     state: link
   notify: reload nginx
 
-# A vhost cannot be validated on its own (it needs the surrounding http
-# context), so check the assembled config here instead. This fails the play
-# before the handler would reload a broken config.
-- name: Validate the assembled nginx configuration
-  ansible.builtin.command: nginx -t
-  changed_when: false
+- name: Configure the dashboard (Raspberry Pi) vhost
+  when: dashboard_domain | length > 0
+  block:
+    - name: Install the Basic Auth credentials
+      community.general.htpasswd:
+        path: /etc/nginx/.htpasswd-dashboard
+        name: "{{ dashboard_auth_user }}"
+        password: "{{ dashboard_auth_password }}"
+        owner: root
+        group: www-data
+        mode: "0640"
+      no_log: true
 
-- name: Allow the public Grafana port through ufw (allowlisted sources only)
+    - name: Configure the dashboard vhost
+      ansible.builtin.template:
+        src: dashboard.conf.j2
+        dest: /etc/nginx/sites-available/dashboard.conf
+        mode: "0644"
+      notify: reload nginx
+
+    - name: Enable the dashboard vhost
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/dashboard.conf
+        dest: /etc/nginx/sites-enabled/dashboard.conf
+        state: link
+      notify: reload nginx
+
+# --- firewall + service ----------------------------------------------------
+
+- name: Allow HTTPS from the internet (per-vhost rules do the filtering)
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+  when: tls_domains | length > 0
+
+- name: Allow the plain-HTTP Grafana port for allowlisted sources
   community.general.ufw:
     rule: allow
     port: "{{ gf_public_port }}"
     proto: tcp
     src: "{{ item }}"
   loop: "{{ gf_allowed_ips }}"
+  when: tls_domains | length == 0
+
+# A vhost cannot be validated on its own (it needs the surrounding http
+# context), so check the assembled config here. This fails the play before
+# the handler would reload a broken config.
+- name: Validate the assembled nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
 
 - name: Enable and start nginx
   ansible.builtin.service:
@@ -73,9 +233,11 @@
     state: started
     enabled: true
 
-- name: Report how Grafana is reachable
+- name: Report how things are reachable
   ansible.builtin.debug:
     msg: >-
-      Grafana proxied on port {{ gf_public_port }};
-      {{ gf_allowed_ips | length }} allowlisted source(s).
-      Grafana itself stays on 127.0.0.1:3000.
+      {{ ('Grafana: https://' + grafana_domain) if grafana_domain
+         else ('Grafana: http://<droplet>:' + gf_public_port) }}
+      ({{ gf_allowed_ips | length }} allowlisted source(s));
+      {{ ('Dashboard: https://' + dashboard_domain + ' -> ' + pi_wg_ip + ':' + pi_dashboard_port + ' (Basic Auth)')
+         if dashboard_domain else 'Dashboard vhost: disabled' }}

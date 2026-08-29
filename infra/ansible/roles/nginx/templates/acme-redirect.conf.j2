@@ -1,0 +1,21 @@
+# Managed by Ansible (nginx role) - do not edit on the server.
+#
+# Port 80 must be reachable from ANY address, because Let's Encrypt
+# validates the HTTP-01 challenge from many global IPs. So this vhost is
+# deliberately open, but it serves ONLY the challenge path - everything else
+# is redirected to HTTPS. All real access control (IP allowlist, Basic Auth)
+# lives on the 443 vhosts.
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}

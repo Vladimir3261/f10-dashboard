@@ -1,10 +1,28 @@
+
 # Managed by Ansible (nginx role) - do not edit on the server.
 # Public edge for Grafana. Grafana itself listens only on 127.0.0.1:3000.
+{% if grafana_domain %}
+# HTTPS vhost. Port 80 is handled by 00-acme.conf (challenge + redirect).
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{ grafana_domain }};
+
+    ssl_certificate     /etc/letsencrypt/live/{{ grafana_domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ grafana_domain }}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+{% else %}
+# No domain configured: plain HTTP on the configured port, by IP.
 
 server {
     listen {{ gf_public_port }};
     listen [::]:{{ gf_public_port }};
     server_name {{ gf_server_name }};
+{% endif %}
 
     # --- IP allowlist (from GF_ALLOWED_IPS in infra/.env) ---------------
     # Evaluated in order; anything not listed is refused. An empty list
@@ -14,7 +32,6 @@ server {
 {% endfor %}
     deny all;
 
-    # Grafana serves its own auth; keep proxy buffers sane for dashboards.
     client_max_body_size 32m;
 
     location / {

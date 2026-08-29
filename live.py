@@ -2087,6 +2087,39 @@ setMode(MODE);
 # ------------------------------------------------------------------ query
 
 
+#: Opt-in VIN masking for the HTTP/SSE API. OFF by default: the dashboard
+#: serves the full VIN as it always has, and the deployed instance is put
+#: behind authentication instead. `--redact-vin` turns masking on for a
+#: deployment where the dashboard is exposed without auth. Storage is never
+#: affected - SQLite and the lake always hold the full VIN (it is the
+#: vehicle_id there).
+REDACT_VIN = False
+
+
+def redact_vin(vin: Optional[str]) -> Optional[str]:
+    """
+    Mask a VIN for the HTTP API: keep the last 4 characters, which is
+    enough to tell cars apart, and hide the rest. No-op unless enabled.
+    """
+    if vin is None or not REDACT_VIN:
+        return vin
+
+    text = str(vin)
+
+    return ("*" * max(0, len(text) - 4)) + text[-4:] if len(text) > 4 else "****"
+
+
+def public_snapshot(snap: Dict) -> Dict:
+    """A telemetry snapshot with the VIN masked, for the HTTP/SSE API."""
+    if not REDACT_VIN or "vin" not in snap:
+        return snap
+
+    out = dict(snap)
+    out["vin"] = redact_vin(out.get("vin"))
+
+    return out
+
+
 def db_runs(path: str) -> List[Dict]:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
@@ -2101,7 +2134,8 @@ def db_runs(path: str) -> List[Dict]:
 
     return [
         {
-            "id": r[0], "started": r[1], "ended": r[2], "vin": r[3],
+            "id": r[0], "started": r[1], "ended": r[2],
+            "vin": redact_vin(r[3]),
             "gateway": r[4], "ecu": r[5], "samples": r[6],
         }
         for r in rows
@@ -2248,7 +2282,8 @@ def make_handler(tel: Telemetry, db_path: Optional[str]):
                 return
 
             if path == "/api/snapshot":
-                self._body("application/json", json.dumps(tel.get()).encode())
+                self._body("application/json",
+                           json.dumps(public_snapshot(tel.get())).encode())
                 return
 
             if path == "/api/stream":
@@ -2261,7 +2296,7 @@ def make_handler(tel: Telemetry, db_path: Optional[str]):
                 try:
                     while True:
                         seen, snap = tel.wait(seen, timeout=2.0)
-                        msg = "data: " + json.dumps(snap) + "\n\n"
+                        msg = "data: " + json.dumps(public_snapshot(snap)) + "\n\n"
                         self.wfile.write(msg.encode())
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, OSError):
@@ -2286,6 +2321,12 @@ def main() -> int:
     ap.add_argument("--ip", default=None,
                     help="gateway IP, skips UDP discovery")
     ap.add_argument("--vin", default=None)
+    ap.add_argument("--redact-vin", action="store_true",
+                    help="mask the VIN to its last 4 chars in the HTTP/SSE "
+                         "API. Off by default (the deployed dashboard is put "
+                         "behind auth instead); use this if you expose the "
+                         "dashboard without authentication. Storage is "
+                         "unaffected - SQLite and the lake keep the full VIN.")
     ap.add_argument("--ecu", type=lambda s: int(s, 0), default=None,
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
@@ -2321,6 +2362,9 @@ def main() -> int:
     ap.add_argument("--db-flush", type=float, default=2.0,
                     help="max seconds between flushes (default 2)")
     args = ap.parse_args()
+
+    global REDACT_VIN
+    REDACT_VIN = args.redact_vin
 
     #
     # Load the mappings before anything else: a broken mapping file is a

@@ -28,6 +28,10 @@ locals {
 
   do_key_fingerprints = [for k in data.digitalocean_ssh_key.existing : k.fingerprint]
 
+  # True when any public domain is configured, which switches the firewall
+  # from the plain-HTTP allowlisted port to 80+443.
+  tls_enabled = length(compact([for s in split(",", var.tls_domains) : trimspace(s)])) > 0
+
   # Grafana allowlist, from the comma-separated GF_ALLOWED_IPS in .env. A
   # bare address is normalised to /32 - DigitalOcean requires a prefix.
   grafana_cidrs = [
@@ -117,15 +121,28 @@ resource "digitalocean_firewall" "analytics" {
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # Grafana, served by the HOST nginx proxy - opened only to the
-  # allowlisted sources, and only if any are configured. The same list also
+  # Plain-HTTP Grafana on GF_PUBLIC_PORT, opened only to the allowlisted
+  # sources. Used when no domain/TLS is configured; the same list also
   # drives nginx's own allow/deny, so the restriction is enforced twice.
   dynamic "inbound_rule" {
-    for_each = length(local.grafana_cidrs) > 0 ? [1] : []
+    for_each = (!local.tls_enabled && length(local.grafana_cidrs) > 0) ? [1] : []
     content {
       protocol         = "tcp"
       port_range       = tostring(var.grafana_public_port)
       source_addresses = local.grafana_cidrs
+    }
+  }
+
+  # With TLS configured, 80 and 443 are opened to the world - but nginx does
+  # the filtering: 80 serves only the ACME challenge and redirects, and each
+  # 443 vhost enforces its own IP allowlist or Basic Auth. Port 80 MUST be
+  # world-reachable because Let's Encrypt validates from many global IPs.
+  dynamic "inbound_rule" {
+    for_each = local.tls_enabled ? ["80", "443"] : []
+    content {
+      protocol         = "tcp"
+      port_range       = inbound_rule.value
+      source_addresses = ["0.0.0.0/0", "::/0"]
     }
   }
 

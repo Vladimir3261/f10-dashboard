@@ -88,6 +88,18 @@ variable "grafana_public_port" {
   default     = 80
 }
 
+variable "tls_domains" {
+  description = <<-EOT
+    Comma-separated public domains served over HTTPS. Normally NOT set here:
+    the Makefile passes GRAFANA_DOMAIN + DASHBOARD_DOMAIN from infra/.env.
+    When non-empty, ports 80 and 443 are opened to the world - nginx does the
+    filtering, and 80 must be world-reachable for the Let's Encrypt HTTP-01
+    challenge.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "wireguard_port" {
   description = "UDP port the WireGuard gateway listens on (opened to the world so a NATed Pi can reach it)."
   type        = number
