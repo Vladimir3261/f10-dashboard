@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dynamic
-  version: 1
+  version: 2
   production: false
   description: >
     F-series N47 dynamic (0xF303) measurements from the d72n47a0
@@ -115,7 +115,9 @@ requests:
         display: {digits: 1, min: -40, max: 160}
         decode: {type: uint16_be, scale: 0.01, add: -100.0, round: 2}
 
-  # -- DPF soot, measured (IMRUP 0x44BE) - on-car value 15.49 g -------
+  # -- DPF soot, measured (IMRUP 0x44BE) -----------------------------
+  # 15.49 g was the SOURCE vehicle (F25); on F10-520d-dev this read
+  # 0.09 g at validation. See the falsification note on the signal.
   n47.d72.dyn.44BE:
     did: 0xF303
     setup:
@@ -129,8 +131,41 @@ requests:
         unit: g
         display: {digits: 2, min: 0, max: 80}
         decode: {type: uint16_be, scale: 0.015259, round: 2}
+        #
+        # FALSIFIED as "current soot load in the filter" - 2026-08-29.
+        #
+        # A completed regeneration burns soot out, so a current-load channel
+        # must drop across one. This did not. Over 1404 points spanning
+        # 2026-08-26..29 the value NEVER decreased (0 decreases, 0.12 ->
+        # 9.35 g), including across a regeneration confirmed by two
+        # independent counters: n47d_regen_count 92 -> 93 and
+        # n47d_dist_since_regen resetting to 0.
+        #
+        # Within one regen cycle it tracks distance almost exactly -
+        # ~0.032 g/km, consistent to about 2% over 164 km, intercept ~0.
+        # A physical soot load would depend on load, temperature and exhaust
+        # flow, not on distance alone.
+        #
+        # The scale may well be right: the values are plausible grams and
+        # were cross-checked at idle. It is the MEANING that is wrong.
+        # Cumulative-since-adaptation-reset, an ash estimate, or a
+        # distance-driven model are all still open. The single warm-idle
+        # reading that earned this `verified` could not have distinguished
+        # them; only straddling a regeneration could, and it failed.
+        #
+        # Do not build DPF health conclusions on this channel until a second
+        # regeneration is observed or the SGBD definition is found.
+        #
+        verification:
+          status: candidate
+          method: >
+            Decodes to a plausible value, but its first real test failed: it
+            did not drop across a confirmed regeneration, and never decreases
+            at all. Meaning unresolved - see docs/DPF_SOOT.md.
 
-  # -- DPF soot, simulated (IMPAS 0x44C1) - on-car value 15.5 g -------
+  # -- DPF soot, simulated (IMPAS 0x44C1) ----------------------------
+  # 15.5 g was the SOURCE vehicle (F25); on F10-520d-dev this read
+  # 0.10 g at validation.
   n47.d72.dyn.44C1:
     did: 0xF303
     setup:
@@ -144,6 +179,19 @@ requests:
         unit: g
         display: {digits: 2, min: 0, max: 80}
         decode: {type: uint16_be, scale: 0.01, round: 2}
+        #
+        # Same finding as n47d_soot_meas, plus a second oddity: the two track
+        # each other to within ~0.01 g despite carrying scales that differ by
+        # a factor of 1.53. Either they read the same underlying quantity and
+        # one scale is wrong, or the raw registers happen to differ by
+        # exactly the inverse ratio. Unresolved.
+        #
+        verification:
+          status: candidate
+          method: >
+            Tracks n47d_soot_meas to ~0.01 g despite a 1.53x scale
+            difference, and did not drop across a confirmed regeneration.
+            Meaning unresolved - see docs/DPF_SOOT.md.
 
   # -- engine temperature (ITMOT 0x4BC3) ------------------------------
   #
