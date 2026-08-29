@@ -21,4 +21,5 @@
     - base        # admin user, key management, SSH hardening, ufw
     - docker      # Docker engine + compose plugin
     - stack       # clone the repo, render .env, docker compose up
+    - nginx       # host reverse proxy: public, IP-allowlisted Grafana
     - wireguard   # WireGuard gateway for the Raspberry Pi tunnel

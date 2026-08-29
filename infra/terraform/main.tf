@@ -28,6 +28,13 @@ locals {
 
   do_key_fingerprints = [for k in data.digitalocean_ssh_key.existing : k.fingerprint]
 
+  # Grafana allowlist, from the comma-separated GF_ALLOWED_IPS in .env. A
+  # bare address is normalised to /32 - DigitalOcean requires a prefix.
+  grafana_cidrs = [
+    for c in compact([for s in split(",", var.grafana_allowed_cidrs) : trimspace(s)]) :
+    can(regex("/", c)) ? c : "${c}/32"
+  ]
+
   # Belt and braces: write the keys straight into root's authorized_keys.
   # `users:` sets them the normal way; `write_files` with defer:true runs in
   # the final cloud-init stage and guarantees the file exists with the right
@@ -108,6 +115,18 @@ resource "digitalocean_firewall" "analytics" {
   inbound_rule {
     protocol         = "icmp"
     source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  # Grafana, served by the HOST nginx proxy - opened only to the
+  # allowlisted sources, and only if any are configured. The same list also
+  # drives nginx's own allow/deny, so the restriction is enforced twice.
+  dynamic "inbound_rule" {
+    for_each = length(local.grafana_cidrs) > 0 ? [1] : []
+    content {
+      protocol         = "tcp"
+      port_range       = tostring(var.grafana_public_port)
+      source_addresses = local.grafana_cidrs
+    }
   }
 
   # ClickHouse (8123/9000), ingest (8090) and Grafana (3000) are NOT opened
