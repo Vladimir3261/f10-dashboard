@@ -9,6 +9,13 @@
 # point is to view it from a phone on mobile data, where the client IP
 # changes constantly. The dashboard has no login of its own and serves the
 # VIN, so this vhost is never configured without credentials.
+#
+# The one exception is the /s/ prefix: temporary share links. Basic Auth is
+# off there so a link can be handed to someone without giving them the
+# password, and live.py is the authority instead - it validates the token,
+# serves only the live view, masks the VIN unconditionally, and refuses the
+# history and sync endpoints. nginx never sees the tokens and needs no
+# reload when one is minted or revoked.
 
 server {
     listen 443 ssl http2;
@@ -29,7 +36,8 @@ server {
     proxy_connect_timeout 5s;
 
     # ...and show a page that explains it instead of nginx's bare 502.
-    # Inside the authenticated vhost, so the page is never public.
+    # Reachable by share viewers too when the car is offline, which is why
+    # it names no addresses, keys or vehicle identifiers.
     error_page 502 503 504 /__offline.html;
     location = /__offline.html {
         root /var/www/f10-offline;
@@ -51,6 +59,47 @@ server {
 
     # The dashboard streams telemetry over Server-Sent Events; buffering
     # would make the live view lag badly or appear frozen.
+    # -- temporary share links ------------------------------------------
+    #
+    # No auth_basic here: the bearer token in the URL is the credential, and
+    # live.py enforces it. Anything not on its allowlist 404s at the Pi.
+    location /s/ {
+        auth_basic off;
+
+        proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 120s;
+
+        # A shared link is not something to leave in a search index.
+        add_header X-Robots-Tag "noindex, nofollow" always;
+    }
+
+    # The shared view streams over SSE as well, and needs the same
+    # buffering-off treatment as the owner's stream below.
+    location /s/api/stream {
+        auth_basic off;
+
+        proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        proxy_buffering     off;
+        proxy_cache         off;
+        proxy_read_timeout  1h;
+        chunked_transfer_encoding off;
+
+        add_header X-Robots-Tag "noindex, nofollow" always;
+    }
+
     location /api/stream {
         proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};
         proxy_http_version 1.1;
