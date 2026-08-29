@@ -1,0 +1,58 @@
+---
+# WireGuard gateway. The NATed Raspberry Pi initiates a tunnel here, so the
+# server (with a public IP) is reachable even though the Pi is not. Peers
+# are added via the wireguard_peers group_var once their public keys exist.
+
+- name: Install WireGuard
+  ansible.builtin.apt:
+    name: [wireguard]
+    state: present
+
+- name: Ensure /etc/wireguard exists
+  ansible.builtin.file:
+    path: /etc/wireguard
+    state: directory
+    mode: "0700"
+
+- name: Generate the server private key (once)
+  ansible.builtin.shell: "umask 077 && wg genkey > /etc/wireguard/privatekey"
+  args:
+    creates: /etc/wireguard/privatekey
+
+- name: Derive the server public key (once)
+  ansible.builtin.shell: "wg pubkey < /etc/wireguard/privatekey > /etc/wireguard/publickey"
+  args:
+    creates: /etc/wireguard/publickey
+
+- name: Read the server keys
+  ansible.builtin.slurp:
+    src: "/etc/wireguard/{{ item }}"
+  register: wg_keys
+  loop: [privatekey, publickey]
+
+- name: Enable IPv4 forwarding (for peer-to-peer routing via the gateway)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-wireguard.conf
+    content: "net.ipv4.ip_forward=1\n"
+    mode: "0644"
+  notify: reload sysctl
+
+- name: Render wg0.conf
+  ansible.builtin.template:
+    src: wg0.conf.j2
+    dest: /etc/wireguard/wg0.conf
+    mode: "0600"
+  notify: restart wireguard
+
+- name: Enable and start wg-quick@wg0
+  ansible.builtin.service:
+    name: wg-quick@wg0
+    enabled: true
+    state: started
+
+- name: Show the server public key (give this to peers)
+  ansible.builtin.debug:
+    msg: >-
+      WireGuard server public key:
+      {{ (wg_keys.results[1].content | b64decode).strip() }}
+      (endpoint {{ ansible_host | default(inventory_hostname) }}:{{ wireguard_port }})

@@ -1,0 +1,9 @@
+---
+- name: reload sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+- name: restart wireguard
+  ansible.builtin.service:
+    name: wg-quick@wg0
+    state: restarted

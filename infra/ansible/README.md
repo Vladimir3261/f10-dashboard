@@ -24,12 +24,26 @@ make deploy        # run site.yml
 
 (Needs `ansible` installed for `ping`/`deploy`.)
 
-## Status
+## Roles (`site.yml`)
 
-`site.yml` is currently a **scaffold** that proves the Terraform→Ansible
-seam (it connects and reports facts). The real roles land next:
+`make deploy` runs, in order:
 
-- base hardening + a non-root admin user (from `admin_ssh_public_keys`)
-- Docker + the compose stack (ClickHouse, ingest, Grafana)
-- WireGuard gateway for the Pi tunnel
-- `ufw` (SSH + WireGuard only; app ports stay on localhost / the tunnel)
+1. **base** — non-root admin user (`admin_user`, default `f10`),
+   `authorized_keys` for admin **and** root managed from
+   `admin_ssh_public_keys` (so key rotation is a re-deploy, not a droplet
+   recreate), SSH hardened to key-only, and `ufw` allowing only SSH +
+   WireGuard.
+2. **docker** — Docker Engine + Compose plugin from Docker's apt repo.
+3. **stack** — clones the repo to `{{ app_dir }}`, renders `infra/.env`
+   from your local secrets (via `lookup('env', ...)` — the Makefile exports
+   `.env`), and `docker compose up -d --build` (ClickHouse, ingest,
+   Grafana), then waits for ingest to report healthy.
+4. **wireguard** — installs WireGuard, generates the server keypair, enables
+   IP forwarding, and starts `wg-quick@wg0`. Add the Pi/laptop later via
+   `wireguard_peers` in `group_vars/all.yml`.
+
+Non-secret settings live in [`group_vars/all.yml`](group_vars/all.yml);
+collections needed are in [`requirements.yml`](requirements.yml) (installed
+by `make galaxy`, which `make deploy` runs for you).
+
+Full runbook: [`../PROVISIONING.md`](../PROVISIONING.md).

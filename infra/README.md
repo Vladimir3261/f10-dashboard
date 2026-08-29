@@ -29,24 +29,27 @@ gets data there from the car over a mobile network. Two sides:
 ## Provision a server from scratch (IaC)
 
 To stand up the VPS reproducibly instead of by hand, use the two staged
-layers, driven by [`Makefile`](Makefile):
+layers, driven by [`Makefile`](Makefile). **Full runbook:
+[`PROVISIONING.md`](PROVISIONING.md).**
 
 ```bash
 cd infra
-export DIGITALOCEAN_TOKEN=dop_v1_xxx          # never stored in a file
-make init && make provision                   # Terraform: create droplet + inventory
-make deploy                                    # Ansible: configure it (WIP)
+cp .env.example .env      # set DIGITALOCEAN_TOKEN + CH_PASS/INGEST_TOKEN/GF_ADMIN_PASSWORD
+make init                 # once
+make provision            # Terraform: create droplet + generate inventory
+make deploy               # Ansible: hardening + Docker + stack + WireGuard
 ```
 
 - **[`terraform/`](terraform/README.md)** — stage 1: a DigitalOcean
-  droplet (analytics + WireGuard gateway), its SSH keys, and a firewall
-  that opens only SSH + WireGuard. Provider-specific; a simple quickstart.
+  droplet (analytics + WireGuard gateway) and a firewall that opens only
+  SSH + WireGuard. Provider-specific; a simple quickstart.
 - **[`ansible/`](ansible/README.md)** — stage 2: configures the droplet
-  (stack + WireGuard + hardening). Provider-agnostic. The inventory is
-  generated from Terraform output, so the IP is never typed by hand.
+  (base hardening + Docker + the compose stack + WireGuard). Provider-
+  agnostic. The inventory is generated from Terraform output, so the IP is
+  never typed by hand.
 
 The manual `docker compose` flow below still works and is what the Ansible
-layer automates.
+`stack` role automates.
 
 ## Deploy the lake manually (on the VPS)
 
