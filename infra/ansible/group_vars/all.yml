@@ -9,8 +9,16 @@
 # admin public keys) come from the generated inventory - see
 # inventory/hosts.yml.example.
 
-# Repo deployed on the server. Override for a fork.
-repo_url: "https://github.com/Vladimir3261/f10-dashboard.git"
+# Repo deployed on the server.
+#
+# Normally you do NOT set this: `make inventory` writes repo_url into the
+# generated inventory from THIS checkout's `git remote origin` (rewritten to
+# https), so a fork deploys its own code with nothing to edit here. That host
+# var wins over this fallback.
+#
+# Set it only to pin a specific repo, e.g. when deploying from a checkout
+# with no origin remote:
+# repo_url: "https://github.com/<owner>/<repo>.git"
 repo_version: "master"
 app_dir: /opt/f10-dashboard
 

@@ -7,6 +7,8 @@ all:
     analytics:
       ansible_host: 203.0.113.10        # <- filled from terraform output
       ansible_user: root
+      # <- taken from THIS checkout's git origin, so a fork deploys itself
+      repo_url: "https://github.com/<owner>/<repo>.git"
   vars:
     wireguard_port: 51820
     admin_ssh_public_keys:

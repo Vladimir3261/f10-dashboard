@@ -15,6 +15,17 @@
       infra/.env.example.
     quiet: true
 
+- name: Require a repo to deploy
+  ansible.builtin.assert:
+    that:
+      - repo_url is defined
+      - repo_url | length > 0
+    fail_msg: >-
+      repo_url is not set. It is normally written into the inventory from
+      this checkout's git origin - run `make inventory`. If this checkout
+      has no origin remote, set repo_url in ansible/group_vars/all.yml.
+    quiet: true
+
 - name: Clone/update the repo on the server
   ansible.builtin.git:
     repo: "{{ repo_url }}"
