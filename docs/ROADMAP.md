@@ -126,6 +126,59 @@ sensors** (`local/captures/kombi_dids.json` captured, unmined),
 - No data-quality tests (no layer to test).
 - No test/measurement of F303 polling cost vs the fast-channel Hz.
 
+## 2.5 Where we actually are (2026-08-29)
+
+The infrastructure detour is finished and is no longer a roadmap item: the
+server is Terraform + Ansible, the lake is deployed and accumulating, the Pi
+provisions from one script, and telemetry has been flowing unattended.
+**~1.56M samples across 5 days and 7 drives** is now enough to do real
+analysis on.
+
+Stage status against the plan below:
+
+| stage | state |
+|---|---|
+| 0 — data model | **mostly done.** Mapping versions are stamped end to end (`params.mapping_ver`, `run_mappings`, `samples.mapping_ver`). Trip segmentation still weak: many `sessions` rows never get `ended` |
+| 1 — data quality | **not started.** The `quality` column exists and defaults to `ok`; nothing ever writes it. The OBD MAP saturation was found by hand, which is exactly the case it should have flagged |
+| 2 — DDE telemetry | **done enough.** ~23 verified proprietary channels incl. DPF/EGR |
+| 3 — analytics | **unblocked, not started.** This is the next real work |
+| 5 — drift/anomaly | the goal; needs 1 and 3 |
+
+### Two findings that reorder the priorities
+
+**1. The soot decode is falsified — fix before building DPF analytics.**
+Drive 7 straddled a completed regeneration (`n47d_regen_count` 92 → 93,
+`n47d_dist_since_regen` reset to ~9 km — two independent counters agree, so
+the event is solid). A regeneration burns soot out, so `n47d_soot_meas`
+should have *dropped*. It rose ~0.5 g and kept rising.
+
+This is the first real test of that candidate scale and it did not pass.
+`n47d_soot_meas` / `n47d_soot_model` may be cumulative-since-new, an ash
+estimate, or carry an offset the scale does not model. **Every DPF health
+conclusion depends on this channel**, so it is the highest-value open
+question in the project — and there is now a captured natural experiment to
+test hypotheses against.
+
+**2. Drives fragment into runs, which corrupts longitudinal analysis.**
+Drive 7 recorded as 4 runs, not 1. Cause is error handling, not the cable: in
+`bmwdiag/mapping/execute.py` the transport call sits outside the try/except
+that guards decoding, so one `TimeoutError` (or an `HsfzNack` from the EGS)
+tears down the whole HSFZ link instead of failing that one request. Cost is
+1.35% of wall time but 100% of analytical continuity — no drive can be
+summarised in one report without stitching. Cheap to fix, and it should be
+fixed *before* collecting much more data.
+
+### Recommended order
+
+1. **Resolve the soot channel** (research + the captured regen event).
+   Nothing about DPF health is trustworthy until this is settled.
+2. **Fix the per-request teardown** in `execute.py` — small, and every later
+   analysis is cleaner for it. Close `sessions.ended` while there.
+3. **Stage 1 data quality** — populate `quality` (saturated / sentinel /
+   stale). The MAP-saturation case proves the need and gives a test.
+4. **Stage 3 analytics** — condition-normalized baselines, starting with
+   DPF ΔP vs exhaust flow, now that 1–3 make the inputs trustworthy.
+
 ## 3. The roadmap (staged, testable against the real car)
 
 Ordering principle: unblock valid trends first, then add the highest-
