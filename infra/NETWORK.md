@@ -66,7 +66,7 @@ common trap) does not take effect.
      │  nginx :80  ── allow <allowlist>; deny all; ──┐     │
      │                                                │     │
      │                       127.0.0.1:3000  Grafana ◄┘     │
-     │                       127.0.0.1:8090  ingest         │
+     │                    10.77.0.1:8090  ingest (VPN only)│
      │                       (compose net)   ClickHouse     │
      │                                                     │
      │  wg0 10.77.0.1  ◄── WireGuard tunnel                 │
@@ -126,7 +126,7 @@ Let's Encrypt, renewed by certbot's own systemd timer.
      │   └── f10.example.com      HTTP Basic Auth                │
      │            └────────────────► 10.77.0.10:8080  (via wg0)  │
      │                                                          │
-     │                       127.0.0.1:8090  ingest             │
+     │                    10.77.0.1:8090  ingest (VPN only)     │
      │                       (compose net)   ClickHouse         │
      │  wg0 10.77.0.1                                           │
      └──────────────────────────────────────────────────────────┘
@@ -221,7 +221,7 @@ stays open and the VPS can reach back into the tunnel.
 |---|---|---|
 | **SSH to the Pi** | laptop → VPS (public 22) → Pi `10.77.0.10:22` (wg0) | **the point of the tunnel**; VPS is the jump host, laptop needs no VPN |
 | Tunnel establishment | Pi → `<DROPLET_IP>:51820/udp` | dialled outbound; keepalive holds the NAT mapping open |
-| Telemetry upload | Pi → `10.77.0.1:8090` over `wg0` | bearer token; never crosses the public internet in the clear |
+| Telemetry upload | Pi → `10.77.0.1:8090` over `wg0` | bearer token; never crosses the public internet in the clear. Ingest is **published on the VPN address**, so this only works if `INGEST_BIND` is that address — bound to loopback the Pi just times out |
 | Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | Case B only; public path, no VPN on the phone |
 
 Adding your laptop as a second peer is possible but unnecessary for this
@@ -253,7 +253,7 @@ gateway and no DNS. See
 | Service | Binding | Reached by |
 |---|---|---|
 | **ClickHouse** | **not published at all** — compose network only | the ingest server and Grafana inside the compose network; humans via `docker compose exec` on the host |
-| ingest server | `127.0.0.1:8090` | nginx? no — only the Pi over `wg0`, and locally |
+| ingest server | `INGEST_BIND:8090` — the **WireGuard address**, e.g. `10.77.0.1` | the Pi over `wg0` only |
 | Grafana | `127.0.0.1:3000` | nginx only |
 | Pi dashboard | Pi's own `:8080` | nginx over `wg0` only |
 

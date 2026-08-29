@@ -52,6 +52,31 @@
     state: started
     enabled: true
 
+# The ingest port is published on the WireGuard address, so wg0 must exist
+# before Docker starts or the bind fails and the stack comes up broken after
+# a reboot. Ordering only - if WireGuard is not in use this is a no-op.
+- name: Ensure Docker's drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+
+- name: Start Docker after the WireGuard interface exists
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-after-wireguard.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (docker role).
+      [Unit]
+      After=wg-quick@wg0.service
+      Wants=wg-quick@wg0.service
+  register: docker_order
+
+- name: Reload systemd after changing Docker's ordering
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: docker_order.changed
+
 - name: Allow the admin user to run Docker
   ansible.builtin.user:
     name: "{{ admin_user }}"
