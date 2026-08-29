@@ -86,6 +86,16 @@ deploy: galaxy ## Configure the droplet: hardening + Docker + stack + WireGuard
 deploy-check: galaxy ## Dry-run the playbook (--check, no changes)
 	cd $(ANSIBLE_DIR) && ansible-playbook site.yml --check
 
+# ------------------------------------------------------------------- lake
+.PHONY: lake-status
+lake-status: ## Show stack health + row counts on the analytics server
+	@scripts/lake_status.sh
+
+.PHONY: migrate-lake
+migrate-lake: ## Copy the lake from an old server: make migrate-lake FROM=root@old-host
+	@test -n "$(FROM)" || { echo "usage: make migrate-lake FROM=root@old-host [ARGS='--dry-run']"; exit 1; }
+	scripts/migrate_lake.sh --from "$(FROM)" $(ARGS)
+
 # ------------------------------------------------------------------ checks
 .PHONY: validate
 validate: ## Static checks: terraform validate/fmt
