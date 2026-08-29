@@ -188,3 +188,12 @@ is partly done and its follow-up is the soot analysis above.
   `--extra-mappings` enabled and tune if needed.
 - Consider a dedicated `dpf`/`trans` polling class in the mapping so the
   heavy proprietary reads don't compete with fast OBD.
+- **TECH DEBT: the host clock.** The Pi has no RTC and corrected itself
+  forward 76.5 minutes mid-recording on 2026-08-29, corrupting run 1's
+  timeline and shipping it to the lake that way. Open, deferred, and
+  written up under Stage 1 in `docs/ROADMAP.md`. Any time-derived
+  analysis must treat pre-NTP-sync runs as suspect until it is fixed.
+- **The fragmentation fix is written but unapplied.** It sits in
+  `git stash` ("wip: 0x18 fragmentation fix (incomplete)") — mid-refactor
+  and unverified, so it was stashed rather than committed. Item 0 of the
+  plan above stays open until it is finished and tested.
