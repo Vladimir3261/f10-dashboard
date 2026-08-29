@@ -96,6 +96,11 @@ deploy: galaxy ## Configure the droplet: hardening + Docker + stack + WireGuard
 deploy-check: galaxy ## Dry-run the playbook (--check, no changes)
 	cd $(ANSIBLE_DIR) && ansible-playbook site.yml --check
 
+# ----------------------------------------------------------------- the Pi
+.PHONY: pi-setup
+pi-setup: ## Generate local/pi-setup.sh for the Raspberry Pi from current infra state
+	python3 scripts/gen_pi_setup.py
+
 # ------------------------------------------------------------------- lake
 .PHONY: lake-status
 lake-status: ## Show stack health + row counts on the analytics server
