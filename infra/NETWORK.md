@@ -38,6 +38,41 @@ common trap) does not take effect.
 > Let's Encrypt then fails with a bare "Timeout during connect". Run
 > `make apply` too. (There is now a preflight that catches this and says so.)
 
+## The one public hole: temporary share links
+
+Everything on the dashboard vhost sits behind HTTP Basic Auth except a
+single prefix, **`/s/`**, which exists so a live view can be handed to
+someone without giving them the dashboard password.
+
+| | Owner (`/`) | Share link (`/s/?t=<token>`) |
+|---|---|---|
+| nginx Basic Auth | required | **off** |
+| credential | the vhost password | the bearer token in the URL |
+| VIN | shown in full | **always masked** to the last 4 |
+| gateway IP / ECU list | shown | stripped |
+| live view (`/api/snapshot`, `/api/stream`, `/api/meta`) | yes | yes |
+| drive history (`/api/runs`, `/api/history`) | yes | **404** |
+| sync status and controls (`/api/sync`) | yes | **404** |
+| minting or revoking links (`/api/share`) | yes | **404** |
+| lifetime | until the password changes | 15 min - 12 h, then dead |
+
+nginx only turns `auth_basic` off for the prefix; it never sees a token and
+needs no reload when one is minted or revoked. **`live.py` is the
+authority** - it validates the token, serves only the allowlist above, and
+masks the VIN independently of `--redact-vin`. Tokens are held in memory
+only, so a dashboard restart invalidates every outstanding link.
+
+Mint and revoke from the **share** chip in the dashboard header. To turn
+the feature off completely, launch with `--no-share`; the prefix then 404s
+and no link can be created.
+
+> **Know what the LAN can do.** `/api/share` is owner-only in the sense
+> that it is unreachable through `/s/` and sits behind Basic Auth at the
+> edge - but the Pi's own `:8080` has never had a login, so anyone already
+> on the car's network can mint a link and publish it outward. That is a
+> real step up from merely reading the dashboard on the LAN. Use
+> `--no-share` if the Pi ever joins a network you do not control.
+
 > **Docker bypasses `ufw`.** A container port published on `0.0.0.0` inserts
 > iptables rules *ahead* of ufw's INPUT chain and is reachable regardless of
 > ufw. That is why nothing is published publicly by Docker here — Grafana and

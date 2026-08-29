@@ -20,11 +20,13 @@ docs/MAPPING_ARCHITECTURE.md.
 """
 
 import argparse
+import hmac
 import json
 import math
 import os
 import queue
 import re
+import secrets
 import signal
 import socket
 import sqlite3
@@ -1467,6 +1469,27 @@ PAGE = r"""
   header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   h1 { font-size: 15px; margin: 0; letter-spacing: .05em; text-transform: uppercase; }
   .chips { display: flex; gap: 7px; flex-wrap: wrap; margin-left: auto; }
+  .sheet { display: none; position: fixed; inset: 0; z-index: 50;
+           background: rgba(0,0,0,.6); align-items: center; justify-content: center; }
+  .sheet.open { display: flex; }
+  .sheetbox { background: var(--panel); border: 1px solid var(--line);
+              border-radius: 10px; padding: 18px; width: min(560px, 92vw);
+              max-height: 86vh; overflow: auto; }
+  .sheetbox h2 { margin: 0 0 8px; font-size: 15px; }
+  .sheetbox p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
+  .sheetbox .row { display: flex; gap: 8px; align-items: center;
+                   margin-top: 10px; flex-wrap: wrap; }
+  .sheetbox label { font-size: 12px; color: var(--dim); }
+  .sheetbox input, .sheetbox select, .sheetbox button {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; font: inherit; font-size: 12px; }
+  .sheetbox input { flex: 1 1 240px; font-family: ui-monospace, monospace; }
+  .sheetbox button { cursor: pointer; }
+  .sheetbox button.danger { border-color: var(--bad); color: var(--bad); }
+  .sharerow { display: flex; gap: 8px; align-items: center; font-size: 12px;
+              border-top: 1px solid var(--line); padding: 8px 0; }
+  .sharerow code { font-size: 11px; color: var(--dim); flex: 1;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip {
     background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
     padding: 4px 10px; font-size: 11.5px; color: var(--muted);
@@ -1606,8 +1629,41 @@ PAGE = r"""
       <span id="syncdot" class="dot off"></span>sync
       <b id="syncstate">-</b><span id="syncpend"></span>
     </div>
+    <div class="chip" id="sharechip" title="create a temporary public link"
+         style="cursor:pointer">share</div>
+    <div class="chip" id="sharedbadge" style="display:none">shared &middot; live</div>
   </div>
 </header>
+
+<div class="sheet" id="sharesheet">
+  <div class="sheetbox">
+    <h2>Share a live link</h2>
+    <p class="dim">
+      Anyone with the link sees this dashboard live, read-only, with the VIN
+      masked and no drive history. It stops working when it expires, when you
+      revoke it, or when the dashboard restarts.
+    </p>
+    <div class="row">
+      <label for="sharettl">Expires in</label>
+      <select id="sharettl">
+        <option value="900">15 minutes</option>
+        <option value="3600" selected>1 hour</option>
+        <option value="14400">4 hours</option>
+        <option value="43200">12 hours</option>
+      </select>
+      <button id="sharemint">Create link</button>
+    </div>
+    <div class="row" id="sharenew" style="display:none">
+      <input id="shareurl" readonly>
+      <button id="sharecopy">Copy</button>
+    </div>
+    <div id="sharelist"></div>
+    <div class="row">
+      <button id="sharerevokeall" class="danger">Revoke all</button>
+      <button id="shareclose">Close</button>
+    </div>
+  </div>
+</div>
 
 <div class="modes" id="modeswitch">
   <button data-mode="drive">Drive</button>
@@ -1952,13 +2008,13 @@ function renderHead(s) {
 
 /* ---------------------------------------------------------- data plumbing */
 async function loadMeta() {
-  const j = await (await fetch("/api/meta")).json();
+  const j = await (await fetch(API+"/api/meta")).json();
   meta = j.meta; metaVersion = j.meta_version;
   metaByKey = {}; for (const m of meta) metaByKey[m.key] = m;
   buildDrive(); buildPanels();
 }
 async function loadRuns() {
-  const runs = await (await fetch("/api/runs")).json();
+  const runs = await (await fetch(API+"/api/runs")).json();
   if (runs.error) return;
   liveRun = runs.length ? runs[0].id : null;
   const sel = el("run"); sel.innerHTML = "";
@@ -1976,7 +2032,7 @@ async function loadHistory() {
   const q = new URLSearchParams({points: 900});
   if (runId!==null) q.set("run", runId);
   if (winSec) q.set("seconds", winSec);
-  const j = await (await fetch("/api/history?"+q)).json();
+  const j = await (await fetch(API+"/api/history?"+q)).json();
   series = j.series || {};
   for (const m of meta) if (!series[m.key]) series[m.key] = [];
   el("hint").textContent = runId===liveRun ? "live run - appending in real time"
@@ -2032,11 +2088,15 @@ el("reload").onclick = () => { loadRuns(); loadHistory(); };
    resume still go straight to the agent, which only works when the page is
    opened on the Pi itself - deliberately, so a public vhost cannot pause
    syncing. */
+/* Served under /s/ for a share link, at / for the owner. Every same-origin
+   call is built off API so one page serves both. */
+const API = window.__F10_API__ || "";
+const SHARED = !!window.__F10_SHARE__;
 const SYNC_BASE = `http://${location.hostname || "localhost"}:8091`;
 let syncEnabled = null;
 async function pollSync() {
   try {
-    const s = await (await fetch("/api/sync", {cache: "no-store"})).json();
+    const s = await (await fetch(API+"/api/sync", {cache: "no-store"})).json();
     syncEnabled = (s.state === "unreachable") ? null : s.enabled;
     el("syncdot").className = "dot " + (s.enabled && s.state !== "offline" ? "on" : "off");
     el("syncstate").textContent = s.state || "-";
@@ -2063,7 +2123,7 @@ el("syncchip").onclick = async () => {
 setInterval(pollSync, 3000);
 pollSync();
 
-const es = new EventSource("/api/stream");
+const es = new EventSource(API+"/api/stream");
 es.onmessage = async e => {
   const s = JSON.parse(e.data);
   if (s.meta_version !== metaVersion) { await loadMeta(); if (MODE==="detail") await loadHistory(); }
@@ -2082,11 +2142,111 @@ function tick() { render(); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
 window.addEventListener("resize", () => { dirty = true; });
 
+/* ---------------------------------------------------------------- sharing */
+const shareSheet = el("sharesheet");
+function fmtLeft(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+  return h ? `${h}h ${m}m` : (m ? `${m}m` : `${sec}s`);
+}
+async function loadShares() {
+  const box = el("sharelist");
+  let j;
+  try { j = await (await fetch(API+"/api/share", {cache:"no-store"})).json(); }
+  catch (e) { box.innerHTML = '<div class="sharerow dim">could not reach the server</div>'; return; }
+  const links = j.links || [];
+  if (!links.length) { box.innerHTML = '<div class="sharerow dim">no active links</div>'; return; }
+  const now = Date.now()/1000;
+  box.innerHTML = links.map(l =>
+    `<div class="sharerow"><code>${l.url}</code>` +
+    `<span class="dim">${fmtLeft(l.expires-now)} left &middot; ${l.hits} hit${l.hits===1?"":"s"}</span>` +
+    `<button data-revoke="${l.token}">Revoke</button></div>`).join("");
+  box.querySelectorAll("[data-revoke]").forEach(b => {
+    b.onclick = async () => {
+      await fetch(API+"/api/share/revoke", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({token: b.getAttribute("data-revoke")})});
+      loadShares();
+    };
+  });
+}
+if (!SHARED) {
+  el("sharechip").onclick = () => { shareSheet.classList.add("open"); loadShares(); };
+  el("shareclose").onclick = () => shareSheet.classList.remove("open");
+  shareSheet.onclick = e => { if (e.target === shareSheet) shareSheet.classList.remove("open"); };
+  el("sharemint").onclick = async () => {
+    const ttl = parseInt(el("sharettl").value, 10);
+    const r = await fetch(API+"/api/share", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({ttl})});
+    const j = await r.json();
+    if (j.url) { el("shareurl").value = j.url; el("sharenew").style.display = "flex"; }
+    loadShares();
+  };
+  el("sharecopy").onclick = async () => {
+    const input = el("shareurl");
+    input.select();
+    try { await navigator.clipboard.writeText(input.value); }
+    catch (e) { document.execCommand("copy"); }
+    el("sharecopy").textContent = "Copied";
+    setTimeout(() => { el("sharecopy").textContent = "Copy"; }, 1500);
+  };
+  el("sharerevokeall").onclick = async () => {
+    await fetch(API+"/api/share/revoke", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({all:true})});
+    el("sharenew").style.display = "none";
+    loadShares();
+  };
+}
+
+/* A share viewer gets the live views only: the owner-only chips go away,
+   and Detail is removed because its history endpoints are not served
+   under the share prefix. */
+if (SHARED) {
+  el("sharechip").style.display = "none";
+  el("syncchip").style.display = "none";
+  el("sharedbadge").style.display = "";
+  const vinChip = el("vin").closest(".chip"); if (vinChip) vinChip.style.display = "none";
+  const detail = document.querySelector('[data-mode="detail"]');
+  if (detail) detail.style.display = "none";
+  if (MODE === "detail") MODE = "drive";
+}
+
 setMode(MODE);
-(async () => { await loadMeta(); await loadRuns(); await loadHistory(); })();
+(async () => {
+  await loadMeta();
+  if (!SHARED) { await loadRuns(); await loadHistory(); }
+})();
 </script>
 </body>
 </html>
+"""
+
+
+#: The same page, told at load time that it is the public view. One page
+#: means a share viewer can never drift from what the owner sees.
+SHARE_PAGE = PAGE.replace(
+    "</head>",
+    '<script>window.__F10_API__ = "/s"; window.__F10_SHARE__ = true;</script>\n</head>',
+    1,
+)
+
+SHARE_DENIED_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link expired</title>
+<style>
+ body { margin:0; min-height:100vh; display:flex; align-items:center;
+        justify-content:center; background:#0f1113; color:#e6e6e6;
+        font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+ div { text-align:center; padding:24px; }
+ h1 { font-size:17px; margin:0 0 8px; }
+ p { color:#8b9196; margin:0; }
+</style></head>
+<body><div>
+<h1>This link is no longer valid</h1>
+<p>Share links expire, can be revoked, and do not survive a restart.<br>
+Ask for a fresh one.</p>
+</div></body></html>
 """
 
 
@@ -2102,17 +2262,25 @@ setMode(MODE);
 REDACT_VIN = False
 
 
-def redact_vin(vin: Optional[str]) -> Optional[str]:
+def mask_vin(vin: Optional[str]) -> Optional[str]:
     """
-    Mask a VIN for the HTTP API: keep the last 4 characters, which is
-    enough to tell cars apart, and hide the rest. No-op unless enabled.
+    Mask a VIN unconditionally: keep the last 4 characters, which is
+    enough to tell cars apart, and hide the rest.
     """
-    if vin is None or not REDACT_VIN:
-        return vin
+    if vin is None:
+        return None
 
     text = str(vin)
 
     return ("*" * max(0, len(text) - 4)) + text[-4:] if len(text) > 4 else "****"
+
+
+def redact_vin(vin: Optional[str]) -> Optional[str]:
+    """Mask a VIN for the HTTP API. No-op unless `--redact-vin` is on."""
+    if vin is None or not REDACT_VIN:
+        return vin
+
+    return mask_vin(vin)
 
 
 def public_snapshot(snap: Dict) -> Dict:
@@ -2124,6 +2292,156 @@ def public_snapshot(snap: Dict) -> Dict:
     out["vin"] = redact_vin(out.get("vin"))
 
     return out
+
+
+# ---------------------------------------------------------------- sharing
+
+#: URL prefix for the public, token-gated view. Everything under it is
+#: read-only and live-only; nginx serves this prefix without Basic Auth
+#: (see infra/ansible/roles/nginx/templates/dashboard.conf.j2).
+SHARE_PREFIX = "/s"
+
+#: The cookie that carries the token after the first click, so the SSE
+#: stream and the API calls do not each need the query string.
+SHARE_COOKIE = "f10share"
+
+#: Exactly what a share viewer may reach, relative to SHARE_PREFIX.
+#: Deliberately live-only: no /api/runs or /api/history (past drives are
+#: not the owner's to hand out by accident) and no /api/sync (it exposes
+#: local database paths and the agent's control surface).
+SHARE_ALLOWED = frozenset({"/", "/api/snapshot", "/api/stream", "/api/meta"})
+
+#: Snapshot fields a share viewer never sees. The VIN is masked rather
+#: than dropped so the page still has something to render.
+SHARE_HIDDEN = ("gateway", "ecus")
+
+#: Offered link lifetimes: 15 min, 1 h, 4 h, 12 h.
+SHARE_TTL_CHOICES = (900, 3600, 14400, 43200)
+
+
+def share_snapshot(snap: Dict) -> Dict:
+    """
+    A telemetry snapshot safe to hand to a share-link viewer.
+
+    The VIN is masked here *unconditionally* - independently of the
+    global `--redact-vin` switch, which governs the owner's own view.
+    A share link must never be able to leak it.
+    """
+    out = dict(snap)
+
+    if out.get("vin"):
+        out["vin"] = mask_vin(out["vin"])
+
+    for field in SHARE_HIDDEN:
+        out.pop(field, None)
+
+    out["shared"] = True
+
+    return out
+
+
+class ShareTokens:
+    """
+    Bearer tokens granting temporary, read-only, live-only access.
+
+    Minted by the owner from the authenticated dashboard. They expire on
+    their own and can be revoked early. Nothing is persisted on purpose:
+    a restart invalidates every outstanding link, which is the safe
+    direction to fail.
+    """
+
+    def __init__(self, max_active: int = 16) -> None:
+        self._lock = threading.Lock()
+        self._tokens: Dict[str, Dict[str, Any]] = {}
+        self.max_active = max_active
+
+    def mint(self, ttl: float, label: str = "") -> Dict[str, Any]:
+        now = time.time()
+        token = secrets.token_urlsafe(24)
+        entry = {
+            "token": token, "created": now, "expires": now + float(ttl),
+            "label": str(label)[:64], "hits": 0, "last_seen": None,
+        }
+
+        with self._lock:
+            self._prune(now)
+
+            #
+            # A bound on outstanding links, so a stuck script cannot mint
+            # without limit. The owner is the one minting, so drop the
+            # oldest rather than refusing the new one.
+            #
+            while len(self._tokens) >= self.max_active:
+                oldest = min(self._tokens.values(), key=lambda e: e["created"])
+                self._tokens.pop(oldest["token"], None)
+
+            self._tokens[token] = entry
+
+        return dict(entry)
+
+    def validate(self, token: Optional[str]) -> bool:
+        if not token:
+            return False
+
+        now = time.time()
+
+        with self._lock:
+            self._prune(now)
+
+            #
+            # compare_digest against every candidate, without breaking out
+            # early: whether a token is valid must not be readable from
+            # how long the check took.
+            #
+            hit = None
+
+            for known, entry in self._tokens.items():
+                if hmac.compare_digest(known, token):
+                    hit = entry
+
+            if hit is None:
+                return False
+
+            hit["hits"] += 1
+            hit["last_seen"] = now
+
+            return True
+
+    def remaining(self, token: str) -> float:
+        """Seconds left on a token, 0 if it is unknown or already past."""
+        now = time.time()
+
+        with self._lock:
+            entry = self._tokens.get(token)
+
+            return max(0.0, entry["expires"] - now) if entry else 0.0
+
+    def revoke(self, token: str) -> bool:
+        with self._lock:
+            return self._tokens.pop(token, None) is not None
+
+    def revoke_all(self) -> int:
+        with self._lock:
+            count = len(self._tokens)
+            self._tokens.clear()
+
+            return count
+
+    def active(self) -> List[Dict[str, Any]]:
+        now = time.time()
+
+        with self._lock:
+            self._prune(now)
+
+            return sorted(
+                (dict(e) for e in self._tokens.values()),
+                key=lambda e: e["created"],
+            )
+
+    def _prune(self, now: float) -> None:
+        """Drop expired tokens. Caller holds the lock."""
+        for token in [t for t, e in self._tokens.items() if e["expires"] <= now]:
+            self._tokens.pop(token, None)
 
 
 def db_runs(path: str) -> List[Dict]:
@@ -2204,7 +2522,12 @@ def db_history(
 # ----------------------------------------------------------------- server
 
 
-def make_handler(tel: Telemetry, db_path: Optional[str]):
+def make_handler(
+    tel: Telemetry,
+    db_path: Optional[str],
+    shares: Optional["ShareTokens"] = None,
+    share_base_url: str = "",
+):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -2219,14 +2542,177 @@ def make_handler(tel: Telemetry, db_path: Optional[str]):
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
 
-        def _body(self, ctype: str, payload: bytes):
-            self._headers(ctype)
+        def _body(self, ctype: str, payload: bytes,
+                  extra: Optional[Dict] = None):
+            self._headers(ctype, extra)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
+        def _json_body(self, obj, code: int = 200):
+            payload = json.dumps(obj).encode()
+
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        # -- sharing ------------------------------------------------
+
+        def _cookie(self, name: str) -> Optional[str]:
+            raw = self.headers.get("Cookie") or ""
+
+            for part in raw.split(";"):
+                key, _, value = part.strip().partition("=")
+
+                if key == name:
+                    return value
+
+            return None
+
+        def _base_url(self) -> str:
+            """Public origin to build a share link against."""
+            if share_base_url:
+                return share_base_url.rstrip("/")
+
+            #
+            # Behind the server's nginx these carry the public name; on the
+            # LAN they are simply the Host we were reached on. Only ever
+            # used to render a link for the owner, never to authorise.
+            #
+            proto = self.headers.get("X-Forwarded-Proto") or "http"
+            host = (self.headers.get("X-Forwarded-Host")
+                    or self.headers.get("Host") or "localhost")
+
+            return "%s://%s" % (proto, host.split(",")[0].strip())
+
+        def _share_url(self, token: str) -> str:
+            return "%s%s/?t=%s" % (self._base_url(), SHARE_PREFIX, token)
+
+        def _serve_share(self, path: str, query: Dict) -> None:
+            """The public, token-gated surface. Read-only and live-only."""
+            if shares is None:
+                self.send_error(404)
+                return
+
+            sub_path = path[len(SHARE_PREFIX):] or "/"
+
+            if sub_path != "/" and sub_path.endswith("/"):
+                sub_path = sub_path.rstrip("/") or "/"
+
+            token = (query.get("t", [None])[0]) or self._cookie(SHARE_COOKIE)
+
+            if not shares.validate(token):
+                #
+                # One message for "no token", "wrong token" and "expired":
+                # a viewer learns nothing about which it was.
+                #
+                self._body(
+                    "text/html; charset=utf-8",
+                    SHARE_DENIED_PAGE.encode(),
+                    {"Set-Cookie": "%s=; Path=%s; Max-Age=0" % (SHARE_COOKIE, SHARE_PREFIX)},
+                )
+                return
+
+            if sub_path not in SHARE_ALLOWED:
+                self.send_error(404)
+                return
+
+            if sub_path == "/":
+                secure = "; Secure" if (
+                    self.headers.get("X-Forwarded-Proto") == "https"
+                ) else ""
+                #
+                # The cookie dies with the token it carries, so a viewer's
+                # browser stops replaying a link that is already dead.
+                #
+                cookie = "%s=%s; Path=%s; Max-Age=%d; SameSite=Lax; HttpOnly%s" % (
+                    SHARE_COOKIE, token, SHARE_PREFIX,
+                    int(shares.remaining(token)) + 1, secure,
+                )
+
+                self._body("text/html; charset=utf-8",
+                           SHARE_PAGE.encode(), {"Set-Cookie": cookie})
+                return
+
+            if sub_path == "/api/meta":
+                with tel.lock:
+                    payload = json.dumps({
+                        "meta": tel.meta, "meta_version": tel.meta_version
+                    }).encode()
+
+                self._body("application/json", payload)
+                return
+
+            if sub_path == "/api/snapshot":
+                self._body("application/json",
+                           json.dumps(share_snapshot(tel.get())).encode())
+                return
+
+            if sub_path == "/api/stream":
+                self._stream(share_snapshot)
+                return
+
+            self.send_error(404)
+
+        def _stream(self, shape) -> None:
+            """SSE loop. `shape` filters each snapshot before it goes out."""
+            self._headers("text/event-stream", {"Connection": "close"})
+            self.close_connection = True
+            self.end_headers()
+
+            seen = -1
+
+            try:
+                while True:
+                    seen, snap = tel.wait(seen, timeout=2.0)
+                    msg = "data: " + json.dumps(shape(snap)) + "\n\n"
+                    self.wfile.write(msg.encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
         def do_GET(self):
-            path = self.path.split("?")[0]
+            raw = self.path
+            path = raw.split("?")[0]
+            query = urllib.parse.parse_qs(
+                raw.split("?")[1] if "?" in raw else ""
+            )
+
+            #
+            # The share surface is matched FIRST and handled entirely
+            # inside _serve_share, so no owner-only endpoint below can be
+            # reached with a share token no matter what the path looks
+            # like.
+            #
+            if path == SHARE_PREFIX or path.startswith(SHARE_PREFIX + "/"):
+                self._serve_share(path, query)
+                return
+
+            if path == "/api/share":
+                if shares is None:
+                    self._json_body({"enabled": False, "links": []})
+                    return
+
+                self._json_body({
+                    "enabled": True,
+                    "ttl_choices": list(SHARE_TTL_CHOICES),
+                    "links": [
+                        {
+                            "token": e["token"],
+                            "url": self._share_url(e["token"]),
+                            "created": e["created"],
+                            "expires": e["expires"],
+                            "label": e["label"],
+                            "hits": e["hits"],
+                            "last_seen": e["last_seen"],
+                        }
+                        for e in shares.active()
+                    ],
+                })
+                return
 
             if path == "/":
                 self._body("text/html; charset=utf-8", PAGE.encode())
@@ -2322,24 +2808,84 @@ def make_handler(tel: Telemetry, db_path: Optional[str]):
                 return
 
             if path == "/api/stream":
-                self._headers("text/event-stream", {"Connection": "close"})
-                self.close_connection = True
-                self.end_headers()
-
-                seen = -1
-
-                try:
-                    while True:
-                        seen, snap = tel.wait(seen, timeout=2.0)
-                        msg = "data: " + json.dumps(public_snapshot(snap)) + "\n\n"
-                        self.wfile.write(msg.encode())
-                        self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pass
-
+                self._stream(public_snapshot)
                 return
 
             self.send_error(404)
+
+        def do_POST(self):
+            """
+            Owner-only: mint and revoke share links.
+
+            Unreachable from the share surface - do_GET dispatches /s/
+            before anything else and _serve_share serves only its
+            allowlist, and there is no POST handling under the prefix at
+            all. Through the server this sits behind the vhost's Basic
+            Auth; on the LAN it has the same exposure as the rest of the
+            dashboard, which has never had a login of its own.
+            """
+            path = self.path.split("?")[0]
+
+            if path.startswith(SHARE_PREFIX):
+                self.send_error(404)
+                return
+
+            if shares is None or path not in ("/api/share", "/api/share/revoke"):
+                self.send_error(404)
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+
+            raw = self.rfile.read(min(length, 4096)) if length > 0 else b"{}"
+
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                self._json_body({"error": "bad JSON body"}, 400)
+                return
+
+            if not isinstance(body, dict):
+                self._json_body({"error": "bad JSON body"}, 400)
+                return
+
+            if path == "/api/share/revoke":
+                if body.get("all"):
+                    self._json_body({"revoked": shares.revoke_all()})
+                    return
+
+                token = body.get("token")
+
+                if not isinstance(token, str) or not token:
+                    self._json_body({"error": "token required"}, 400)
+                    return
+
+                self._json_body({"revoked": 1 if shares.revoke(token) else 0})
+                return
+
+            #
+            # Mint. The TTL is clamped to the offered choices rather than
+            # trusted, so a hand-rolled POST cannot ask for a link that
+            # outlives the session by weeks.
+            #
+            try:
+                ttl = float(body.get("ttl") or SHARE_TTL_CHOICES[1])
+            except (TypeError, ValueError):
+                self._json_body({"error": "bad ttl"}, 400)
+                return
+
+            ttl = max(60.0, min(ttl, float(max(SHARE_TTL_CHOICES))))
+            entry = shares.mint(ttl, str(body.get("label") or ""))
+
+            self._json_body({
+                "token": entry["token"],
+                "url": self._share_url(entry["token"]),
+                "expires": entry["expires"],
+                "created": entry["created"],
+                "label": entry["label"],
+            })
 
     return Handler
 
@@ -2362,6 +2908,14 @@ def main() -> int:
                          "behind auth instead); use this if you expose the "
                          "dashboard without authentication. Storage is "
                          "unaffected - SQLite and the lake keep the full VIN.")
+    ap.add_argument("--no-share", action="store_true",
+                    help="disable temporary share links entirely (the /s/ "
+                         "prefix then 404s and no link can be minted)")
+    ap.add_argument("--share-base-url", default="",
+                    help="public origin used to build share links, e.g. "
+                         "https://f10.example.com. Defaults to the Host the "
+                         "request arrived on, which is right behind the "
+                         "server's reverse proxy.")
     ap.add_argument("--ecu", type=lambda s: int(s, 0), default=None,
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
@@ -2439,9 +2993,16 @@ def main() -> int:
     )
     worker.start()
 
+    shares = None if args.no_share else ShareTokens()
+
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(tel, None if args.no_db else args.db),
+        make_handler(
+            tel,
+            None if args.no_db else args.db,
+            shares,
+            args.share_base_url,
+        ),
     )
     server.daemon_threads = True
 
@@ -2451,6 +3012,12 @@ def main() -> int:
     print("BMW F10 live telemetry")
     print("=" * 60)
     print(f"[+] dashboard: http://{shown}:{args.port}/")
+    print(
+        "[+] sharing:   "
+        + ("disabled (--no-share)" if shares is None else
+           "on - 'share' chip mints a temporary read-only link at "
+           f"{args.share_base_url or '<this host>'}{SHARE_PREFIX}/")
+    )
     print(f"[+] logging:   {args.db if rec else 'disabled'}")
     print(
         f"[+] mappings:  {args.mappings} "
