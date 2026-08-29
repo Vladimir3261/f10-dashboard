@@ -158,6 +158,13 @@ def main():
     eth_ll = env.get("ETH_LINK_LOCAL", "169.254.10.10/16")
 
     try:
+        repo_branch = subprocess.run(
+            ["git", "-C", ROOT, "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.strip() or "master"
+    except Exception:
+        repo_branch = "master"
+
+    try:
         repo_url = subprocess.run(
             ["git", "-C", ROOT, "remote", "get-url", "origin"],
             check=True, capture_output=True, text=True).stdout.strip()
@@ -199,6 +206,7 @@ def main():
     script = TEMPLATE.format(
         hostname=hostname, pi_user=pi_user, repo_url=repo_url,
         repo_dir=repo_dir or f"/home/{pi_user}/f10-dashboard",
+        repo_branch=repo_branch,
         eth_ll=eth_ll, wifi_block=wifi_block,
         do_wifi=1 if nets else 0,
         pi_wg_ip=pi_wg_ip, wg_priv=priv, wg_srv_pub=srv_pub,
@@ -250,14 +258,15 @@ die()  {{ printf '\033[1;31m[pi-setup] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }}
 [[ $EUID -eq 0 ]] || die "run as root:  sudo ./pi-setup.sh"
 
 # ---------------------------------------------------------------- the repo
+BRANCH="{repo_branch}"
+asuser() {{ sudo -u "$PI_USER" git -C "$REPO_DIR" "$@"; }}
+
 if [[ -d "$REPO_DIR/.git" ]]; then
   log "repo already cloned at $REPO_DIR - skipping clone"
-  # Fast-forward only, and never fatal: a Pi with local edits or a detached
-  # checkout keeps working rather than aborting provisioning.
-  if sudo -u "$PI_USER" git -C "$REPO_DIR" pull --ff-only >/dev/null 2>&1; then
-    log "  updated to latest $(sudo -u "$PI_USER" git -C "$REPO_DIR" rev-parse --short HEAD)"
+  if asuser pull --ff-only 2>&1 | sed 's/^/  /'; then
+    log "  now at $(asuser rev-parse --short HEAD)"
   else
-    log "  could not fast-forward (local changes or offline) - using what is there"
+    log "  fast-forward failed (see above) - will recover below if needed"
   fi
 else
   [[ -n "$REPO_URL" ]] || die "no repo at $REPO_DIR and REPO_URL is empty"
@@ -266,7 +275,25 @@ else
   sudo -u "$PI_USER" git clone "$REPO_URL" "$REPO_DIR"
 fi
 
-[[ -d "$F10PI_DIR" ]] || die "$F10PI_DIR missing - wrong repo?"
+# A checkout that predates the current layout has no hardware/ directory, and
+# a failed fast-forward leaves it that way. Recover instead of dying: stash
+# anything local (recoverable with `git stash list`) and reset to the branch.
+if [[ ! -d "$F10PI_DIR" ]]; then
+  log "checkout is missing hardware/ - it predates the current layout"
+  log "  stashing any local changes, then resetting to origin/$BRANCH"
+  asuser stash push -u -m "pi-setup $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>&1 | sed 's/^/    /' || true
+  asuser fetch origin 2>&1 | sed 's/^/    /' || die "git fetch failed - is the Pi online?"
+  asuser checkout "$BRANCH" 2>&1 | sed 's/^/    /' || true
+  asuser reset --hard "origin/$BRANCH" 2>&1 | sed 's/^/    /' \
+    || die "could not reset to origin/$BRANCH"
+  log "  now at $(asuser rev-parse --short HEAD)"
+fi
+
+[[ -d "$F10PI_DIR" ]] || die "$F10PI_DIR still missing.
+  The checkout at $REPO_DIR does not contain hardware/raspberry-pi/f10pi.
+  Check it is this project and on the right branch:
+    git -C $REPO_DIR remote -v
+    git -C $REPO_DIR log --oneline -1"
 install -d -m 700 "$F10PI_DIR/config"
 
 # ------------------------------------------------------------ local.env
