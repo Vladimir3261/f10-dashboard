@@ -29,75 +29,155 @@ no gear. 0xFF at standstill is clamped out (valid 1..8).
 Still open: a clean P/R/N/D **selector** (not found yet - would need a
 0x18/0x63 DID scan). Reverse-gear encoding also uncaptured.
 
-## Ready to validate now — the new DPF/EGR candidate channels
+## DONE — the DPF/EGR channels are validated and live
 
-`mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml` (7 channels,
-built 2026-08-26, Stage 2) is source-backed but **not yet validated on
-the car**: DPF differential pressure (0x44F8), exhaust temp before DPF
-(0x44EF) and before catalyst (0x44F2), distance-since-regen (0x44BF,
-u32), successful-regen count (0x44B8), operating-mode status word
-(0x467E), EGR control deviation (0x487A).
+`mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml` carries
+`verification.status: verified` (40-min drive, 2026-08-26) and all 7
+channels ship in the runtime via `--extra-mappings`: DPF differential
+pressure (0x44F8), exhaust temp before DPF (0x44EF) and before catalyst
+(0x44F2), distance-since-regen (0x44BF), successful-regen count (0x44B8),
+operating-mode status word (0x467E), EGR control deviation (0x487A).
 
-    # one at a time, or --all
-    python3 tools/validate_candidate.py run \
-        mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml --all --step
+Two of them have since been exercised much harder than that first drive:
+0x467E was caught mid-regeneration on 2026-08-29 (see below), and 0x44B8
+/ 0x44BF were seen stepping and resetting across the same event. The two
+still not fully trusted are the **soot pair** (0x44BE / 0x44C1, see the
+contradiction below) and **EGR deviation** (0x487A, item 3).
 
-Plausibility to confirm: DPF ΔP a few to tens of hPa warm idle, rising
-with exhaust flow under load; exhaust temps climb under load (and spike
-during a regen); distance-since-regen increases monotonically; regen
-count a stable integer; EGR deviation near 0 % when the loop is happy.
-Promote each to `verified` on success, then add the file to the live
-`--extra-mappings` set. (The polling stagger fix, also Stage 2, is done.)
+## DONE — boost under real load (2026-08-29)
+
+Superseded experiment 1 below. Road drives on 2026-08-29 stretched every
+flow channel to the top of its range: boost act to 2712.9 hPa, rail to
+1746.6 bar (set 1128+), MAF to 205.4 g/s, MAF/cyl to 1268 mg/hub, turbine
+speed to 2122+ rpm, load to 100%. The scales hold under real demand.
+
+Also **superseded experiment 2**: the transmission channels are built,
+verified and running — gearbox oil temp, turbine speed and converter
+temp ship in `d72n47a0_gearbox.yaml`, and engaged gear comes from EGS
+`0x18` directly. No SG_FUNKTIONEN derivation needed.
+
+## DONE — a regeneration was captured live (2026-08-29)
+
+Experiment 4 below is **partly achieved**, and it produced the sharpest
+open question in the project.
+
+The operating-mode word `CoEOM_stOpModeAct` (0x467E) had only ever been
+seen regen-inactive. On 2026-08-29 it was observed in **three** states
+across the day:
+
+| session (UTC) | opmode | bits | regen bit 0x02 |
+|---|---|---|---|
+| 13:15–13:45 | 1048577 | `0x100001` | no |
+| **13:45–14:53** | **1310722** | **`0x140002`** | **ACTIVE** |
+| 15:27–15:48 | 1048577 | `0x100001` | no |
+
+Corroborated by two independent counters either side of it:
+`n47d_regen_count` 92 → **93**, and `n47d_dist_since_regen` reset from
+241.6 km to ~9 km. **The regen bit's meaning is now behaviourally
+confirmed, not just source-claimed** — the strongest evidence we have for
+0x467E. Note `0x40000` also appears only in the regen state and `0x1`
+only outside it; those two look regen-correlated and are worth pinning.
+
+### The contradiction to resolve: soot did not fall
+
+A completed regeneration burns soot out, so `n47d_soot_meas` (0x44BE) /
+`n47d_soot_model` (0x44C1) should have **dropped** across that boundary.
+They did the opposite:
+
+| | before | during regen | after |
+|---|---|---|---|
+| `soot_meas` | 7.34 → 7.90 g | 7.86 g | **8.35 → 8.65 g** |
+
+For scale, on 2026-08-25 the same channel read **0.09 g**. So it has gone
+0.09 → 8.65 g over four days *and through a regeneration*.
+
+- **Observed:** soot rose monotonically across a confirmed regen.
+- **Inference:** these channels are not "current soot load in the filter".
+- **Hypotheses (untested, in order of cheapness to test):** cumulative
+  soot produced since new, rather than currently stored; an ash estimate;
+  a wrong scale/offset in the candidate mapping; or a unit that is not
+  grams.
+- **Not claimed:** that the scale is wrong. One event is not a
+  validation, and the channel is still `candidate`.
+
+**This is an analysis task, not a drive task.** The 14:57–15:24 session
+that straddles the regen is in ClickHouse (its local DB was dropped).
+Query it first — `analysis/clickhouse/insights.sql` — and plot soot
+against opmode over that window before planning any new on-car work. If
+soot steps down *at any point* the "cumulative" hypothesis dies.
 
 ## Planned experiments, in priority order
 
-### 1. Boost under real load (a gentle drive)
+### 0. PRECONDITION — stop the session fragmenting
 
-Neutral revving builds little boost (no air demand), so today's sweep
-only nudged boost ~0.25 bar. A gentle pull in gear would build proper
-boost and stretch rail/MAF/boost across their full range.
+Every drive on 2026-08-29 split into 3–18 runs. `session_report` analyses
+one run at a time, so a fragmented drive cannot be summarised without
+stitching, and any condition-normalised baseline is built on partial
+segments. **Fix this before the next analysis-grade drive.**
 
-    python3 tools/validate_candidate.py sweep \
-        mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml \
-        n47.d72.dyn.4746 n47.d72.dyn.4841 n47.d72.dyn.47DD n47.d72.dyn.4232 \
-        --seconds 60
+Cause is traced: in `bmwdiag/mapping/execute.py`, `_run_generic`, the
+transport call sits outside the try/except that guards decoding, so a
+timeout or an `HsfzNack` against the *secondary* EGS at `0x18` tears down
+a healthy `0x12` link and starts a new run. The fix is an
+unroutable-target / transient-request exception at the
+`bmwdiag/protocol/` seam that `_run_generic` can catch per request —
+`bmwdiag` is dependency-free, so it cannot catch `live.py`'s `HsfzNack`
+directly. Mirror `ObdSession`'s existing 3-strikes retirement idiom.
 
-Only with a safe way to log (passenger, or a stationary dyno-style pull).
-Expect: boost well above ambient, rail toward 1400+ bar, MAF climbing
-with load. Confirms the scales at the top of their range.
+### 1. A genuine cold start (still never captured)
 
-### 2. Transmission channels received by the DDE
+The single most valuable *on-car* item, and still open after four
+sessions — every run so far has begun warm. Drive 7's run 3 opened at
+89 °C, which is why its report shows a nonsense "→80 °C in 0s".
 
-The D73 table (research records) shows the DDE *receives* gearbox values.
-Derive the d72n47a0 equivalents from the cached SG_FUNKTIONEN table
-(`local/research-cache/misc/d72n47a0.md`) — candidates to look up:
-current gear, turbine speed, gearbox oil temp, converter temp. Build a
-`d72n47a0_trans.yaml` candidate the same way `d72n47a0_flow.yaml` was
-built, then validate. Cross-check gear against actual selected gear;
-gearbox oil temp against a plausible warm value. (Also compare with
-direct EGS `0x18` DIDs from `tools/egs.py scan --ecu 0x18` and the OBDb
-`DA2A/DA2E` claims — see `n47-conflicts.md`.)
+Requires: car stood **overnight**, `f10-dashboard` started *before*
+cranking, and run 1 kept unfragmented (see item 0).
 
-### 3. Cold-start temperature ramp (gold-standard temp check)
+Capture, in one unbroken run: `coolant` (OBD 0x05), `n47d_coolant`
+(461B), `n47d_oil_temp` (4517), `n47d_engine_temp` (4BC3),
+`n47d_charge_air_temp` (4843), plus `ambient` and `iat` for the starting
+reference.
 
-The car has always been warm, so the temperature *scales* were confirmed
-against OBD but never watched ramp from ambient. On a cold start:
+Expect coolant and oil to climb from ambient toward ~90 °C with oil
+lagging coolant throughout. A clean ramp tracking OBD PID 0x05 the whole
+way is the strongest temperature validation available, and it is the
+last unproven part of the temperature scales.
 
-    python3 tools/validate_candidate.py sweep \
-        mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml \
-        n47.d72.dyn.461B --seconds 300
-    # (and 4517 oil, 4BC3 engine temp, 4843 charge-air — one at a time or --all)
+### 2. DPF ΔP vs exhaust flow — the first real baseline
 
-Expect coolant/oil to rise from ambient toward ~90 °C; oil should lag
-coolant. A clean ramp that matches OBD PID 0x05 the whole way is the
-strongest possible temperature validation.
+The project's headline goal is condition-normalised baselines, and DPF
+restriction is the best-defined one. Drive 7 saw ΔP span 0.96–86.0 hPa,
+but scattered across whatever load happened to occur.
 
-### 4. DPF under a regeneration event (opportunistic)
+What is needed instead is **steady-state load points held long enough to
+average**: roughly 60–90 s each at a constant speed/gear, at 3–4
+different loads (e.g. 50, 80, 100, 120 km/h in top gear on a level road),
+so ΔP can be plotted against MAF rather than against time. Repeat the
+same points on later drives and the curve becomes a trend.
 
-Today soot read 0.09/0.10 g (clean). If a regen ever happens during a
-session, sweeping `44BE`/`44C1` (measured/modelled soot) plus the
-differential-pressure and exhaust-temp channels would show the DPF
-working — measured soot dropping as it burns off.
+This is what turns "DPF ΔP has crept from 24–27 to 35 mbar" from an
+anecdote into a measurement. Note the regen just reset the filter's
+state, so **now is an ideal moment to start the clean-filter baseline.**
+
+### 3. Channels that look wrong or unexercised
+
+- **`n47d_egr_deviation` (0x487A)** read a flat 0.0 % for the whole of
+  drive 7 (103,701 samples), yet read 13.65 % earlier the same day at
+  warm idle. Confirm it actually varies under load rather than being
+  pinned by our decode.
+- **`lambda`** sits at exactly 2.0 for 5,773 of 7,797 samples — the
+  "no value" sentinel. Either find the DDE's real lambda DID or mark the
+  OBD channel unusable so it stops polluting reports.
+- **`egs_da2e_b0`** is still constant 0. Retire it or explain it.
+- **P/R/N/D selector and reverse encoding** remain unfound (needs a
+  `0x18`/`0x63` DID scan).
+
+### 4. Superseded / historical
+
+The original experiments 1 and 2 (boost under load, transmission
+channels) are done — see the DONE sections above. Experiment 3
+(cold-start ramp) is now item 1. Experiment 4 (DPF under regeneration)
+is partly done and its follow-up is the soot analysis above.
 
 ## Not blocked on the car
 
