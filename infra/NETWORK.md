@@ -165,18 +165,48 @@ end by design. Use the hostnames.
 
 ---
 
-## Raspberry Pi ↔ server
+## The WireGuard tunnel
 
-The Pi has **no public address and no inbound ports**. Every connection is
-opened *by the Pi, outbound*, which is what makes it work behind CGNAT, a
-phone hotspot, or in-car LTE.
+**Its main job is SSH access to the Raspberry Pi.** The Pi lives in the car
+behind CGNAT or a phone hotspot: no public address, no inbound ports, and
+almost never on the same LAN as your laptop. The VPS is the one machine with
+a stable public address, so both the Pi and your laptop dial *out* to it, and
+the server relays between them. Telemetry ingest happens to use the same
+tunnel, which is a bonus rather than the reason it exists.
+
+```
+   LAPTOP  10.77.0.20 ──┐                    ┌── 10.77.0.10  RASPBERRY PI
+   (anywhere)           │                    │   (in the car, NATed)
+                        ▼                    ▼
+                 ┌──────────────────────────────┐
+                 │   VPS  wg0 10.77.0.1         │   both sides dial OUT;
+                 │   ListenPort 51820/udp       │   the server relays
+                 │   ip_forward + FORWARD rules │
+                 └──────────────────────────────┘
+
+   ssh f10@10.77.0.10        # laptop → Pi, from any network
+```
+
+**Your laptop must be a peer too.** This is the step people miss: adding only
+the Pi gives you a tunnel with nothing to connect *from*. Add both in
+`ansible/group_vars/all.yml` (`wireguard_peers`) and re-run `make deploy`.
+
+**On each client set `AllowedIPs = 10.77.0.0/24`** — the whole VPN subnet, not
+just the server's `/32`. With only the server's address routed, packets to
+another peer never enter the tunnel. On the server each peer is pinned to its
+own `/32`; forwarding between peers is already enabled (`ip_forward=1` plus
+the `FORWARD` rules in `wg0.conf`).
 
 | Flow | Path | Notes |
 |---|---|---|
-| Tunnel establishment | Pi → `<DROPLET_IP>:51820/udp` | `PersistentKeepalive = 25` holds the NAT mapping open so the server can reach back |
+| **SSH to the Pi** | laptop `10.77.0.20` → VPS → Pi `10.77.0.10:22` | **the point of the tunnel**; works from any network |
+| Tunnel establishment | each peer → `<DROPLET_IP>:51820/udp` | `PersistentKeepalive = 25` holds the NAT mapping open so the server can reach back |
 | Telemetry upload | Pi → `10.77.0.1:8090` over `wg0` | bearer token; never crosses the public internet in the clear |
-| Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | only in Case B |
-| Admin SSH to the Pi | laptop → `10.77.0.10:22` over `wg0` | requires your laptop to be a WireGuard peer too |
+| Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | Case B only; the public path, no VPN needed on the phone |
+
+Note the asymmetry: **viewing the dashboard needs no VPN** (nginx proxies it
+over the tunnel on your behalf), whereas **SSH does** — there is no public SSH
+path to the Pi, by design.
 
 The Pi's own interfaces stay strictly separated — `wlan0` is the only default
 route, and `eth0` is a link-local island for the BMW ENET cable with no

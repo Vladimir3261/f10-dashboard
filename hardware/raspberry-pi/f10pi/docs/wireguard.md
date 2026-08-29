@@ -1,8 +1,25 @@
 # WireGuard management VPN (wg0)
 
-A private tunnel between the Pi and the telemetry server, used for admin
-(SSH) and for the sync agent to reach ClickHouse/ingest without ever
-crossing the public Internet in cleartext.
+**The reason this tunnel exists: SSH access to the Pi from anywhere.** The Pi
+sits in the car behind CGNAT or a phone hotspot — no public address, no
+inbound ports, and hardly ever on the same LAN as your laptop. The server is
+the one machine with a stable public address, so the Pi and your laptop both
+dial *out* to it and the server relays between them:
+
+```
+  laptop 10.77.0.20  ──►  VPS 10.77.0.1  ◄──  Pi 10.77.0.10
+                          (relays)
+
+  ssh f10@10.77.0.10        # from any network, no port forwarding
+```
+
+The sync agent also reaches ingest over this tunnel, so the bearer token and
+telemetry never cross the public Internet in cleartext — useful, but
+secondary to remote access.
+
+> **Your laptop must be a peer too.** Adding only the Pi leaves you with a
+> tunnel and nothing to connect from. Add both to `wireguard_peers` in
+> `infra/ansible/group_vars/all.yml`, then `make deploy`.
 
 ## Why WireGuard here
 
@@ -10,7 +27,7 @@ crossing the public Internet in cleartext.
   outward to the server's public endpoint, so the Pi needs no inbound
   port and no public IP — essential in a moving car on mobile data.
 - **`PersistentKeepalive = 25`** keeps the NAT mapping alive so the server
-  can reach back to the Pi (for the reverse dashboard tunnel, admin, etc.)
+  can reach back to the Pi (SSH in, and the dashboard proxy)
   even when the Pi is idle.
 - **The private management IP is the only address used in docs.** All
   committed docs refer to the server as `<WG_SERVER_IP>` (e.g. the
