@@ -92,6 +92,22 @@ def ssh(host, command):
     return result.stdout.strip()
 
 
+def server_ssh_pubkey(host):
+    """
+    The SERVER's own SSH public key, created on first use.
+
+    Needed so you can `ssh pi@pi` FROM the server. A ProxyJump from your
+    laptop authenticates end to end with your key and never needs this, but a
+    login originating on the server does - and without it the server has no
+    credential on the Pi at all.
+    """
+    ssh(host, "install -d -m 700 /root/.ssh")
+    ssh(host, "test -f /root/.ssh/id_ed25519 || "
+              "ssh-keygen -t ed25519 -N '' -C 'analytics-server' "
+              "-f /root/.ssh/id_ed25519 >/dev/null")
+    return ssh(host, "cat /root/.ssh/id_ed25519.pub")
+
+
 def server_keys(host, name):
     """
     Mint (once) and read back the Pi's keypair ON THE SERVER.
@@ -136,6 +152,9 @@ def main():
     host = f"{ssh_user}@{droplet_ip}"
 
     pi_wg_ip = env.get("PI_WG_IP", "10.77.0.10")
+    # Extra name for the Pi in the server's /etc/hosts, so `ssh pi@pi` works
+    # from the VPS. Set PI_HOST_ALIAS to change or clear it.
+    host_alias = os.environ.get("PI_HOST_ALIAS", env.get("PI_HOST_ALIAS", "pi"))
     ingest_token = env.get("INGEST_TOKEN", "")
     dash_port = env.get("PI_DASHBOARD_PORT", "8080")
     wg_server_ip = re.sub(r"/\d+$", "", env.get("WG_SERVER_IP", "10.77.0.1"))
@@ -183,6 +202,9 @@ def main():
     print(f"[gen] minting the Pi's WireGuard keypair on the server ...")
     priv, pub, srv_pub = server_keys(host, hostname)
     print(f"[gen] Pi public key {pub}")
+    srv_ssh_pub = server_ssh_pubkey(host)
+    print("[gen] server SSH key will be authorised on the Pi "
+          "(so `ssh pi@pi` works from the server)")
 
     # Persist the peer so `make deploy` keeps it in wg0.conf.
     with open(PEERS, "w", encoding="utf-8") as fh:
@@ -194,6 +216,7 @@ def main():
             f"  - name: {hostname}\n"
             f"    public_key: \"{pub}\"\n"
             f"    allowed_ips: \"{pi_wg_ip}/32\"\n"
+            f"    aliases: \"{host_alias}\"\n"
         )
     print(f"[gen] wrote {os.path.relpath(PEERS, ROOT)}")
 
@@ -218,6 +241,7 @@ def main():
         endpoint=f"{droplet_ip}:{wg_port}",
         wg_subnet=env.get("WG_SUBNET", "10.77.0.0/24"),
         wg_server_ip=wg_server_ip, ingest_token=ingest_token,
+        srv_ssh_pub=srv_ssh_pub,
         dash_port=dash_port,
     )
 
@@ -366,6 +390,23 @@ AllowedIPs = {wg_subnet}
 PersistentKeepalive = 25
 WGCONF
 chmod 600 "$F10PI_DIR/config/wireguard.conf"
+
+# ------------------------------------- let the server SSH in to this Pi
+# Your laptop reaches the Pi with `ssh -J <server> pi@<vpn-ip>`, which
+# authenticates end to end with your own key. A login that ORIGINATES on the
+# server needs the server's key here, otherwise `ssh pi@pi` there is refused.
+SRV_KEY='{srv_ssh_pub}'
+PI_HOME="$(getent passwd "$PI_USER" | cut -d: -f6)"
+install -d -m 700 -o "$PI_USER" -g "$PI_USER" "$PI_HOME/.ssh"
+touch "$PI_HOME/.ssh/authorized_keys"
+if grep -qF "$SRV_KEY" "$PI_HOME/.ssh/authorized_keys"; then
+  log "server SSH key already authorised"
+else
+  log "authorising the server's SSH key"
+  printf '%s\n' "$SRV_KEY" >> "$PI_HOME/.ssh/authorized_keys"
+fi
+chown "$PI_USER:$PI_USER" "$PI_HOME/.ssh/authorized_keys"
+chmod 600 "$PI_HOME/.ssh/authorized_keys"
 
 # ------------------------------------------------------- sync agent config
 log "writing infra/sync/config.json"

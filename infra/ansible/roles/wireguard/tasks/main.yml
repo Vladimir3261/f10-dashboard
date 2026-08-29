@@ -50,6 +50,19 @@
     enabled: true
     state: started
 
+# Name the peers in /etc/hosts so you can `ssh pi@pi` from the server
+# instead of remembering tunnel addresses. Managed as one marked block, so
+# peers that go away are removed rather than accumulating.
+- name: Name the WireGuard peers in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED: wireguard peers"
+    block: |
+      {% for peer in wireguard_peers | default([]) %}
+      {{ peer.allowed_ips | regex_replace('/.*$', '') }} {{ peer.name }}{{ (' ' + peer.aliases) if peer.aliases is defined else '' }}
+      {% endfor %}
+    state: "{{ 'present' if (wireguard_peers | default([]) | length > 0) else 'absent' }}"
+
 - name: Show the server public key (give this to peers)
   ansible.builtin.debug:
     msg: >-
