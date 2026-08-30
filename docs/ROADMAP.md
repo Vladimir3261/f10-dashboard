@@ -235,9 +235,9 @@ Each stage is small enough to validate on the car before the next.
 - **Risks:** modest storage overhead; defining sentinels per channel.
 - **NOT yet:** automatic anomaly flags (that's Stage 6).
 
-#### TECH DEBT — the host clock can rewrite the timeline (open)
+#### TECH DEBT — the host clock can rewrite the timeline (FIXED 2026-08-30)
 
-**Raised 2026-08-29 (drive 8). Not fixed; deliberately deferred.**
+**Raised 2026-08-29 (drive 8). Fixed 2026-08-30.**
 
 The Pi has no RTC. On 2026-08-29 it booted with a stale clock, began
 recording immediately, and `systemd-timesyncd` corrected the clock
@@ -253,23 +253,41 @@ silently corrupts every rate, gradient and trend derived from the data,
 which is the entire premise of the long-term behavioural model. A drive
 that looks like a 76-minute idle never happened.
 
-Options, cheapest first:
+**What was done** — three defences, because no single one covers it:
 
-1. **Gate recording on clock sync.** Refuse to open a session until
-   `timedatectl show -p NTPSynchronized` reports yes, or hold samples in
-   memory until it does.
-2. **Stamp from a monotonic clock** plus one corrected epoch resolved at
-   sync time, so a mid-run correction cannot stretch the timeline.
-3. **Flag it instead of hiding it** — record NTP-sync state as a run-level
-   field so the lake can exclude pre-sync samples. Fits the Stage 1 quality
-   flag work directly.
-4. **Fit a hardware RTC.** The real fix for a host that is routinely
-   powered on while offline, and the only one that also fixes the session
-   *filename* being stamped from a bad clock.
+1. **Ordered after time sync.** `f10-dashboard.service` and
+   `f10-sync.service` gained `After=/Wants=time-sync.target`. `Wants`,
+   not `Requires`: a car parked out of range must still record.
+2. **A bounded wait, then honesty.** `live.py --wait-for-clock` (20 s by
+   default) gives NTP a chance before the first run opens; on expiry it
+   records anyway and says so. An unknown clock reads as NOT synced —
+   "probably fine" is the assumption that shipped the broken timeline.
+3. **A step ends the run.** `time.monotonic()` cannot jump, so the
+   difference between it and `time.time()` is constant unless the clock
+   is stepped. Past 2 s, the runtime closes the run and opens a new one,
+   so **no run ever spans a discontinuity** — the same invariant a mode
+   change preserves.
 
-Until this is done, treat any run whose timestamps predate its host's
-first NTP sync as suspect for anything time-derived. See
-`drive-sessions/20260829T183627Z-session/NOTES.md` for the worked example.
+**How to use it:** `sessions.clock_synced` (`1` / `0` / NULL for runs
+predating the flag). Anything time-derived must filter on it:
+
+```sql
+WHERE clock_synced = 1
+```
+
+Existing rows are deliberately NOT back-filled: a session recorded
+before the flag existed cannot be shown to have had a sane clock, and
+the 2026-08-29 session is proof at least one did not. That session stays
+suspect — see `drive-sessions/20260829T183627Z-session/NOTES.md`.
+
+**Not done: retro-correcting timestamps.** The offset is known, so the
+earlier rows *could* be shifted — but the sync agent ships continuously,
+the lake keys on `(vehicle, channel, ts, session)`, and a corrected `ts`
+would insert a duplicate rather than replace anything.
+
+**Still worth doing: fit a hardware RTC.** It is the only fix that also
+corrects the session *filename*, which is stamped from the clock at
+startup and so is still wrong on an offline boot.
 
 ### Stage 2 — Expand high-value DDE telemetry
 

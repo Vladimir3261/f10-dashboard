@@ -107,3 +107,6 @@ infra/ansible/group_vars/all/peers.yml
 
 # Generated one-shot Pi provisioning script (contains PSKs + WG private key).
 local/pi-setup.sh
+
+# The Pi admin panel holds its Basic-auth password.
+/hardware/raspberry-pi/admin/config.json

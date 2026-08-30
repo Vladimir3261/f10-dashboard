@@ -1,0 +1,23 @@
+# Privileges for the f10-admin panel. Installed to
+# /etc/sudoers.d/f10-admin by install.sh, which substitutes @PI_USER@.
+#
+# The panel runs as an unprivileged user. These are the only commands it
+# may run as root, named in full with no wildcards: a wildcard on
+# `systemctl` would let any unit be started or stopped, and `systemctl`
+# can start a unit that runs anything.
+#
+# Deliberately absent: `systemctl daemon-reload`, `systemctl enable`,
+# anything touching apt, and any shell. Changing what runs at boot is a
+# provisioning decision, not something a phone should do mid-drive.
+#
+# Validate before installing:  visudo -cf f10-admin.sudoers
+Defaults:@PI_USER@ !requiretty
+
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl restart f10-dashboard
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl start f10-dashboard
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl stop f10-dashboard
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl restart f10-sync
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl start f10-sync
+@PI_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl stop f10-sync
+@PI_USER@ ALL=(root) NOPASSWD: /sbin/reboot
+@PI_USER@ ALL=(root) NOPASSWD: /sbin/poweroff

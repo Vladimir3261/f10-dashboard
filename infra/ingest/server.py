@@ -172,6 +172,14 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_db": meta.get("db", ""),
             # "id@version,..." fingerprint of the mapping set for this run.
             "mappings": r.get("mappings") or "",
+            # Was the host clock NTP-disciplined when this run opened?
+            # The Pi has no RTC. NULL means the run predates the flag -
+            # never coerced to a guess, because "probably fine" is
+            # exactly the assumption that shipped a corrupted timeline.
+            "clock_synced": (
+                None if r.get("clock_synced") is None
+                else int(bool(r.get("clock_synced")))
+            ),
             # Drive mode: how hard the car was being polled, plain text.
             # A session has exactly one, because switching mode starts a
             # new run. WHICH revision of the mode table this name refers

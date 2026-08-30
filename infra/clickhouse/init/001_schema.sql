@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     -- not comparable, and without this column nothing would say so.
     -- Empty for sessions recorded before modes existed (2026-08-30).
     mode         LowCardinality(String) DEFAULT '',
+    -- Was the host clock NTP-disciplined when this session opened? The
+    -- Pi has no RTC, so a session started before the network returned
+    -- carries timestamps that are simply wrong - on 2026-08-29 one was
+    -- stretched by 76 minutes mid-run. NULL = recorded before this was
+    -- tracked. ANYTHING time-derived (rates, gradients, trends - which
+    -- is most of the point of this lake) must filter on it:
+    --     WHERE clock_synced = 1
+    clock_synced Nullable(UInt8),
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)

@@ -154,7 +154,19 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   the VPS `.env` (gitignored); the VPS IP + Grafana password are in the
   owner's notes, not git. `analysis/clickhouse/insights.sql` is the query
   battery.
-- 400 tests, no car / no network / no BMW data required.
+- **The Pi admin panel** (`hardware/raspberry-pi/admin/`): a phone-sized
+  page on `:8088` for what you would otherwise SSH in to do — health
+  (temp/throttle/disk/Wi-Fi/**clock**), service start/stop/restart, logs,
+  `git pull` (fast-forward only, pinned remote), reboot, and a clean
+  shutdown. Basic auth, LAN-only bind, sudoers allowlist. Its own systemd
+  unit, deliberately: it must survive `live.py` being broken.
+- **The host clock is handled** (fixed 2026-08-30). The Pi has no RTC and
+  once corrected itself 76.5 min mid-recording, corrupting a timeline.
+  Now: services wait on `time-sync.target`, `--wait-for-clock` gives NTP
+  a bounded chance, every run records `clock_synced`, and a mid-run step
+  ends the run so none spans a discontinuity. **Anything time-derived
+  must filter `sessions.clock_synced = 1`.**
+- 474 tests, no car / no network / no BMW data required.
 
 ## Repo map
 

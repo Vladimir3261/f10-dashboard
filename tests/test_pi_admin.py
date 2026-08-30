@@ -1,0 +1,557 @@
+"""
+The Pi admin panel.
+
+This is the most privileged surface in the repository: it can reboot the
+host and make it fetch and run new code. So most of what is tested here
+is what it REFUSES, and those tests matter more than the features.
+
+Runs against a real HTTP server on loopback. No Pi, no systemd, no
+network - every command the panel would run is replaced with a recorder,
+so a test can assert exactly what argv would have been executed without
+anything actually happening.
+"""
+
+import base64
+import json
+import os
+import sys
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+
+from tests import support  # noqa: F401
+
+sys.path.insert(
+    0, os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")
+)
+import server as admin                                   # noqa: E402
+
+
+USER, PASSWORD = "f10", "correct-horse-battery-staple"
+
+
+def auth_header(user=USER, password=PASSWORD):
+    raw = base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    return {"Authorization": "Basic " + raw}
+
+
+class FakeRun:
+    """Records argv instead of running it."""
+
+    def __init__(self, replies=None):
+        self.calls = []
+        self.replies = replies or {}
+
+    def __call__(self, argv, timeout=30.0):
+        self.calls.append(list(argv))
+
+        for key, value in self.replies.items():
+            if key in " ".join(argv):
+                return value
+
+        return 0, ""
+
+    def ran(self, *fragment):
+        joined = [" ".join(c) for c in self.calls]
+
+        return any(all(f in c for f in fragment) for c in joined)
+
+
+class AdminCase(unittest.TestCase):
+    config = {}
+
+    def setUp(self):
+        self.fake = FakeRun(getattr(self, "replies", None))
+        self._real_run = admin.run
+        admin.run = self.fake
+
+        cfg = dict(admin.DEFAULTS)
+        cfg.update({
+            "username": USER,
+            "password": PASSWORD,
+            "repo_dir": support.ROOT,
+            "git_remote": "git@example.invalid:owner/repo.git",
+            "services": ["f10-dashboard", "f10-sync"],
+            #: Unroutable, so a stray status call cannot hang on a real
+            #: socket if the test host happens to run something on 8091.
+            "sync_status_url": "http://127.0.0.1:9/nope",
+        })
+        cfg.update(self.config)
+        self.cfg = cfg
+
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), admin.make_handler(cfg)
+        )
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        #: serve_forever polls at 0.5s by default, and shutdown() waits
+        #: for the next poll - which made teardown, not the tests, most
+        #: of this module's runtime.
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self.thread.start()
+
+    def tearDown(self):
+        admin.run = self._real_run
+        self.server.shutdown()
+        self.server.server_close()
+
+    # -- helpers ----------------------------------------------------
+
+    def get(self, path, headers=None):
+        head = dict(headers if headers is not None else auth_header())
+        #: The server speaks HTTP/1.1, so without this each request
+        #: leaves a keep-alive socket that tearDown then waits on -
+        #: ~0.4s per test, which is most of the suite's runtime.
+        head["Connection"] = "close"
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", headers=head
+        )
+
+        return urllib.request.urlopen(request, timeout=5)
+
+    def post(self, action, body=None, headers=None, csrf=True):
+        head = dict(headers if headers is not None else auth_header())
+        head["Content-Type"] = "application/json"
+        head["Connection"] = "close"
+
+        if csrf:
+            head[admin.CSRF_HEADER] = "1"
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/action/{action}",
+            data=json.dumps(body or {}).encode(),
+            headers=head,
+            method="POST",
+        )
+
+        return urllib.request.urlopen(request, timeout=5)
+
+    def assert_status(self, code, call, *args, **kwargs):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            call(*args, **kwargs)
+
+        self.assertEqual(caught.exception.code, code)
+
+        #: 401 is text/plain (it is a browser-facing challenge); the
+        #: action errors are JSON. Tolerate both.
+        raw = caught.exception.read() or b"{}"
+
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {"error": raw.decode("utf-8", "replace")}
+
+
+class Authentication(AdminCase):
+    def test_no_credentials_is_401(self):
+        self.assert_status(401, self.get, "/", headers={})
+
+    def test_wrong_password_is_401(self):
+        self.assert_status(
+            401, self.get, "/", headers=auth_header(password="wrong")
+        )
+
+    def test_wrong_user_is_401(self):
+        self.assert_status(
+            401, self.get, "/", headers=auth_header(user="root")
+        )
+
+    def test_garbage_authorization_header_is_401_not_a_crash(self):
+        for header in ("Basic !!!!", "Basic", "Bearer abc", "Basic " + "A" * 9):
+            with self.subTest(header=header):
+                self.assert_status(
+                    401, self.get, "/", headers={"Authorization": header}
+                )
+
+    def test_correct_credentials_get_the_page(self):
+        body = self.get("/").read().decode()
+
+        self.assertIn("<title>F10 Pi</title>", body)
+
+    def test_the_401_offers_basic_so_a_browser_prompts(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/", headers={})
+
+        self.assertIn(
+            "Basic", caught.exception.headers.get("WWW-Authenticate", "")
+        )
+
+    def test_actions_need_credentials_too(self):
+        self.assert_status(
+            401, self.post, "reboot", {"confirm": True}, headers={}
+        )
+        self.assertEqual(self.fake.calls, [], "an action ran while unauthorised")
+
+    def test_health_check_needs_none_and_leaks_nothing(self):
+        """A watchdog should not have to hold the panel password."""
+        body = self.get("/healthz", headers={}).read().decode()
+
+        self.assertEqual(body.strip(), "ok")
+
+
+class UnconfiguredFailsClosed(AdminCase):
+    """A panel with no password must refuse everyone, not everyone in."""
+
+    config = {"username": "", "password": ""}
+
+    def test_no_credentials_configured_refuses_valid_looking_auth(self):
+        self.assert_status(401, self.get, "/")
+
+    def test_no_credentials_configured_refuses_empty_auth(self):
+        self.assert_status(
+            401, self.get, "/", headers=auth_header(user="", password="")
+        )
+
+
+class CsrfProtection(AdminCase):
+    """
+    Browsers attach cached Basic credentials automatically, so a page the
+    phone has open could otherwise POST here cross-origin.
+    """
+
+    def test_a_mutating_request_without_the_header_is_refused(self):
+        body = self.assert_status(
+            403, self.post, "reboot", {"confirm": True}, csrf=False
+        )
+
+        self.assertIn(admin.CSRF_HEADER, body["error"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_reading_status_does_not_need_it(self):
+        self.assertEqual(self.get("/api/status").status, 200)
+
+
+class Confirmation(AdminCase):
+    def test_destructive_actions_need_an_explicit_confirm(self):
+        for action in sorted(admin.DESTRUCTIVE):
+            with self.subTest(action=action):
+                self.assert_status(400, self.post, action, {})
+
+        self.assertEqual(
+            self.fake.calls, [], "something ran without confirmation"
+        )
+
+    def test_every_action_that_changes_the_host_is_marked_destructive(self):
+        """
+        A new action must be classified deliberately. `logs` is the only
+        read-only one; everything else restarts, reboots or runs code.
+        """
+        self.assertEqual(
+            set(admin.ACTIONS) - admin.DESTRUCTIVE, {"logs"}
+        )
+
+
+class UnitAllowlist(AdminCase):
+    """The request must never be able to name an arbitrary systemd unit."""
+
+    def test_restarting_an_unlisted_unit_is_refused(self):
+        body = self.assert_status(
+            409, self.post, "restart", {"unit": "ssh", "confirm": True}
+        )
+
+        self.assertIn("unknown unit", body["error"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_a_listed_unit_restarts(self):
+        self.post("restart", {"unit": "f10-dashboard", "confirm": True})
+
+        self.assertTrue(
+            self.fake.ran("sudo", "systemctl", "restart", "f10-dashboard")
+        )
+
+    def test_start_and_stop_are_the_only_verbs(self):
+        for verb in ("mask", "disable", "kill", ""):
+            with self.subTest(verb=verb):
+                self.assert_status(
+                    409, self.post, "service",
+                    {"unit": "f10-sync", "verb": verb, "confirm": True},
+                )
+
+        self.assertEqual(self.fake.calls, [])
+
+    def test_logs_are_restricted_to_listed_units_as_well(self):
+        self.assert_status(
+            409, self.post, "logs", {"unit": "sshd"}
+        )
+
+    def test_nothing_is_ever_run_through_a_shell(self):
+        """
+        Every command is a fixed argv list. If a value from the request
+        ever reached a shell string, this is where it would show.
+        """
+        self.post("restart", {"unit": "f10-dashboard", "confirm": True})
+        self.post("logs", {"unit": "f10-sync"})
+
+        for call in self.fake.calls:
+            self.assertIsInstance(call, list)
+
+            for part in call:
+                self.assertNotIn(";", part)
+                self.assertNotIn("&&", part)
+                self.assertNotIn("|", part)
+
+
+class GitRemoteIsPinned(AdminCase):
+    """
+    `pull` makes the Pi execute new code. The remote it pulls from is the
+    trust boundary, so it is verified on every pull rather than assumed.
+    """
+
+    replies = {
+        "remote get-url": (0, "git@example.invalid:owner/repo.git"),
+        "rev-parse --short": (0, "abc1234"),
+        "merge --ff-only": (0, "Fast-forward"),
+    }
+
+    def test_a_matching_remote_pulls(self):
+        body = json.loads(self.post("pull", {"confirm": True}).read())
+
+        self.assertTrue(body["ok"])
+        self.assertTrue(self.fake.ran("git", "fetch"))
+        self.assertTrue(self.fake.ran("merge", "--ff-only"))
+
+    def test_pull_does_not_restart_the_runtime_by_itself(self):
+        """
+        Two decisions, not one: you may want the code staged while the
+        current drive keeps recording.
+        """
+        self.post("pull", {"confirm": True})
+
+        self.assertFalse(self.fake.ran("systemctl", "restart"))
+
+    def test_it_only_fast_forwards(self):
+        """A diverged checkout is not something a phone should resolve."""
+        self.post("pull", {"confirm": True})
+
+        self.assertTrue(
+            any("--ff-only" in c for c in (" ".join(x) for x in self.fake.calls))
+        )
+        self.assertFalse(self.fake.ran("reset", "--hard"))
+        self.assertFalse(self.fake.ran("checkout"))
+
+
+class GitRemoteMismatch(AdminCase):
+    replies = {"remote get-url": (0, "git@evil.invalid:someone/else.git")}
+
+    def test_a_repointed_remote_refuses_to_pull(self):
+        body = self.assert_status(409, self.post, "pull", {"confirm": True})
+
+        self.assertIn("refusing to pull", body["error"])
+        self.assertFalse(self.fake.ran("git", "fetch"))
+        self.assertFalse(self.fake.ran("merge"))
+
+
+class GitRemoteUnset(AdminCase):
+    config = {"git_remote": ""}
+
+    def test_an_unpinned_panel_refuses_to_pull_at_all(self):
+        body = self.assert_status(409, self.post, "pull", {"confirm": True})
+
+        self.assertIn("not configured", body["error"])
+        self.assertFalse(self.fake.ran("git", "fetch"))
+
+
+class PowerActions(AdminCase):
+    def test_reboot_and_shutdown_use_absolute_paths_via_sudo(self):
+        """
+        Absolute paths, because the sudoers allowlist names them that way
+        and a relative name could resolve to something on PATH.
+        """
+        self.post("reboot", {"confirm": True})
+        self.post("shutdown", {"confirm": True})
+
+        self.assertTrue(self.fake.ran("sudo", "-n", "/sbin/reboot"))
+        self.assertTrue(self.fake.ran("sudo", "-n", "/sbin/poweroff"))
+
+    def test_sudo_never_prompts(self):
+        """
+        `-n` on every privileged call: a sudo waiting for a password on a
+        headless box hangs the request until it times out.
+        """
+        self.post("reboot", {"confirm": True})
+
+        for call in self.fake.calls:
+            if call and call[0] == "sudo":
+                self.assertEqual(call[1], "-n")
+
+
+class Status(AdminCase):
+    def test_status_reports_the_configured_services(self):
+        body = json.loads(self.get("/api/status").read())
+
+        self.assertEqual(
+            [s["unit"] for s in body["services"]],
+            ["f10-dashboard", "f10-sync"],
+        )
+
+    def test_status_survives_a_missing_sync_agent(self):
+        """The agent being down is normal, not an error."""
+        body = json.loads(self.get("/api/status").read())
+
+        self.assertFalse(body["sync"]["reachable"])
+
+    def test_status_does_not_hit_the_network_for_git(self):
+        """
+        A status poll runs every few seconds over a mobile link. Fetching
+        there would make the page cost data and stall.
+        """
+        self.get("/api/status")
+
+        self.assertFalse(self.fake.ran("git", "fetch"))
+
+    def test_unknown_paths_are_404(self):
+        self.assert_status(404, self.get, "/etc/passwd")
+        self.assert_status(404, self.post, "nonsense", {"confirm": True})
+
+
+class BindRefusesWildcard(unittest.TestCase):
+    """
+    The Pi joins hotspots and car-park APs. A wildcard bind would offer
+    reboot-and-run-code to everyone on the segment, so it is refused at
+    startup rather than warned about.
+    """
+
+    def _main(self, bind):
+        import io
+        import contextlib
+
+        cfg = os.path.join(support.ROOT, "hardware", "raspberry-pi",
+                           "admin", "config.example.json")
+        err = io.StringIO()
+
+        with contextlib.redirect_stderr(err):
+            code = admin.main(["--config", cfg, "--bind", bind])
+
+        return code, err.getvalue()
+
+    def test_wildcard_ipv4_is_refused(self):
+        code, err = self._main("0.0.0.0")
+
+        self.assertEqual(code, 2)
+        self.assertIn("refusing to bind", err)
+
+    def test_wildcard_ipv6_is_refused(self):
+        code, err = self._main("::")
+
+        self.assertEqual(code, 2)
+
+    def test_the_default_config_is_not_usable_as_shipped(self):
+        """
+        config.example.json must never be a working panel: it ships a
+        placeholder password, and a Pi that ran it unedited would be
+        protected by a password published on GitHub.
+        """
+        path = os.path.join(support.ROOT, "hardware", "raspberry-pi",
+                            "admin", "config.example.json")
+
+        with open(path, encoding="utf-8") as fh:
+            example = json.load(fh)
+
+        self.assertEqual(example["password"], "CHANGE-ME")
+        self.assertNotIn(example["bind"], ("0.0.0.0", "::"))
+
+
+class DeploymentFiles(unittest.TestCase):
+    ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")
+
+    def _read(self, name):
+        with open(os.path.join(self.ADMIN, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_config_is_gitignored(self):
+        """It holds the panel password."""
+        with open(os.path.join(support.ROOT, ".gitignore"),
+                  encoding="utf-8") as fh:
+            ignored = fh.read()
+
+        self.assertIn("hardware/raspberry-pi/admin/config.json", ignored)
+
+    def test_no_real_config_is_committed(self):
+        self.assertFalse(
+            os.path.exists(os.path.join(self.ADMIN, "config.json")),
+            "config.json holds a password and must not be in the repo",
+        )
+
+    def test_sudoers_has_no_wildcards(self):
+        """
+        A wildcard on systemctl would let any unit be started, and a unit
+        can run anything. Every command is named in full.
+        """
+        for line in self._read("f10-admin.sudoers").splitlines():
+            line = line.strip()
+
+            if not line.startswith("@PI_USER@"):
+                continue
+
+            command = line.split("NOPASSWD:", 1)[1].strip()
+
+            self.assertNotIn("*", command, line)
+            self.assertTrue(command.startswith("/"), line)
+
+    def test_sudoers_grants_only_the_commands_the_code_runs(self):
+        granted = {
+            line.split("NOPASSWD:", 1)[1].strip()
+            for line in self._read("f10-admin.sudoers").splitlines()
+            if line.strip().startswith("@PI_USER@") and "NOPASSWD:" in line
+        }
+
+        self.assertIn("/sbin/reboot", granted)
+        self.assertIn("/sbin/poweroff", granted)
+
+        #
+        # Nothing that changes what runs at boot, and no shell. Compared
+        # word by word: a substring check would match "sh" inside
+        # "systemctl" and pass or fail for the wrong reason.
+        #
+        forbidden = {
+            "daemon-reload", "enable", "disable", "mask", "apt", "apt-get",
+            "sh", "bash", "su", "chmod", "chown",
+        }
+
+        for command in granted:
+            words = command.replace("/", " ").split()
+
+            for word in words:
+                self.assertNotIn(word, forbidden, command)
+
+    def test_the_installer_validates_sudoers_before_installing_it(self):
+        """
+        An invalid file in /etc/sudoers.d breaks sudo entirely. On a
+        headless Pi in a car that means a reinstall, so `visudo -c` has
+        to run before `install`.
+        """
+        script = self._read("install.sh")
+        check = script.index("visudo -cf")
+        install = script.index("install -m 0440")
+
+        self.assertLess(check, install)
+
+    def test_the_admin_unit_is_independent_of_the_runtime(self):
+        """
+        It is what you reach for when the runtime is broken, so it must
+        not be ordered after it or bound to it.
+        """
+        #
+        # Directives only - the file's comments mention f10-dashboard,
+        # which is the point being explained rather than a dependency.
+        #
+        directives = [
+            line.strip() for line in self._read("f10-admin.service").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+        for line in directives:
+            if line.split("=")[0] in ("After", "Wants", "Requires",
+                                      "BindsTo", "PartOf", "Before"):
+                self.assertNotIn("f10-dashboard", line, line)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -6,6 +6,17 @@
 Description=F10 telemetry runtime + dashboard (run_car.sh)
 After=network-online.target
 Wants=network-online.target
+# The Pi has no RTC: it boots with whatever fake-hwclock saved at the
+# last shutdown. Starting before NTP has landed means recording against
+# a stale clock and having it corrected mid-drive - which on 2026-08-29
+# stretched a session's timeline by 76 minutes.
+#
+# `Wants`, not `Requires`: a car parked out of network range must still
+# record. The runtime waits briefly on its own (--wait-for-clock) and
+# labels every run with whether the clock was trustworthy, so a run
+# taken offline is honest rather than absent.
+After=time-sync.target
+Wants=time-sync.target
 
 [Service]
 Type=simple
