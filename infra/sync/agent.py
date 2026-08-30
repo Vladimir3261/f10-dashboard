@@ -186,9 +186,14 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
     try:
         # runs.mapping_set only exists post-versioning; fall back to ''.
         mset = "mapping_set" if _has_column(con, "runs", "mapping_set") else "''"
+        # runs.mode only exists post-drive-modes. A run recorded before
+        # they existed was implicitly the pre-v2 rates, which is what
+        # `debug` reproduces - but claiming that here would be inventing
+        # a fact, so an unknown mode stays empty.
+        mode = "mode" if _has_column(con, "runs", "mode") else "''"
         rows = con.execute(
-            f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, {mset} "
-            "FROM runs WHERE id >= ? ORDER BY id",
+            f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, "
+            f"{mset}, {mode} FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
     finally:
@@ -198,8 +203,10 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         {"_id": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, rid),
          "started": started, "ended": ended, "ecu": ecu or "",
-         "ecu_addr": ecu_addr, "gateway": gateway or "", "mappings": mset_val or ""}
-        for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val in rows
+         "ecu_addr": ecu_addr, "gateway": gateway or "",
+         "mappings": mset_val or "", "mode": mode_val or ""}
+        for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val, mode_val
+        in rows
     ]
 
 

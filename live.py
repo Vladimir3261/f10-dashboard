@@ -1696,6 +1696,18 @@ PAGE = r"""
   .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .dot.on { background: var(--good); } .dot.off { background: var(--bad); }
 
+  /* drive-mode picker: a native select so it works on a phone in the
+     car without any custom dropdown code */
+  #drivemode {
+    background: none; border: 0; color: var(--text); font: inherit;
+    font-weight: 600; cursor: pointer; padding: 0 0 0 4px;
+    -webkit-appearance: none; appearance: none;
+  }
+  #drivemode:focus { outline: 1px solid var(--accent); border-radius: 4px; }
+  #drivemode option { background: var(--surface2); color: var(--text); }
+  #drivemodechip.pending b, #drivemodechip.pending #drivemode { color: var(--warn); }
+  #drivemodechip.asleep { opacity: 0.55; }
+
   /* mode switch */
   .modes { display: flex; gap: 0; margin: 14px 0; border: 1px solid var(--line);
            border-radius: 10px; overflow: hidden; width: fit-content; }
@@ -1821,6 +1833,9 @@ PAGE = r"""
     <div class="chip"><b id="hz">0</b> Hz</div>
     <div class="chip"><b id="lat">0</b> ms</div>
     <div class="chip">logged <b id="rows">0</b></div>
+    <div class="chip" id="drivemodechip" title="how hard to poll the car">
+      mode <select id="drivemode"></select><b id="driveduty"></b>
+    </div>
     <div class="chip" id="syncchip" title="click to pause/resume sync"
          style="cursor:pointer">
       <span id="syncdot" class="dot off"></span>sync
@@ -2320,11 +2335,66 @@ el("syncchip").onclick = async () => {
 setInterval(pollSync, 3000);
 pollSync();
 
+/* ------------------------------------------------------- drive mode */
+/* How hard to poll the car. The picker POSTs a request; the poll loop
+   applies it between cycles, so the chip shows the REQUESTED mode in
+   amber until a snapshot comes back confirming it took effect. Without
+   that the control would look instant and lie whenever the link is down. */
+let modeWanted = null;
+async function loadModes() {
+  try {
+    const m = await (await fetch(API+"/api/modes", {cache: "no-store"})).json();
+    const sel = el("drivemode");
+    sel.innerHTML = "";
+    for (const mode of m.modes || []) {
+      const o = document.createElement("option");
+      o.value = mode.name;
+      o.textContent = mode.name;
+      o.title = mode.description || "";
+      sel.appendChild(o);
+    }
+    sel.value = m.current;
+    el("drivemodechip").title =
+      (m.modes || []).map(x => `${x.name} — ${x.description}`).join("\n");
+  } catch (e) {}
+}
+el("drivemode").onchange = async ev => {
+  const want = ev.target.value;
+  modeWanted = want;
+  el("drivemodechip").classList.add("pending");
+  try {
+    const r = await fetch(API+"/api/mode", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({mode: want}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) {
+    /* Put the picker back where it was: nothing changed on the car. */
+    modeWanted = null;
+    el("drivemodechip").classList.remove("pending");
+    loadModes();
+  }
+};
+function renderMode(s) {
+  if (SHARED || !s.mode) return;
+  const sel = el("drivemode");
+  if (modeWanted !== null && s.mode === modeWanted) modeWanted = null;
+  if (modeWanted === null) {
+    el("drivemodechip").classList.remove("pending");
+    if (document.activeElement !== sel) sel.value = s.mode;
+  }
+  const asleep = s.duty === "asleep";
+  el("drivemodechip").classList.toggle("asleep", asleep);
+  el("driveduty").textContent = asleep ? " · asleep" : "";
+}
+if (!SHARED) loadModes();
+
 const es = new EventSource(API+"/api/stream");
 es.onmessage = async e => {
   const s = JSON.parse(e.data);
   if (s.meta_version !== metaVersion) { await loadMeta(); if (MODE==="detail") await loadHistory(); }
   renderHead(s);
+  renderMode(s);
   if (s.connected && s.ts !== lastTs) { lastTs = s.ts; appendLive(s.ts, s.values||{}); }
 };
 es.onerror = () => { el("dot").className="dot off"; el("status").textContent="server unreachable"; };
@@ -2401,6 +2471,10 @@ if (!SHARED) {
 if (SHARED) {
   el("sharechip").style.display = "none";
   el("syncchip").style.display = "none";
+  //: A share viewer must not be able to change how the car is polled.
+  //: The POST is refused server-side for the /s/ surface regardless;
+  //: this keeps the control from appearing at all.
+  el("drivemodechip").style.display = "none";
   el("sharedbadge").style.display = "";
   const vinChip = el("vin").closest(".chip"); if (vinChip) vinChip.style.display = "none";
   const detail = document.querySelector('[data-mode="detail"]');

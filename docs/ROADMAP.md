@@ -144,49 +144,55 @@ Stage status against the plan below:
 | 3 — analytics | **unblocked, not started.** This is the next real work |
 | 5 — drift/anomaly | the goal; needs 1 and 3 |
 
-### Two findings that reorder the priorities
+### Findings that reordered the priorities
 
-**1. The soot decode is falsified — fix before building DPF analytics.**
-Drive 7 straddled a completed regeneration (`n47d_regen_count` 92 → 93,
-`n47d_dist_since_regen` reset to ~9 km — two independent counters agree, so
-the event is solid). A regeneration burns soot out, so `n47d_soot_meas`
-should have *dropped*. It rose ~0.5 g and kept rising.
+**1. The DPF is gone — DPF analytics are out of scope for this car.**
+*(Resolved 2026-08-30.)* The soot decode was falsified by a captured
+regeneration: `n47d_soot_meas` did not drop across it, never decreased in
+1404 points, and was a near-perfect straight line in distance. The reason is
+that **this vehicle's particulate filter was removed**, so the channel can
+only report the ECU's internal model. Full account in
+[`DPF_SOOT.md`](DPF_SOOT.md).
 
-This is the first real test of that candidate scale and it did not pass.
-`n47d_soot_meas` / `n47d_soot_model` may be cumulative-since-new, an ash
-estimate, or carry an offset the scale does not model. **Every DPF health
-conclusion depends on this channel**, so it is the highest-value open
-question in the project — and there is now a captured natural experiment to
-test hypotheses against.
+Consequences: `n47d_soot_meas`, `n47d_soot_model` and `n47d_dpf_dp` describe
+hardware that is not there and stay `candidate` permanently. **DPF ΔP vs
+exhaust flow is no longer the Stage-3 flagship** — see item 4 below. What
+survives is a real finding: the ECU still *commands* regenerations against
+its model (count 92 → 93), which costs fuel and is the classic oil-dilution
+path, on a car where they clean nothing.
 
 **2. Drives fragment into runs, which corrupts longitudinal analysis.**
-Drive 7 recorded as 4 runs, not 1. Cause is error handling, not the cable: in
-`bmwdiag/mapping/execute.py` the transport call sits outside the try/except
-that guards decoding, so one `TimeoutError` (or an `HsfzNack` from the EGS)
-tears down the whole HSFZ link instead of failing that one request. Cost is
-1.35% of wall time but 100% of analytical continuity — no drive can be
-summarised in one report without stitching. Cheap to fix, and it should be
-fixed *before* collecting much more data.
+*(Fixed 2026-08-30, commit `69d879f`.)* Drive 7 recorded as 4 runs, not 1.
+Cause was error handling, not the cable: in `bmwdiag/mapping/execute.py` the
+transport call sat outside the try/except that guards decoding, so one
+`TimeoutError` (or an `HsfzNack` from the EGS) tore down the whole HSFZ link
+instead of failing that one request. Per-request faults are now distinguished
+from link faults, with a consecutive-fault budget, and every fault is
+recorded to `telemetry.channel_errors`.
 
-### Open threads (2026-08-30)
-
-Raw notes captured in [`POLLING_AND_SAFETY.md`](POLLING_AND_SAFETY.md), to
-pick up next session: whether sustained polling can harm the car (the
-overnight battery test is the one that matters), dropping most channels to
-far longer intervals now that the census shows where the volume goes, and a
-switchable drive mode — off / debug / normal / long drive / duty-cycled
-sampling.
+**3. Polling was ~3× heavier than it needed to be.**
+*(Fixed 2026-08-30.)* Eleven OBD channels at 10 Hz were 83% of stored rows at
+0.1–3.8% distinct values. Rates now follow the physics of each channel, and a
+drive mode scales them at runtime. 7,740 → 2,735 requests/min in `normal`.
+See [`POLLING_AND_SAFETY.md`](POLLING_AND_SAFETY.md).
 
 ### Recommended order
 
-1. **Resolve the soot channel** (research + the captured regen event).
-   Nothing about DPF health is trustworthy until this is settled.
-2. **Fix the per-request teardown** in `execute.py` — small, and every later
-   analysis is cleaner for it. Close `sessions.ended` while there.
-3. **Stage 1 data quality** — populate `quality` (saturated / sentinel /
+1. **The overnight battery test** — the one remaining question about whether
+   sustained polling can harm the car. `off` mode makes it a clean
+   experiment: connected but silent isolates the cable from the polling.
+2. **Stage 1 data quality** — populate `quality` (saturated / sentinel /
    stale). The MAP-saturation case proves the need and gives a test.
-4. **Stage 3 analytics** — condition-normalized baselines, starting with
-   DPF ΔP vs exhaust flow, now that 1–3 make the inputs trustworthy.
+3. **Stage 3 analytics** — condition-normalized baselines. The inputs are
+   now trustworthy (fault rates recorded, mode recorded per session, mapping
+   version per sample).
+4. **Pick the new Stage-3 flagship.** DPF ΔP vs flow is void here. The
+   strongest replacements, all verified channels with real physics behind
+   them: **boost actual-vs-setpoint tracking** (turbo/VNT health),
+   **rail pressure actual-vs-setpoint** (injection system), **EGR control
+   deviation**, and **warm-up thermal behaviour** (coolant/oil vs ambient
+   and load). Boost tracking is the natural first: two channels, both
+   verified, and a deviation that is directly interpretable.
 
 ## 3. The roadmap (staged, testable against the real car)
 
@@ -349,17 +355,27 @@ first NTP sync as suspect for anything time-derived. See
 
 ## 4. Quick-win analytics from data you already have
 
-Before any model work, from the idle + sweep captures already recorded:
-warm-up curve shape, boost actual−requested and rail actual−setpoint
-deviation, and DPF measured−modelled soot agreement. These need only a
-read-only pandas script and give immediate, honest signal — a good Stage
-3 warm-up and a way to prove the analytics approach before investing in
-the data-model migration.
+Before any model work, from the captures already recorded: warm-up curve
+shape, boost actual−requested, rail actual−setpoint deviation, and EGR
+control deviation. These need only a read-only script and give immediate,
+honest signal — a good Stage 3 warm-up and a way to prove the analytics
+approach before investing in the data-model migration.
+
+*(DPF measured−modelled soot agreement was on this list. It is void: the
+filter was removed, so both values are the same model and their agreement
+means nothing. See [`DPF_SOOT.md`](DPF_SOOT.md).)*
 
 ## 5. Highest-diagnostic-value signals to add next
 
-In rough priority for an N47 diesel: **DPF differential pressure**,
-**exhaust temp pre/post DPF**, **regeneration distance + count + state**,
-**EGR actual vs requested**, **injector correction quantities**, then
-**gearbox oil temp / converter slip** and **tank sensors**. Each ties to
-a known wear/failure mode and to a baseline worth trending.
+In rough priority **for this car**: **injector correction quantities**,
+**EGR actual vs requested**, **boost / rail actual vs setpoint**,
+**regeneration distance + count + state**, then **gearbox oil temp /
+converter slip** and **tank sensors**. Each ties to a known wear/failure
+mode and to a baseline worth trending.
+
+The generic N47 priority would put **DPF differential pressure** and
+**exhaust temp pre/post DPF** at the top. They are demoted here for a
+vehicle-specific reason: the filter was removed, so those channels carry
+no information about this car. Regeneration state stays on the list —
+not as filter health, but because the ECU still runs regens against its
+model, and their frequency is a real fuel and oil-dilution cost.

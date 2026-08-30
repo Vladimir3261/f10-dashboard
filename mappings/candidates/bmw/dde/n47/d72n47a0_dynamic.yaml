@@ -146,22 +146,29 @@ requests:
         # A physical soot load would depend on load, temperature and exhaust
         # flow, not on distance alone.
         #
-        # The scale may well be right: the values are plausible grams and
-        # were cross-checked at idle. It is the MEANING that is wrong.
-        # Cumulative-since-adaptation-reset, an ash estimate, or a
-        # distance-driven model are all still open. The single warm-idle
-        # reading that earned this `verified` could not have distinguished
-        # them; only straddling a regeneration could, and it failed.
+        # RESOLVED 2026-08-30: THIS VEHICLE HAS NO PARTICULATE FILTER.
+        # It was removed. Every observation above follows from that - with
+        # no filter there is nothing to burn out at a regeneration and no
+        # measurable dP to correct an estimate against, so this channel can
+        # only ever report the ECU's internal, distance-driven model.
         #
-        # Do not build DPF health conclusions on this channel until a second
-        # regeneration is observed or the SGBD definition is found.
+        # The scale may well be right; the MEANING cannot be recovered on
+        # this car, because the physical quantity it names is absent. This
+        # stays `candidate` permanently. Do not promote it, and do not
+        # re-run the "correlate against n47d_dpf_dp" test - dP across a
+        # removed filter measures nothing either.
+        #
+        # What DID survive: n47d_regen_count still increments (92 -> 93),
+        # so the ECU commands regenerations against its model. That costs
+        # fuel and is the classic oil-dilution path. See docs/DPF_SOOT.md.
         #
         verification:
           status: candidate
           method: >
-            Decodes to a plausible value, but its first real test failed: it
-            did not drop across a confirmed regeneration, and never decreases
-            at all. Meaning unresolved - see docs/DPF_SOOT.md.
+            Permanently unresolvable on F10-520d-dev: the particulate
+            filter was removed, so this reports the ECU's internal model
+            and not filter state. It did not drop across a confirmed
+            regeneration and never decreases. See docs/DPF_SOOT.md.
 
   # -- DPF soot, simulated (IMPAS 0x44C1) ----------------------------
   # 15.5 g was the SOURCE vehicle (F25); on F10-520d-dev this read
@@ -180,18 +187,23 @@ requests:
         display: {digits: 2, min: 0, max: 80}
         decode: {type: uint16_be, scale: 0.01, round: 2}
         #
-        # Same finding as n47d_soot_meas, plus a second oddity: the two track
-        # each other to within ~0.01 g despite carrying scales that differ by
-        # a factor of 1.53. Either they read the same underlying quantity and
-        # one scale is wrong, or the raw registers happen to differ by
-        # exactly the inverse ratio. Unresolved.
+        # Same finding as n47d_soot_meas: no filter on this vehicle, so
+        # this is a model with nothing to model.
+        #
+        # It also explains the oddity that the two track each other to
+        # within ~0.01 g despite scales differing by a factor of 1.53:
+        # with no real measurement available, "measured" almost certainly
+        # falls back to the modelled value. They agree because they are
+        # the same estimate - so their agreement was never the independent
+        # corroboration the original verification took it for.
         #
         verification:
           status: candidate
           method: >
-            Tracks n47d_soot_meas to ~0.01 g despite a 1.53x scale
-            difference, and did not drop across a confirmed regeneration.
-            Meaning unresolved - see docs/DPF_SOOT.md.
+            Permanently unresolvable on F10-520d-dev: no particulate
+            filter fitted. Tracks n47d_soot_meas to ~0.01 g despite a
+            1.53x scale difference (likely the same estimate), and did not
+            drop across a confirmed regeneration. See docs/DPF_SOOT.md.
 
   # -- engine temperature (ITMOT 0x4BC3) ------------------------------
   #
