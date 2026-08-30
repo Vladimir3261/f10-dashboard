@@ -63,6 +63,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+#
+# `systemctl --user` and tmux both need to find this user's runtime
+# directory. A System service started with User= does not inherit it the
+# way a login shell would, so set it if the environment lacks it -
+# otherwise every user-scope call fails with "Failed to connect to bus".
+#
+os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+
 #: Sent by the page on every mutating request. Its only job is to be a
 #: header a cross-origin form post cannot set. See the note above.
 CSRF_HEADER = "X-F10-Admin"
@@ -96,6 +104,20 @@ DEFAULTS: Dict[str, Any] = {
     "log_lines": 200,
     #: How far back "is it recording?" looks, in seconds.
     "recording_window_s": 60,
+    #
+    # The optional Claude Code session (hardware/raspberry-pi/f10pi/
+    # docs/claude-code.md). A systemd USER service, so no sudo is
+    # involved - the panel already runs as that user. Set
+    # claude_enabled false, or leave the unit absent, and the tab hides
+    # itself.
+    #
+    "claude_enabled": True,
+    "claude_unit": "claude-tmux",
+    "claude_tmux_session": "claude",
+    #: Lines of the tmux pane to show. This is the ONLY place a login
+    #: prompt or a crash-loop error appears - the doc's point that
+    #: `tmux list-panes` reports bash and the journal stays empty.
+    "claude_pane_lines": 40,
 }
 
 
@@ -469,6 +491,79 @@ def read_session_files(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def read_claude(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    The optional coding agent living on the Pi.
+
+    Status and lifecycle only. Deliberately NOT a terminal and not a way
+    to send it prompts: that would put an interactive shell behind an
+    HTTP form on the box that holds the WireGuard key and sits on the
+    diagnostic link to the car. SSH is the smaller surface and already
+    exists.
+
+    The one thing worth surfacing is the failure mode the setup doc
+    calls out as invisible: the unit reports active because the `while`
+    loop is alive, while the agent inside it crash-loops every five
+    seconds - usually lost authentication - and the error goes to the
+    tmux pane rather than the journal. `agent_running` separates those.
+    """
+    if not cfg.get("claude_enabled", True):
+        return None
+
+    unit = cfg["claude_unit"]
+    session = cfg["claude_tmux_session"]
+
+    #
+    # Does the unit exist at all? `cat` is the direct question - it
+    # fails only when there is no such unit. The feature is optional, so
+    # its absence is not an error: the tab simply hides itself on a box
+    # that never installed it, and on anything without systemd.
+    #
+    exists, _ = run(["systemctl", "--user", "cat", unit], timeout=5.0)
+
+    if exists != 0:
+        return None
+
+    code, state = run(["systemctl", "--user", "is-active", unit], timeout=5.0)
+    active = code == 0
+
+    #: The agent process itself, not the loop that restarts it.
+    agent_code, _ = run(["pgrep", "-f", "claude --continue"], timeout=5.0)
+    agent_running = agent_code == 0
+
+    has_session, _ = run(
+        ["tmux", "has-session", "-t", session], timeout=5.0
+    )
+
+    pane = ""
+
+    if has_session == 0:
+        _, pane = run([
+            "tmux", "capture-pane", "-p", "-t", session,
+            "-S", f"-{int(cfg['claude_pane_lines'])}",
+        ], timeout=5.0)
+
+    return {
+        "unit": unit,
+        "active": active,
+        "state": state or "unknown",
+        "since": first_line([
+            "systemctl", "--user", "show", unit,
+            "--property=ActiveEnterTimestamp", "--value",
+        ]),
+        "tmux_session": session,
+        "tmux_alive": has_session == 0,
+        "agent_running": agent_running,
+        #: active loop + no agent = crash-looping. The doc's warning,
+        #: made visible.
+        "crash_looping": active and not agent_running,
+        #: Remote Control announces itself under the hostname unless
+        #: told otherwise - this is what to look for in the phone app.
+        "remote_name": socket.gethostname(),
+        "pane": pane,
+    }
+
+
 def read_service(unit: str) -> Dict[str, Any]:
     code, state = run(
         ["systemctl", "is-active", unit], timeout=5.0
@@ -552,6 +647,7 @@ def status(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "clock": read_clock(),
         "wifi": read_wifi(),
         "disk": read_disk(repo),
+        "claude": read_claude(cfg),
         "recording": read_recording(cfg),
         "sessions": read_session_files(cfg),
         "services": [read_service(u) for u in cfg["services"]],
@@ -636,6 +732,37 @@ def action_sync(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
         raise ActionError(f"sync agent did not answer: {exc}")
 
     return {"sync": verb}
+
+
+def action_claude(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Start, stop or restart the agent's session.
+
+    A systemd USER service, so no sudo and no allowlist entry: the panel
+    already runs as that user. Restart is the useful one - it is the fix
+    for a crash-loop once the underlying cause (usually re-authenticating)
+    has been dealt with over SSH.
+
+    There is deliberately no way to send the agent a prompt from here.
+    That is an interactive shell behind an HTTP form, on the box holding
+    the WireGuard key and the car link.
+    """
+    if not cfg.get("claude_enabled", True):
+        raise ActionError("the Claude session is not enabled on this host")
+
+    verb = body.get("verb")
+
+    if verb not in ("start", "stop", "restart"):
+        raise ActionError(f"unknown verb {verb!r}")
+
+    code, out = run(
+        ["systemctl", "--user", verb, cfg["claude_unit"]], timeout=45.0
+    )
+
+    if code != 0:
+        raise ActionError(out or f"{verb} {cfg['claude_unit']} failed")
+
+    return {"claude": verb, "unit": cfg["claude_unit"]}
 
 
 def action_delete_session(cfg: Dict[str, Any],
@@ -847,6 +974,7 @@ ACTIONS = {
     "restart": action_restart,
     "service": action_service,
     "sync": action_sync,
+    "claude": action_claude,
     "delete_session": action_delete_session,
     "pull": action_pull,
     "reboot": action_reboot,
@@ -857,7 +985,7 @@ ACTIONS = {
 #: for these; the server records that they were confirmed.
 DESTRUCTIVE = frozenset({
     "reboot", "shutdown", "pull", "restart", "service", "sync",
-    "delete_session",
+    "claude", "delete_session",
 })
 
 
@@ -1182,6 +1310,19 @@ PAGE = r"""<!doctype html>
   .prevboot input { width:17px; height:17px; accent-color:var(--accent); }
   .syncrow { display:flex; gap:8px; margin-top:12px; }
   .syncrow > button { flex:1; }
+  .tabs { display:flex; gap:6px; margin:0 0 14px; }
+  .tab { flex:1; background:none; border:1px solid var(--line);
+         color:var(--muted); font-size:13.5px; }
+  .tab.on { background:var(--card2); color:var(--text);
+            border-color:var(--accent); }
+  .hint { font-size:12px; color:var(--muted); line-height:1.5;
+          margin:12px 0 0; }
+  .cl { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+        margin-bottom:10px; }
+  .cl .big { font-size:22px; font-weight:700; }
+  .cl .big.on { color:var(--good); }
+  .cl .big.off { color:var(--bad); }
+  .cl .big.warn { color:var(--warn); }
   .git { font-size:13px; }
   .git .rev { font-family:ui-monospace,Menlo,monospace; font-weight:600; }
   .git .sub2 { color:var(--muted); font-size:12px; margin-top:3px;
@@ -1196,6 +1337,17 @@ PAGE = r"""<!doctype html>
 <div class="wrap">
   <h1 id="host">F10 Pi</h1>
   <p class="sub" id="sub">connecting…</p>
+
+  <!-- The agent is a separate concern from the car: it does not matter
+       during a drive, and it is optional. Its own tab keeps the system
+       view uncluttered, and the tab hides itself where the unit is not
+       installed. -->
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-tab="system">System</button>
+    <button class="tab" data-tab="claude" id="tab-claude" style="display:none">Claude</button>
+  </nav>
+
+  <div id="pane-system">
 
   <!-- First card on purpose: "is it recording?" is the question you
        actually open this page to answer. -->
@@ -1238,6 +1390,37 @@ PAGE = r"""<!doctype html>
     <pre id="logs" style="display:none"></pre>
   </div>
 
+  </div><!-- /pane-system -->
+
+  <div id="pane-claude" style="display:none">
+    <div class="card">
+      <h2>Coding agent</h2>
+      <div id="claude"></div>
+      <div class="row" style="margin-top:12px">
+        <button data-claude="restart">Restart session</button>
+        <button data-claude="stop" class="danger">Stop</button>
+      </div>
+      <p class="hint">
+        Status and lifecycle only. There is deliberately no terminal and no
+        prompt box here — that would be an interactive shell behind a web
+        form, on the box holding the WireGuard key and the link to the car.
+        Attach over SSH, or drive it from the Claude app by its Remote
+        Control name.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Session output</h2>
+      <p class="hint" style="margin-top:0">
+        The last lines of the tmux pane. This is the only place a login
+        prompt or a crash-loop error appears — the journal stays empty.
+      </p>
+      <pre id="claudepane" style="display:none"></pre>
+    </div>
+  </div>
+
+  <!-- Power sits outside both panes: rebooting or halting the box is
+       relevant whichever tab you are on. -->
   <div class="card">
     <h2>Power</h2>
     <div class="row">
@@ -1381,6 +1564,7 @@ function render(s) {
       ? '<button data-sync="pause">Pause sync</button>'
       : '<button data-sync="resume">Resume sync</button>';
 
+  renderClaude(s.claude);
   renderRecording(s.recording || {}, s.services || []);
   renderSessions(s.sessions || []);
 
@@ -1407,6 +1591,45 @@ function render(s) {
   $("logbuttons").innerHTML = (s.services || [])
     .map(sv => `<button data-log="${escape_(sv.unit)}">${escape_(sv.unit)}</button>`)
     .join("");
+}
+
+/* The agent is optional. Where the unit is not installed the server
+   sends null and the tab never appears. */
+function renderClaude(c) {
+  if (!c) {
+    $("tab-claude").style.display = "none";
+    return;
+  }
+
+  $("tab-claude").style.display = "";
+
+  /* Three states, not two. "Active" alone is a lie when the systemd
+     unit's while-loop is alive but the agent inside it is restarting
+     every five seconds - usually lost authentication. */
+  const head = c.crash_looping
+    ? `<span class="big warn">crash-looping</span>`
+      + `<span class="unit">the loop is up, the agent is not — `
+      + `check the pane below, it is usually authentication</span>`
+    : c.active && c.agent_running
+      ? `<span class="big on">running</span>`
+        + `<span class="unit">remote control: <b>${escape_(c.remote_name)}</b></span>`
+      : `<span class="big off">stopped</span>`
+        + `<span class="unit">${escape_(c.state)}</span>`;
+
+  const bits = [`unit <b>${escape_(c.unit)}</b>`,
+                `tmux <b>${c.tmux_alive ? escape_(c.tmux_session) : "no session"}</b>`];
+  if (c.since) bits.push(`since <b>${escape_(c.since.slice(0, 16))}</b>`);
+
+  $("claude").innerHTML =
+    `<div class="cl">${head}</div>`
+    + `<div class="recmeta">`
+    + bits.map(x => `<span>${x}</span>`).join("") + `</div>`;
+
+  const pre = $("claudepane");
+  /* textContent, never innerHTML: this is whatever the agent printed,
+     and it is not markup we control. */
+  pre.textContent = c.pane || "(no output captured)";
+  pre.style.display = "block";
 }
 
 /* "Is the service up?" and "is data landing?" are different questions.
@@ -1496,7 +1719,31 @@ document.addEventListener("click", async ev => {
   const b = ev.target.closest("button");
   if (!b) return;
 
+  if (b.dataset.tab) {
+    for (const t of document.querySelectorAll(".tab"))
+      t.classList.toggle("on", t === b);
+    $("pane-system").style.display = b.dataset.tab === "system" ? "" : "none";
+    $("pane-claude").style.display = b.dataset.tab === "claude" ? "" : "none";
+    return;
+  }
+
   try {
+    if (b.dataset.claude) {
+      const verb = b.dataset.claude;
+      arm(b, verb === "stop" ? "Stop" : "Restart session", async () => {
+        busy(b, "…");
+        try {
+          await post("claude", {verb});
+          say("Claude session " + (verb === "stop" ? "stopped" : "restarted")
+              + " — give it a few seconds");
+        } finally {
+          unbusy(b);
+        }
+        setTimeout(refresh, 3000);
+      });
+      return;
+    }
+
     if (b.dataset.del) {
       arm(b, "Delete", async () => {
         busy(b, "…");

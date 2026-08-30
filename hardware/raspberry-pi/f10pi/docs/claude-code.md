@@ -116,6 +116,9 @@ but no agent PID exists, it is crash-looping every 5 seconds; the usual cause
 is lost authentication, and the output goes to the tmux pane rather than the
 journal, so attach and look.
 
+The admin panel's Claude tab does exactly these two checks for you and shows
+the pane, so this particular diagnosis no longer needs an SSH session.
+
 ## Things worth knowing before you enable it
 
 - **Authentication has to already exist.** The agent must be logged in as
@@ -131,6 +134,12 @@ journal, so attach and look.
   friends) on the public dashboard domain would put an authenticated shell on
   the internet, on the box with the keys. SSH from a phone client is the
   smaller surface, and you already have it.
+
+  The admin panel's **Claude tab**
+  ([hardware/raspberry-pi/admin](../../admin/README.md)) deliberately stops
+  short of this: status, the tmux pane read-only, and start/stop/restart —
+  no terminal, no prompt box, and no path to `tmux send-keys`. It exists
+  mainly to make the crash-loop below visible without SSHing in.
 - **It competes for the same Pi.** The telemetry runtime is what matters
   during a drive; an agent doing heavy work on a 4-core Pi while logging at
   ~9 Hz is worth keeping in mind if you see dropped samples.

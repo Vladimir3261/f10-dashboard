@@ -41,6 +41,33 @@ leaves an existing `config.json` alone.
 | **Drive files** | every session database with size and whether the lake has it, and a Delete for the ones already shipped |
 | **Logs** | last 200 journal lines per unit; tick *previous boot* to read the log from before an unexplained reboot |
 
+## The Claude tab
+
+Only appears if the optional agent session is installed
+([docs/claude-code.md](../f10pi/docs/claude-code.md)); the panel returns
+`null` where the unit does not exist and the tab hides itself. Set
+`claude_enabled: false` to hide it anyway.
+
+It shows three states, not two. **"Active" alone is a lie** here: the
+systemd unit wraps the agent in a `while` loop, so systemd reports
+active while the agent inside restarts every five seconds — usually
+because authentication expired. That is the failure the setup doc calls
+invisible, since `tmux list-panes` reports `bash` and the journal stays
+empty. The panel separates *unit active* from *agent process alive* and
+calls the combination **crash-looping**, then shows the last lines of
+the tmux pane, which is the only place the reason is ever printed.
+
+Also shown: the Remote Control name to look for in the Claude app, and
+the tmux session name for attaching over SSH. Buttons restart or stop
+the session — a systemd **user** service, so no sudo and no allowlist
+entry.
+
+**There is deliberately no terminal and no prompt box.** That would be
+an interactive shell behind a web form, on the box holding the WireGuard
+private key and the diagnostic link to the car — the exact thing
+`docs/claude-code.md` warns against. A test asserts no action can reach
+`tmux send-keys`. Attach over SSH, or drive it from the app.
+
 ## What it can do
 
 `Pull latest` fetches and **fast-forwards only**, after verifying that

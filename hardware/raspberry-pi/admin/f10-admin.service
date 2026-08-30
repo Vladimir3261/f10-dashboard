@@ -28,7 +28,10 @@ Environment=PYTHONUNBUFFERED=1
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=@REPO_DIR@
-PrivateTmp=yes
+# NOT PrivateTmp. tmux's server socket lives in /tmp/tmux-<uid>/, so a
+# private /tmp would make the Claude session invisible to this panel -
+# `tmux has-session` and `capture-pane` would both fail, and the pane is
+# the only place a crash-loop's cause is ever printed.
 NoNewPrivileges=no
 # ^ sudo needs this off. The privilege it can gain is bounded by
 #   /etc/sudoers.d/f10-admin, which names each command in full.

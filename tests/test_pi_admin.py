@@ -843,6 +843,131 @@ class SyncControl(AdminCase):
         self.assertIn("did not answer", body["error"])
 
 
+class ClaudeSession(AdminCase):
+    """
+    The optional coding agent: status and lifecycle, nothing more.
+
+    The setup doc is explicit that a web terminal on this box would put
+    an authenticated shell on the network next to the WireGuard key and
+    the diagnostic link to the car. These tests hold that line.
+    """
+
+    replies = {
+        "systemctl --user cat": (0, "[Unit]\nDescription=Claude"),
+        "systemctl --user is-active": (0, "active"),
+        "pgrep": (0, "1234"),
+        "tmux has-session": (0, ""),
+        "tmux capture-pane": (0, "> ready\n"),
+    }
+
+    def _claude(self):
+        return json.loads(self.get("/api/status").read())["claude"]
+
+    def test_a_healthy_session_reports_running(self):
+        c = self._claude()
+
+        self.assertTrue(c["active"])
+        self.assertTrue(c["agent_running"])
+        self.assertFalse(c["crash_looping"])
+        self.assertTrue(c["tmux_alive"])
+
+    def test_the_pane_is_captured(self):
+        """
+        The only place a login prompt or crash-loop error is printed -
+        the journal stays empty, and `tmux list-panes` reports bash.
+        """
+        self.assertIn("ready", self._claude()["pane"])
+
+    def test_restart_uses_the_user_scope_and_needs_no_sudo(self):
+        """It is a systemd USER service; the panel already runs as that user."""
+        self.post("claude", {"verb": "restart", "confirm": True})
+
+        self.assertTrue(
+            self.fake.ran("systemctl", "--user", "restart", "claude-tmux")
+        )
+
+        for call in self.fake.calls:
+            self.assertNotEqual(call[0], "sudo", call)
+
+    def test_only_lifecycle_verbs_are_accepted(self):
+        for verb in ("enable", "kill", "cat", "", None, "prompt"):
+            with self.subTest(verb=verb):
+                self.assert_status(
+                    409, self.post, "claude", {"verb": verb, "confirm": True}
+                )
+
+    def test_there_is_no_way_to_send_the_agent_input(self):
+        """
+        The line that must not be crossed. No action may reach
+        `tmux send-keys`, and none may take free text.
+        """
+        self.assertNotIn("send-keys", self.get("/").read().decode())
+
+        for name in ("prompt", "send", "exec", "run", "shell", "input"):
+            self.assertNotIn(name, admin.ACTIONS)
+
+    def test_stopping_is_confirmed_like_anything_destructive(self):
+        self.assert_status(400, self.post, "claude", {"verb": "stop"})
+        self.assertEqual(self.fake.calls, [])
+
+
+class ClaudeCrashLooping(AdminCase):
+    """
+    The failure the setup doc calls invisible: the unit's while-loop is
+    alive so systemd says active, while the agent inside restarts every
+    five seconds. `active` alone would report this as healthy.
+    """
+
+    replies = {
+        "systemctl --user cat": (0, "[Unit]"),
+        "systemctl --user is-active": (0, "active"),
+        "pgrep": (1, ""),                       # no agent process
+        "tmux has-session": (0, ""),
+        "tmux capture-pane": (0, "Invalid API key\n"),
+    }
+
+    def test_an_active_unit_with_no_agent_is_flagged(self):
+        c = json.loads(self.get("/api/status").read())["claude"]
+
+        self.assertTrue(c["active"])
+        self.assertFalse(c["agent_running"])
+        self.assertTrue(c["crash_looping"])
+
+    def test_the_reason_is_visible_in_the_pane(self):
+        c = json.loads(self.get("/api/status").read())["claude"]
+
+        self.assertIn("Invalid API key", c["pane"])
+
+
+class ClaudeNotInstalled(AdminCase):
+    """Optional means optional: absence is not an error."""
+
+    replies = {"systemctl --user cat": (1, "No files found for claude-tmux")}
+
+    def test_a_missing_unit_reports_null(self):
+        self.assertIsNone(
+            json.loads(self.get("/api/status").read())["claude"]
+        )
+
+    def test_the_tab_hides_itself(self):
+        page = self.get("/").read().decode()
+
+        self.assertIn('id="tab-claude"', page)
+        self.assertIn('style="display:none"', page)
+
+
+class ClaudeDisabled(AdminCase):
+    config = {"claude_enabled": False}
+
+    def test_disabling_it_in_config_hides_it_and_refuses_actions(self):
+        self.assertIsNone(
+            json.loads(self.get("/api/status").read())["claude"]
+        )
+        self.assert_status(
+            409, self.post, "claude", {"verb": "restart", "confirm": True}
+        )
+
+
 class DeploymentFiles(unittest.TestCase):
     ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")
 
@@ -917,6 +1042,31 @@ class DeploymentFiles(unittest.TestCase):
         install = script.index("install -m 0440")
 
         self.assertLess(check, install)
+
+    def test_the_unit_does_not_use_private_tmp(self):
+        """
+        tmux's server socket lives in /tmp/tmux-<uid>/. A private /tmp
+        would make the Claude session invisible to the panel, and the
+        pane is the only place a crash-loop's cause is printed.
+        """
+        directives = [
+            line.strip()
+            for line in self._read("f10-admin.service").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+        self.assertNotIn("PrivateTmp=yes", directives)
+
+    def test_the_checkout_is_writable_so_pull_can_work(self):
+        """
+        ProtectSystem=strict plus ProtectHome=read-only makes a repo
+        under /home read-only. Without the repo in ReadWritePaths, `git
+        pull` fails the moment there is actually something to fetch -
+        which "already up to date" never exercises.
+        """
+        unit = self._read("f10-admin.service")
+
+        self.assertIn("ReadWritePaths=@REPO_DIR@\n", unit)
 
     def test_the_admin_unit_is_independent_of_the_runtime(self):
         """
