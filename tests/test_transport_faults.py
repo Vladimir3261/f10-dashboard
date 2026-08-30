@@ -15,8 +15,12 @@ import unittest
 
 from tests import support  # noqa: F401
 
+from bmwdiag.mapping import execute as execute_module
 from bmwdiag.mapping.execute import (
     MappingExecutor,
+    REQUEST_FAULT_LIMIT,
+    REQUEST_REST_MAX_SECONDS,
+    REQUEST_REST_SECONDS,
     TRANSPORT_FAULT_BUDGET,
     _is_request_fault,
 )
@@ -181,6 +185,321 @@ class DeadLink(unittest.TestCase):
             run(ex, profile)
 
         self.assertLess(ex._transport_faults, TRANSPORT_FAULT_BUDGET)
+
+
+# ----------------------------------------------------------------------
+# Resting a request that keeps failing, and not counting a nack against
+# the link. Both build on the skip-one-exchange behaviour above.
+# ----------------------------------------------------------------------
+
+
+class FakeClock:
+    """
+    A controllable stand-in for the `time` module.
+
+    Keeps the two clocks separate on purpose. Rests are deadlined on
+    `monotonic`; `last_ok` / `last_error_at` are stamped from `time`. The
+    tests have to be able to move one without the other, because the whole
+    point is that a wall-clock step must not touch a rest.
+    """
+
+    def __init__(self, start=1_000.0):
+        self.mono = start
+        self.wall = 1_756_000_000.0
+
+    def monotonic(self):
+        return self.mono
+
+    def time(self):
+        return self.wall
+
+    def advance(self, seconds):
+        """Time passes: both clocks move together, as they normally do."""
+        self.mono += seconds
+        self.wall += seconds
+
+    def step_wall(self, seconds):
+        """
+        The wall clock jumps without time passing - an NTP correction.
+        Monotonic deliberately does not move.
+        """
+        self.wall += seconds
+
+
+class PerRequestTransport:
+    """
+    Answers by DID rather than by call order.
+
+    Once requests start being rested the call sequence stops being a fixed
+    interleave, so a script indexed by call number would silently test the
+    wrong thing.
+    """
+
+    def __init__(self, behaviour):
+        # {did: exception (or factory), or None for a good answer}
+        self.behaviour = behaviour
+        self.sent = []
+
+    def request(self, payload, dst=None, timeout=None):
+        did = (payload[1] << 8) | payload[2]
+        self.sent.append(did)
+        item = self.behaviour.get(did)
+
+        if item is not None:
+            raise item() if callable(item) else item
+
+        return bytes([payload[0] + 0x40, payload[1], payload[2], 0x2A])
+
+
+FIRST, SECOND = 0xF300, 0xF301
+FIRST_ID, SECOND_ID = "first", "second"
+
+
+class RestingCase(unittest.TestCase):
+    """Base: an executor whose clock the test controls."""
+
+    def build(self, behaviour):
+        mapping = load_text(TWO_REQUESTS, "test")
+        registry = MappingRegistry([mapping])
+        profile = registry.resolve(AllCapabilities(), config={})
+        transport = PerRequestTransport(behaviour)
+
+        self.clock = FakeClock()
+        real_time = execute_module.time
+        execute_module.time = self.clock
+        self.addCleanup(setattr, execute_module, "time", real_time)
+
+        self.ex = MappingExecutor(profile, transport=transport)
+        self.profile = profile
+        self.transport = transport
+
+    def turns(self, count):
+        for _ in range(count):
+            self.ex.execute_detailed(self.profile.requests)
+
+
+class RestingARepeatedlyFailingRequest(RestingCase):
+    """
+    An ECU that is simply absent must stop costing a timeout every turn.
+
+    Skipping the exchange keeps the drive in one run, but the request is
+    still attempted every time it comes due. At the gear channel's 2 Hz
+    that is a permanent tax on the whole loop.
+    """
+
+    def test_a_failing_request_stops_being_sent(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        sent_by_now = self.transport.sent.count(FIRST)
+
+        self.turns(5)
+
+        self.assertEqual(
+            self.transport.sent.count(FIRST), sent_by_now,
+            "a request past its fault limit should be resting, not retried",
+        )
+
+    def test_the_healthy_request_keeps_flowing_throughout(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(8)
+
+        self.assertEqual(self.transport.sent.count(SECOND), 8)
+
+    def test_a_rested_request_is_retried_once_the_rest_expires(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        rested_at = self.transport.sent.count(FIRST)
+
+        self.clock.advance(REQUEST_REST_SECONDS + 0.1)
+        self.turns(1)
+
+        self.assertEqual(
+            self.transport.sent.count(FIRST), rested_at + 1,
+            "a rest must expire - a briefly-asleep ECU has to come back",
+        )
+
+    def test_the_rest_is_measured_in_seconds_not_turns(self):
+        """
+        The bug this replaces: rest counted in due-turns meant one constant
+        spanned 3s on `motion` and 32 minutes on `rare`. Spinning the loop
+        without advancing the clock must not shorten a rest.
+        """
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        before = self.ex.stats()[FIRST_ID]["resting_for"]
+
+        self.turns(50)                      # lots of turns, no time passing
+
+        self.assertAlmostEqual(
+            self.ex.stats()[FIRST_ID]["resting_for"], before, places=6
+        )
+
+    def test_a_backward_clock_step_does_not_extend_a_rest(self):
+        """
+        This host has no RTC. Its clock is corrected at boot and can step
+        backwards on an NTP overshoot; yesterday it stepped 76.5 minutes
+        FORWARD mid-drive and corrupted a session timeline.
+
+        Against wall time a 30-minute backward step turned a 5-second rest
+        into a 30-minute one, stranding the channel for most of a drive.
+        A rest is a duration, so it is deadlined on the monotonic clock.
+        """
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        before = self.ex.stats()[FIRST_ID]["resting_for"]
+
+        self.clock.step_wall(-1800)
+
+        self.assertAlmostEqual(
+            self.ex.stats()[FIRST_ID]["resting_for"], before, places=6,
+            msg="a wall-clock step must not change a rest",
+        )
+
+    def test_a_forward_clock_step_does_not_shorten_a_rest_either(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        before = self.ex.stats()[FIRST_ID]["resting_for"]
+
+        self.clock.step_wall(4600)          # the 76.5 min correction
+
+        self.assertAlmostEqual(
+            self.ex.stats()[FIRST_ID]["resting_for"], before, places=6
+        )
+
+    def test_the_rest_grows_each_time_it_keeps_failing(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        first_rest = self.ex.stats()[FIRST_ID]["resting_for"]
+
+        self.clock.advance(first_rest + 0.1)
+        self.turns(REQUEST_FAULT_LIMIT)
+        second_rest = self.ex.stats()[FIRST_ID]["resting_for"]
+
+        self.assertGreater(second_rest, first_rest)
+
+    def test_the_rest_is_capped(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        for _ in range(12):
+            self.turns(REQUEST_FAULT_LIMIT)
+            self.clock.advance(self.ex.stats()[FIRST_ID]["resting_for"] + 0.1)
+
+        self.turns(REQUEST_FAULT_LIMIT)
+
+        self.assertLessEqual(
+            self.ex.stats()[FIRST_ID]["resting_for"], REQUEST_REST_MAX_SECONDS
+        )
+
+    def test_recovery_clears_the_history(self):
+        behaviour = {FIRST: lambda: HsfzNack("no route")}
+        self.build(behaviour)
+
+        self.turns(REQUEST_FAULT_LIMIT - 1)
+        self.assertEqual(
+            self.ex.stats()[FIRST_ID]["consecutive_faults"],
+            REQUEST_FAULT_LIMIT - 1,
+        )
+
+        behaviour[FIRST] = None                 # the ECU answers again
+        self.turns(1)
+
+        self.assertEqual(self.ex.stats()[FIRST_ID]["consecutive_faults"], 0)
+        self.assertEqual(self.ex.stats()[FIRST_ID]["resting_for"], 0.0)
+
+
+class RestingIsNotFailing(RestingCase):
+    """
+    A rested request must not be counted as asked-and-unanswered.
+
+    The diagnostics view reads `sent` with no `ok` as "the car is not
+    answering this". If resting incremented `sent`, a channel that is
+    deliberately quiet would look like a collapsing success rate instead.
+    """
+
+    def test_a_rested_request_is_not_counted_as_sent(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        sent_at_rest = self.ex.stats()[FIRST_ID]["sent"]
+
+        self.turns(20)
+
+        self.assertEqual(self.ex.stats()[FIRST_ID]["sent"], sent_at_rest)
+
+    def test_stats_says_why_the_channel_is_quiet(self):
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        first = self.ex.stats()[FIRST_ID]
+
+        self.assertGreater(first["resting_for"], 0)
+        self.assertEqual(self.ex.stats()[SECOND_ID]["resting_for"], 0.0)
+
+    def test_a_resting_request_still_reports_what_the_rest_was_for(self):
+        """
+        "resting, 40s left after 3 timeouts" needs both halves. The live
+        fault count is zeroed when the rest starts, so the count that
+        caused it is kept separately.
+        """
+        self.build({FIRST: lambda: HsfzNack("no route")})
+
+        self.turns(REQUEST_FAULT_LIMIT)
+        first = self.ex.stats()[FIRST_ID]
+
+        self.assertGreater(first["resting_for"], 0)
+        self.assertEqual(first["consecutive_faults"], REQUEST_FAULT_LIMIT)
+        self.assertEqual(first["kinds"], {"transport_nack": REQUEST_FAULT_LIMIT})
+
+
+class ANackIsProofTheLinkIsAlive(RestingCase):
+    """
+    The gateway answering in order to refuse is evidence FOR the link, so
+    it must never accumulate towards concluding the link is dead. Only
+    silence can do that.
+    """
+
+    def test_nacks_alone_never_trigger_a_reconnect(self):
+        self.build({
+            FIRST: lambda: HsfzNack("no route"),
+            SECOND: lambda: HsfzNack("no route"),
+        })
+
+        # Far past the budget, with no successful exchange to reset it, and
+        # stepping the clock so rests keep expiring and the requests keep
+        # being retried rather than quietly sitting out.
+        for _ in range(TRANSPORT_FAULT_BUDGET * 4):
+            self.turns(REQUEST_FAULT_LIMIT)
+            self.clock.advance(REQUEST_REST_MAX_SECONDS + 1)
+
+        self.assertEqual(self.ex._transport_faults, 0)
+
+    def test_silence_still_reaches_the_reconnect_logic(self):
+        self.build({
+            FIRST: lambda: TimeoutError("timed out"),
+            SECOND: lambda: TimeoutError("timed out"),
+        })
+
+        with self.assertRaises(TimeoutError):
+            self.turns(TRANSPORT_FAULT_BUDGET)
+
+    def test_a_nack_does_not_mask_a_dying_link(self):
+        """A nack in the mix must not reset the timeout budget either."""
+        self.build({
+            FIRST: lambda: HsfzNack("no route"),
+            SECOND: lambda: TimeoutError("timed out"),
+        })
+
+        with self.assertRaises(TimeoutError):
+            for _ in range(TRANSPORT_FAULT_BUDGET * 3):
+                self.turns(1)
+                self.clock.advance(REQUEST_REST_MAX_SECONDS + 1)
 
 
 if __name__ == "__main__":
