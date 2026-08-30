@@ -19,11 +19,15 @@ Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 
-# The panel reads system state and shells out to a short allowlist. It
-# has no business writing anywhere except its own directory.
+# The panel reads system state and shells out to a short allowlist.
+# Everything is read-only except the checkout itself, which it must be
+# able to write: `pull` updates the worktree and .git, and session-file
+# housekeeping deletes databases under local/. ReadWritePaths overrides
+# both ProtectSystem and ProtectHome for the paths it names, which is
+# what makes a repo under /home writable while the rest of /home is not.
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@REPO_DIR@/hardware/raspberry-pi/admin
+ReadWritePaths=@REPO_DIR@
 PrivateTmp=yes
 NoNewPrivileges=no
 # ^ sudo needs this off. The privilege it can gain is bounded by

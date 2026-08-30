@@ -28,6 +28,14 @@
   "git_branch": "master",
 
   "services": ["f10-dashboard", "f10-sync"],
+
   "sync_status_url": "http://127.0.0.1:8091/sync/status",
-  "log_lines": 200
+  "sync_control_url": "http://127.0.0.1:8091",
+  "dashboard_status_url": "http://127.0.0.1:8080/api/snapshot",
+
+  "sessions_dir": "/home/f10/f10-dashboard/local/sessions",
+  "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",
+
+  "log_lines": 200,
+  "recording_window_s": 60
 }

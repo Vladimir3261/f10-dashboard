@@ -29,6 +29,7 @@ leaves an existing `config.json` alone.
 
 | | why it is there |
 |---|---|
+| **Recording** | samples written in the last 60 s, channels, car link, Hz, drive mode, run. **"Service active" is not "data landing"** — a green dot is equally green with the ENET cable out |
 | **CPU temp** | a Pi in a hot parked car throttles, then dies |
 | **Clock** | the Pi has **no RTC**. A run recorded against an undisciplined clock has wrong timestamps and every trend built on it is wrong too |
 | **Disk free** | session DBs fill the card; that is how recording stops silently |
@@ -37,7 +38,8 @@ leaves an existing `config.json` alone.
 | **Throttle flags** | latched since boot, so last week's under-voltage still shows |
 | **Services** | `f10-dashboard` and `f10-sync`, with start / stop / restart |
 | **Deployed code** | revision, subject, and whether the checkout is dirty |
-| **Logs** | last 200 journal lines per unit |
+| **Drive files** | every session database with size and whether the lake has it, and a Delete for the ones already shipped |
+| **Logs** | last 200 journal lines per unit; tick *previous boot* to read the log from before an unexplained reboot |
 
 ## What it can do
 
@@ -45,6 +47,14 @@ leaves an existing `config.json` alone.
 `origin` still matches the pinned URL. It deliberately does **not**
 restart afterwards — pulling and restarting are two decisions, and you
 may want the code staged while the current drive keeps recording.
+
+`Delete` only appears on a drive file that is **confirmed in the lake**
+and is not the one being written. A database that has not shipped exists
+in exactly one place, and losing it loses that drive.
+
+`Pause sync` / `Resume sync` control the agent. There is deliberately no
+"flush now": the agent already polls every few seconds once caught up,
+so forcing one would save seconds and add an endpoint for nothing.
 
 `Reboot` and `Shut down` arm on the first tap and fire on the second, so
 a phone in a pocket cannot do either by accident.
@@ -80,7 +90,12 @@ feature; everything below is what keeps it bounded.
   A wildcard on `systemctl` would let any unit be started, and a unit can
   run anything.
 - **The unit list is an allowlist.** A request can never name an
-  arbitrary systemd unit.
+  arbitrary systemd unit, and the boot offset for logs is a bounded
+  integer rather than a string on a `journalctl` command line.
+- **Deletion is fenced four ways** — a bare filename only (resolved and
+  checked to be inside the sessions directory, so no symlink or `..`
+  escapes it), `.db` only, never the file being written, and never one
+  that is not confirmed shipped.
 - **The git remote is pinned.** `pull` refuses if `origin` has been
   repointed, so the update channel cannot be swapped.
 
