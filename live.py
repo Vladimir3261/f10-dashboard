@@ -665,12 +665,10 @@ CREATE TABLE IF NOT EXISTS runs (
     -- a property of the session is the only encoding where no query can
     -- forget it. Drives that span a switch are reassembled by time
     -- contiguity, which sessions already support.
-    mode        TEXT,
-    -- Version of the drive-mode table (config/modes.yaml) the mode name
-    -- above refers to. Without it the name would not identify a rate:
-    -- `long` before and after an edit to that file are different
-    -- samplings, and nothing else would record the difference.
-    mode_ver    TEXT
+    -- WHICH revision of the mode table this name refers to is not here:
+    -- it rides in `mapping_set` as `drive-modes@<version>`, so one string
+    -- identifies the entire sampling configuration of the run.
+    mode        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS params (
@@ -755,29 +753,34 @@ class Recorder:
         # any sample is written.
         #
         self.meta_source: Optional[ResolvedProfile] = None
+        self.extra_versions: Tuple[str, ...] = ()
         self.thread = threading.Thread(target=self._writer, daemon=True)
 
-    def set_metadata(self, profile: ResolvedProfile) -> None:
-        """Point the params table at the resolved mapping registry."""
+    def set_metadata(self, profile: ResolvedProfile,
+                     extra_versions: Sequence[str] = ()) -> None:
+        """
+        Point the params table at the resolved mapping registry.
+
+        `extra_versions` are `id@version` entries for versioned config
+        that is not a mapping file but still determines how the run was
+        recorded - the drive-mode table. They join the same fingerprint,
+        so one string identifies the whole sampling configuration.
+        """
         self.meta_source = profile
+        self.extra_versions = tuple(extra_versions)
 
     # -- called from the poll thread --------------------------------
 
-    def start_run(self, vin, gateway, ecu, ecu_addr, mode="normal",
-                  mode_ver=None) -> None:
+    def start_run(self, vin, gateway, ecu, ecu_addr, mode="normal") -> None:
         """
         Open a run. Any run already open is closed first.
 
         A mode switch calls this again with the new mode, which is what
-        keeps one run == one sampling configuration. `mode_ver` is the
-        version of the mode table that name came from - the pair is what
-        identifies a rate, not the name alone.
+        keeps one run == one sampling configuration. `mode` is stored as
+        plain text; WHICH revision of the mode table that name refers to
+        is in `mapping_set`, alongside every mapping version.
         """
-        self.q.put((
-            "run",
-            (time.time(), vin, gateway, ecu, ecu_addr, mode,
-             "" if mode_ver is None else str(mode_ver)),
-        ))
+        self.q.put(("run", (time.time(), vin, gateway, ecu, ecu_addr, mode)))
 
     def error(self, request_id: str, kind: str, message: str) -> None:
         """Record one per-request fault. Dropped silently if the queue is
@@ -836,9 +839,6 @@ class Recorder:
 
         if "mode" not in cols("runs"):
             self.db.execute("ALTER TABLE runs ADD COLUMN mode TEXT")
-
-        if "mode_ver" not in cols("runs"):
-            self.db.execute("ALTER TABLE runs ADD COLUMN mode_ver TEXT")
 
         self.db.commit()
 
@@ -930,19 +930,17 @@ class Recorder:
                     if self.meta_source is not None else []
                 )
                 mapping_set = (
-                    self.meta_source.mapping_set()
+                    self.meta_source.mapping_set(self.extra_versions)
                     if self.meta_source is not None else ""
                 )
 
-                (started, vin, gateway, ecu, ecu_addr, mode,
-                 mode_ver) = payload
+                started, vin, gateway, ecu, ecu_addr, mode = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
                     "(started_at, vin, gateway, ecu, ecu_addr, mapping_set,"
-                    " mode, mode_ver) VALUES (?,?,?,?,?,?,?,?)",
-                    (started, vin, gateway, ecu, ecu_addr, mapping_set,
-                     mode, mode_ver),
+                    " mode) VALUES (?,?,?,?,?,?,?)",
+                    (started, vin, gateway, ecu, ecu_addr, mapping_set, mode),
                 )
                 self.run_id = cur.lastrowid
 
@@ -1386,7 +1384,7 @@ def poll_loop(
 
             if rec is not None:
                 rec.start_run(vin, ip, engine.label(), engine.addr,
-                              modes.current, modes.version)
+                              modes.current)
                 rec.event("connect", f"engine ECU {engine.label()}")
 
             #
@@ -1431,7 +1429,7 @@ def poll_loop(
                 raise HsfzError("ECU reports no usable PIDs")
 
             if rec is not None:
-                rec.set_metadata(profile)
+                rec.set_metadata(profile, [modes.table.fingerprint()])
 
             session = ObdSession(client, profile.obd_pid_lengths())
             plan = PollingPlan(
@@ -1503,7 +1501,7 @@ def poll_loop(
 
                     if rec is not None:
                         rec.start_run(vin, ip, engine.label(), engine.addr,
-                                      wanted, modes.version)
+                                      wanted)
                         rec.event("mode", f"drive mode -> {wanted}")
 
                 #
@@ -1601,7 +1599,7 @@ def demo_loop(
     tel.set_meta(profile.meta())
 
     if rec is not None:
-        rec.set_metadata(profile)
+        rec.set_metadata(profile, [modes.table.fingerprint()])
 
     tel.update(
         connected=True, status="live (demo)", ecu="demo",
@@ -1609,8 +1607,7 @@ def demo_loop(
     )
 
     if rec is not None:
-        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, modes.current,
-                      modes.version)
+        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, modes.current)
 
     t0 = time.monotonic()
 
@@ -1621,8 +1618,7 @@ def demo_loop(
             modes.current = wanted
 
             if rec is not None:
-                rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, wanted,
-                              modes.version)
+                rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, wanted)
                 rec.event("mode", f"drive mode -> {wanted}")
 
         t = time.monotonic() - t0

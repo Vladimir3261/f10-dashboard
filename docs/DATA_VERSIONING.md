@@ -1,16 +1,28 @@
-# Mapping data versioning
+# Data versioning
 
-Every recorded sample can be tied back to the exact mapping revision that
-decoded it, so a dataset analysed months later is the *same* dataset, not
-one silently re-interpreted by a mapping edit in between.
+Every recorded sample can be tied back to the exact revision of the data
+that produced it, so a dataset analysed months later is the *same*
+dataset, not one silently re-interpreted by an edit in between.
+
+Two kinds of file are versioned this way, in one ledger:
+
+- **mapping files** (`mappings/**.yaml`) — what a channel is and how its
+  bytes decode.
+- **the drive-mode table** (`config/modes.yaml`) — how hard the car was
+  being polled. Not a mapping, but versioned data that changes what a
+  recorded drive means. See [`POLLING_AND_SAFETY.md`](POLLING_AND_SAFETY.md).
 
 ## The rule
 
 - Every mapping file declares an integer **`version`** under `mapping:`,
-  starting at **1**.
+  starting at **1**; `config/modes.yaml` declares one at the top level.
 - **Increment it by one on every change to that file's content** — a
-  decode, a scale, a DID, an added or removed signal, even a comment. The
-  file is the versioned unit.
+  decode, a scale, a DID, an added or removed signal, a mode's
+  multiplier. The file is the versioned unit.
+- **Not for comments or prose.** A comment does not alter what the file
+  produces, and the version is stamped on every sample: bumping it for a
+  prose edit falsely signals a data change and splits a dataset that
+  never changed.
 - The version tracks the **mapping data, never the code.** Editing
   `loader.py`, `live.py`, or anything else in the program does *not* change
   any mapping version. Only editing a file under `mappings/` does.
@@ -38,13 +50,34 @@ That version travels with the data:
 |---|---|
 | SQLite `params.mapping_ver` | per-channel version (as text, `""` if unknown) |
 | SQLite `run_mappings` | one row per loaded file per run: `mapping_id, version, production, source_path` — the authoritative "what decoded this run" record |
-| SQLite `runs.mapping_set` | compact fingerprint `id@version,…` (sorted) for the whole run |
+| SQLite `runs.mapping_set` | compact fingerprint `id@version,…` (sorted) for the whole run, **including `drive-modes@N`** |
 | ClickHouse `samples.mapping_ver` | per-sample version, filled by the ingest server from the client's per-channel value |
 | ClickHouse `sessions.mappings` | the `id@version,…` fingerprint for the session |
 
 So in the lake you can filter or group by `mapping_ver`, and know from
 `sessions.mappings` exactly which revision of every mapping produced a
 drive.
+
+### The drive mode is text; its version is in the fingerprint
+
+`sessions.mode` holds the mode **name** as plain text (`long`), because
+that is what you actually want to read, group by and filter on. Which
+*revision* of the mode table that name refers to lives in the same
+`sessions.mappings` string as everything else:
+
+```
+mode      = "long"
+mappings  = "candidate-f10-egs-transmission@4,drive-modes@1,sae-obd-engine@2"
+```
+
+Two reasons it is there rather than in a column of its own:
+
+1. **One equality check** on `mappings` answers "were these two drives
+   recorded the same way?" — no second column to remember to join on.
+2. The mode table is **owned by no mapping file**, so folding its version
+   into theirs would mean bumping ten files for one mode edit, falsely
+   signalling that ten decode definitions changed and splitting
+   per-channel datasets that did not.
 
 ## Changing a mapping — the workflow
 
@@ -59,7 +92,7 @@ drive.
 
 Two guards keep this honest:
 
-- **`mappings/VERSIONS.lock`** — a committed ledger of every mapping's
+- **`mappings/VERSIONS.lock`** — a committed ledger of every mapping's (and the mode table's)
   `id → version → path`. A unit test
   (`tests/test_mapping_versioning.py::LockfileEnforcement`) fails if the
   lock and the files on disk disagree, so a version change can't land

@@ -58,9 +58,12 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     ecu_addr     Nullable(UInt16),
     gateway      String DEFAULT '',
     source_db    LowCardinality(String) DEFAULT '',
-    -- "id@version,..." fingerprint of the mapping set that decoded this
-    -- session. The per-sample mapping_ver on telemetry.samples carries the
-    -- per-channel version; this is the whole-session summary.
+    -- "id@version,..." fingerprint of EVERYTHING that decided how this
+    -- session was recorded: each mapping file, plus the drive-mode table
+    -- as `drive-modes@<version>`. One equality check answers "were these
+    -- two drives recorded the same way?". The per-sample mapping_ver on
+    -- telemetry.samples carries the per-channel version; this is the
+    -- whole-session summary.
     mappings     String DEFAULT '',
     -- Drive mode: how hard the car was being polled for this session.
     -- A session has exactly ONE, because switching mode ends the run and
@@ -69,10 +72,6 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     -- not comparable, and without this column nothing would say so.
     -- Empty for sessions recorded before modes existed (2026-08-30).
     mode         LowCardinality(String) DEFAULT '',
-    -- Version of the drive-mode table (config/modes.yaml) that `mode`
-    -- names. The name alone does not identify a rate: `long` before and
-    -- after an edit to that file are different samplings.
-    mode_ver     LowCardinality(String) DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)

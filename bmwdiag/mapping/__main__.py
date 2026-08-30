@@ -324,7 +324,9 @@ def cmd_lock(args) -> int:
     from .versioning import build_lock, render_lock, load_lock, diff_lock, LOCK_NAME
     import os
 
-    document = build_lock(args.paths)
+    from .modes import DEFAULT_MODE_CONFIG
+
+    document = build_lock(args.paths, DEFAULT_MODE_CONFIG)
     lock_path = args.out or os.path.join(args.paths[0], LOCK_NAME)
 
     if args.check:

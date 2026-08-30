@@ -30,10 +30,12 @@ is here, in Python, and stays here - putting it in the file would mean
 adding an expression language to the config format, which is the one
 thing that format must never have.
 
-The table carries a `version`, stamped onto every session as
-`mode_ver`. Without it a mode name would not identify a rate: `long` in
-March and `long` in June could differ and nothing would say so. See the
-header of config/modes.yaml.
+The table carries an `id` and a `version` and joins the same ledger as
+the mapping files: it appears in VERSIONS.lock, and in the `id@version`
+fingerprint recorded on every session as `drive-modes@1`. Without that a
+mode name would not identify a rate - `long` in March and `long` in June
+could differ and nothing would say so. The mode NAME is stored as plain
+text beside it, so the common query stays readable.
 """
 
 import os
@@ -111,15 +113,27 @@ class ModeTable:
     """
     A loaded `config/modes.yaml`.
 
-    `version` is the reason this is a type rather than a bare dict: it
-    has to reach the recorder, so that a session records WHICH revision
-    of the table its mode name refers to.
+    Carries an `id` and a `version` for the same reason every mapping
+    file does, and joins the same ledger: it appears in VERSIONS.lock and
+    in the `id@version` fingerprint recorded on each session. That is
+    what keeps a mode NAME honest - `long` before and after an edit to
+    this table are different samplings, and the fingerprint is where the
+    difference shows.
+
+    It is deliberately NOT folded into the mapping files' versions: this
+    table is not owned by any one of them, so bumping theirs would
+    falsely signal that ten decode definitions changed.
     """
 
+    id: str
     version: int
     default: str
     modes: Mapping[str, DriveMode]
     source_path: str = ""
+
+    def fingerprint(self) -> str:
+        """`id@version`, the form used in the session's mapping set."""
+        return f"{self.id}@{self.version}"
 
     def get(self, name: Optional[str]) -> DriveMode:
         if not name:
@@ -293,6 +307,7 @@ def load_modes(path: Optional[str] = None) -> ModeTable:
         )
 
     return ModeTable(
+        id=str(document.get("id") or "drive-modes"),
         version=_positive_int(document.get("version"), source, "version"),
         default=default,
         modes=modes,

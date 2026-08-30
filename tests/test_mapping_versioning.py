@@ -17,6 +17,7 @@ from tests import support  # noqa: F401
 from bmwdiag.mapping.errors import InvalidFieldError, MissingFieldError
 from bmwdiag.mapping.loader import load_text, load_tree, load_file
 from bmwdiag.mapping.registry import MappingRegistry, AllCapabilities
+from bmwdiag.mapping import modes
 from bmwdiag.mapping import versioning
 
 
@@ -141,13 +142,13 @@ class LockfileEnforcement(unittest.TestCase):
         lock_path = os.path.join(support.MAPPINGS, versioning.LOCK_NAME)
         self.assertTrue(os.path.exists(lock_path), "VERSIONS.lock is missing")
 
-        on_disk = versioning.build_lock([support.MAPPINGS])
+        on_disk = versioning.build_lock([support.MAPPINGS], modes.DEFAULT_MODE_CONFIG)
         locked = versioning.load_lock(lock_path)
         problems = versioning.diff_lock(on_disk, locked)
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_diff_detects_a_version_bump(self):
-        on_disk = versioning.build_lock([support.MAPPINGS])
+        on_disk = versioning.build_lock([support.MAPPINGS], modes.DEFAULT_MODE_CONFIG)
         locked = versioning.load_lock(
             os.path.join(support.MAPPINGS, versioning.LOCK_NAME)
         )
