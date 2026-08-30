@@ -102,6 +102,14 @@ deploy-check: galaxy ## Dry-run the playbook (--check, no changes)
 lake-status: ## Show stack health + row counts on the analytics server
 	@scripts/lake_status.sh
 
+.PHONY: lake-migrate
+lake-migrate: ## Apply the ClickHouse schema migrations (idempotent)
+	@scripts/lake_migrate.sh $(ARGS)
+
+.PHONY: lake-migrate-check
+lake-migrate-check: ## List the migrations that would be applied
+	@scripts/lake_migrate.sh --dry-run
+
 .PHONY: migrate-lake
 migrate-lake: ## Copy the lake from an old server: make migrate-lake FROM=root@old-host
 	@test -n "$(FROM)" || { echo "usage: make migrate-lake FROM=root@old-host [ARGS='--dry-run']"; exit 1; }

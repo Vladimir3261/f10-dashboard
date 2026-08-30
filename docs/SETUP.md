@@ -95,11 +95,21 @@ make init          # once: downloads the DigitalOcean provider
 make plan          # review — creates nothing, costs nothing
 make provision     # creates the droplet, writes the Ansible inventory
 make deploy        # hardening, Docker, the stack, WireGuard
+make lake-migrate  # apply any ClickHouse schema migrations
 ```
 
 `make provision` asks you to type `yes` and creates **billable** infra
 (~$24/mo at `s-2vcpu-4gb`). `make deploy` takes a few minutes — image pulls
 and an ingest build.
+
+**`make lake-migrate` is separate from `make deploy`, and needed after any
+schema change.** `clickhouse/init/001_schema.sql` runs *only* on a fresh
+volume, so a column added to it is invisible to a lake that already exists
+— and the ingest server drops unknown columns **silently**, because
+ClickHouse runs with `input_format_skip_unknown_fields=1`. Nothing errors;
+the column is just quietly absent. Every migration is idempotent, so
+running it after each deploy is the right habit. `make lake-migrate-check`
+lists what would be applied without touching anything.
 
 **Check it:**
 
