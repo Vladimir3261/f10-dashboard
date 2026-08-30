@@ -455,11 +455,22 @@ def action_pull(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     after = first_line(["git", "-C", repo, "rev-parse", "--short", "HEAD"])
+    commits = 0
+
+    if before != after:
+        count = first_line([
+            "git", "-C", repo, "rev-list", "--count", f"{before}..{after}",
+        ])
+        commits = int(count) if count.isdigit() else 0
 
     return {
         "before": before,
         "after": after,
         "changed": before != after,
+        "commits": commits,
+        #: The subject of whatever is now checked out. "Already up to
+        #: date" is a useless answer on its own - up to date AT WHAT?
+        "subject": first_line(["git", "-C", repo, "log", "-1", "--pretty=%s"]),
         "detail": out,
         #: Deliberately does NOT restart. Pulling and restarting are two
         #: decisions: you may want the code staged and the current drive
@@ -787,9 +798,17 @@ PAGE = r"""<!doctype html>
         padding:11px; margin:10px 0 0; font-size:11px; line-height:1.55;
         max-height:52vh; overflow:auto; white-space:pre-wrap;
         word-break:break-word; font-family:ui-monospace,Menlo,monospace; }
-  .msg { margin-top:10px; padding:10px 12px; border-radius:9px; font-size:13px; }
-  .msg.ok  { background:#0f2f22; color:#8fe3bd; }
-  .msg.err { background:#331a1a; color:#ffb4b4; }
+  /* Fixed, not in flow. It used to sit in a div at the bottom of the
+     page: on a phone every result landed below the fold, so an action
+     that worked perfectly looked like it did nothing. */
+  #msg { position:fixed; left:0; right:0; z-index:20;
+         bottom:calc(12px + env(safe-area-inset-bottom));
+         padding:0 16px; pointer-events:none; }
+  .msg { max-width:640px; margin:0 auto; padding:12px 14px;
+         border-radius:11px; font-size:13.5px; line-height:1.45;
+         box-shadow:0 8px 28px rgba(0,0,0,.55); }
+  .msg.ok  { background:#123a2a; color:#a8ecc8; border:1px solid #1d6b4c; }
+  .msg.err { background:#3d1e1e; color:#ffc0c0; border:1px solid #7a3232; }
   .flags { margin-top:8px; font-size:12.5px; color:var(--warn); }
   .git { font-size:13px; }
   .git .rev { font-family:ui-monospace,Menlo,monospace; font-weight:600; }
@@ -849,6 +868,9 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 let armed = null, armedTimer = null;
+/* Declared here, started at the bottom: refresh() and stopPolling() both
+   close over it, and both are defined above where it is assigned. */
+let poller = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -866,10 +888,23 @@ function post(action, extra) {
 }
 
 function say(text, bad) {
-  $("msg").innerHTML =
-    `<div class="msg ${bad ? "err" : "ok"}">${escape_(text)}</div>`;
+  /* Newlines in the message are real line breaks - a pull result is
+     three facts, not one sentence. */
+  $("msg").innerHTML = `<div class="msg ${bad ? "err" : "ok"}">`
+    + escape_(text).replace(/\n/g, "<br>") + "</div>";
   clearTimeout(say._t);
-  say._t = setTimeout(() => { $("msg").innerHTML = ""; }, 9000);
+  say._t = setTimeout(() => { $("msg").innerHTML = ""; }, bad ? 14000 : 10000);
+}
+
+function busy(btn, label) {
+  btn.dataset.was = btn.textContent;
+  btn.textContent = label;
+  btn.disabled = true;
+}
+
+function unbusy(btn) {
+  if (btn.dataset.was) btn.textContent = btn.dataset.was;
+  btn.disabled = false;
 }
 
 function escape_(s) {
@@ -977,6 +1012,8 @@ function render(s) {
 }
 
 async function refresh() {
+  if (poller === null) return;          // host is rebooting or halting
+
   try {
     render(await api("/api/status"));
   } catch (e) {
@@ -990,19 +1027,32 @@ document.addEventListener("click", async ev => {
 
   try {
     if (b.dataset.log) {
-      b.disabled = true;
-      const r = await post("logs", {unit: b.dataset.log});
-      $("logs").style.display = "block";
-      $("logs").textContent = r.lines || "(empty)";
-      $("logs").scrollTop = $("logs").scrollHeight;
-      b.disabled = false;
+      busy(b, "…");
+      try {
+        const r = await post("logs", {unit: b.dataset.log});
+        const pre = $("logs");
+        pre.style.display = "block";
+        pre.textContent = r.lines || "(no journal entries)";
+        /* Newest last, so show the end - and bring the block itself
+           into view, since on a phone it opens below the fold. */
+        pre.scrollTop = pre.scrollHeight;
+        pre.scrollIntoView({behavior: "smooth", block: "nearest"});
+        say(`${b.dataset.log}: ${(r.lines || "").split("\n").length} log lines`);
+      } finally {
+        unbusy(b);
+      }
       return;
     }
 
     if (b.dataset.restart) {
       arm(b, "Restart", async () => {
-        await post("restart", {unit: b.dataset.restart});
-        say("Restarted " + b.dataset.restart);
+        busy(b, "…");
+        try {
+          await post("restart", {unit: b.dataset.restart});
+          say("Restarted " + b.dataset.restart);
+        } finally {
+          unbusy(b);
+        }
         setTimeout(refresh, 1500);
       });
       return;
@@ -1011,8 +1061,13 @@ document.addEventListener("click", async ev => {
     if (b.dataset.toggle) {
       const verb = b.dataset.verb;
       arm(b, verb === "stop" ? "Stop" : "Start", async () => {
-        await post("service", {unit: b.dataset.toggle, verb});
-        say(verb + "ped " + b.dataset.toggle);
+        busy(b, "…");
+        try {
+          await post("service", {unit: b.dataset.toggle, verb});
+          say((verb === "stop" ? "Stopped " : "Started ") + b.dataset.toggle);
+        } finally {
+          unbusy(b);
+        }
         setTimeout(refresh, 1500);
       });
       return;
@@ -1020,9 +1075,18 @@ document.addEventListener("click", async ev => {
 
     if (b.id === "btn-pull") {
       arm(b, "Pull latest", async () => {
-        const r = await post("pull");
-        say(r.changed ? `${r.before} → ${r.after}. ${r.note}.`
-                      : "Already up to date.");
+        /* A fetch over a phone hotspot takes seconds. Without a busy
+           state the button looks inert for the whole of it. */
+        busy(b, "Pulling…");
+        try {
+          const r = await post("pull");
+          say(r.changed
+            ? `Pulled ${r.commits} commit${r.commits === 1 ? "" : "s"}: `
+              + `${r.before} → ${r.after}\n“${r.subject}”\n${r.note}.`
+            : `Already up to date at ${r.after}\n“${r.subject}”`);
+        } finally {
+          unbusy(b);
+        }
         refresh();
       });
       return;
@@ -1031,9 +1095,15 @@ document.addEventListener("click", async ev => {
     const act = b.dataset.act;
     if (act === "reboot" || act === "shutdown") {
       arm(b, act === "reboot" ? "Reboot" : "Shut down", async () => {
+        busy(b, "…");
         await post(act);
-        say(act === "reboot" ? "Rebooting…" : "Halting — wait for the LED, "
-            + "then cut power.");
+        say(act === "reboot"
+          ? "Rebooting — this page will go dead for a minute or so."
+          : "Halting. Wait for the green LED to stop blinking, "
+            + "then cut the powerbank.");
+        /* The host is going away. Polling it just replaces the message
+           the user needs to read with "lost contact". */
+        stopPolling();
       });
     }
   } catch (e) {
@@ -1042,8 +1112,13 @@ document.addEventListener("click", async ev => {
   }
 });
 
+function stopPolling() {
+  clearInterval(poller);
+  poller = null;
+}
+
 refresh();
-setInterval(refresh, 5000);
+poller = setInterval(refresh, 5000);
 </script>
 </body>
 </html>
