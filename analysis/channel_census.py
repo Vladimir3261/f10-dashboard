@@ -31,9 +31,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from bmwdiag.mapping.loader import load_tree                      # noqa: E402
+from bmwdiag.mapping.modes import apply_mode, get_mode, mode_names  # noqa: E402
 from bmwdiag.mapping.polling import PollingClassDef, resolve_classes  # noqa: E402
 
-#: The poll loop's base rate, matching run_car.sh (`--rate 10`).
+#: The poll loop's base rate, matching run_car.sh (`--rate 10`). Only
+#: cycle-based classes depend on it; since OBD mapping v2 the OBD tiers
+#: are wall-clock and this affects `dde_dyn` alone.
 BASE_HZ = 10.0
 
 #: What the ECU behind a target actually is, for the "answered by" column.
@@ -67,12 +70,20 @@ def effective_hz(cls: PollingClassDef, members: int) -> Optional[float]:
     return rate / members if cls.stagger and members > 1 else rate
 
 
-def from_mappings(mapping_dir: str) -> Dict[str, Dict[str, Any]]:
-    """Everything the census knows without touching the lake."""
+def from_mappings(mapping_dir: str, mode: str = "normal") -> Dict[str, Dict[str, Any]]:
+    """
+    Everything the census knows without touching the lake.
+
+    Rates are the ones the mappings declare, scaled by `mode`. This used
+    to force `slow` to a cycle-based every-100 to match the old
+    `--slow-every 100` in run_car.sh; since OBD mapping v2 the mappings
+    declare wall-clock periods and that flag is gone, so overriding here
+    would report a cadence the runtime no longer uses.
+    """
     mappings = list(load_tree(mapping_dir, production_only=False))
-    classes = resolve_classes(
-        [c for m in mappings for c in m.polling_classes],
-        {"slow": PollingClassDef("slow", "cycles", 100.0, 1)},
+    classes = apply_mode(
+        resolve_classes([c for m in mappings for c in m.polling_classes]),
+        get_mode(mode),
     )
 
     # How many requests share each class - needed for stagger arithmetic.
@@ -203,6 +214,9 @@ def main() -> int:
                     help="ssh target for the analytics server "
                          "(default: from terraform output)")
     ap.add_argument("--mappings", default=os.path.join(ROOT, "mappings"))
+    ap.add_argument("--mode", default="normal", choices=sorted(mode_names()),
+                    help="report the rates this drive mode produces "
+                         "(default: %(default)s)")
     args = ap.parse_args()
 
     host = args.host
@@ -216,7 +230,7 @@ def main() -> int:
         except Exception:
             sys.exit("error: no --host given and terraform output unavailable")
 
-    defs = from_mappings(args.mappings)
+    defs = from_mappings(args.mappings, args.mode)
     counts = from_lake(host, args.days)
     errors = errors_from_lake(host, args.days)
 
