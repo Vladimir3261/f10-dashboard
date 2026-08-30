@@ -18,6 +18,11 @@
 -- shown to have had a sane clock, and the 2026-08-29 session is proof
 -- that at least one did not.
 
+-- No AFTER clause, deliberately. This originally said `AFTER mode`, which
+-- made it depend on a column added by 2026-08-30_sessions_mode.sql - a file
+-- that sorts LATER (c < m), so this one ran first, referenced a column that
+-- did not exist yet, and failed. Column position in ClickHouse is cosmetic;
+-- an ordering dependency between migrations is not worth it, and a
+-- migration set that is order-independent is one less thing to get wrong.
 ALTER TABLE telemetry.sessions
-    ADD COLUMN IF NOT EXISTS clock_synced Nullable(UInt8)
-    AFTER mode;
+    ADD COLUMN IF NOT EXISTS clock_synced Nullable(UInt8);
