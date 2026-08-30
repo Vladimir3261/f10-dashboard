@@ -399,6 +399,130 @@ class TheReport(unittest.TestCase):
         self.assertIsNone(report["requests"][0]["period_s"])
 
 
+class WithoutTheCar(unittest.TestCase):
+    """
+    What is knowable before a link exists, and must therefore be shown.
+
+    Which files loaded, their versions, which came via --extra-mappings
+    and the rates they declare are all settled at boot. Reporting nothing
+    until the car answers made the panel unable to distinguish "not
+    connected" from "nothing loaded" - and unable to answer "did my extra
+    mappings load?", which is a driveway question, not a motorway one.
+    """
+
+    def registry(self):
+        registry = engine_registry()
+        base = {m.id for m in registry.mappings}
+        registry.add(load_file(
+            "mappings/candidates/bmw/egs/f10_transmission.yaml"
+        ))
+
+        return registry, {m.id for m in registry.mappings} - base
+
+    def test_the_mapping_set_is_reported_before_any_connection(self):
+        registry, extra = self.registry()
+        diag = live.Diagnostics()
+        diag.publish(registry=registry, extra_ids=extra)
+
+        report = diag.report()
+
+        self.assertFalse(report["ready"])
+
+        ids = [m["id"] for m in report["loaded"]["mappings"]]
+
+        self.assertIn("sae-obd-engine", ids)
+        self.assertIn("candidate-f10-egs-transmission", ids)
+
+    def test_extra_mappings_are_identifiable_without_the_car(self):
+        """The whole point: check the launch was right BEFORE driving."""
+        registry, extra = self.registry()
+        diag = live.Diagnostics()
+        diag.publish(registry=registry, extra_ids=extra)
+
+        loaded = {
+            m["id"]: m for m in diag.report()["loaded"]["mappings"]
+        }
+
+        self.assertTrue(loaded["candidate-f10-egs-transmission"]["extra"])
+        self.assertFalse(loaded["sae-obd-engine"]["extra"])
+
+    def test_declared_rates_are_reported_without_the_car(self):
+        registry, extra = self.registry()
+        diag = live.Diagnostics()
+        diag.publish(registry=registry, extra_ids=extra)
+
+        classes = {
+            c["name"]: c for c in diag.report()["loaded"]["classes"]
+        }
+
+        self.assertEqual(classes["motion"]["period_s"], 0.1)
+        self.assertEqual(classes["motion"]["requests"], 4)
+        self.assertEqual(classes["rare"]["period_s"], 60.0)
+
+    def test_a_staggered_class_reports_its_per_channel_rate_here_too(self):
+        registry = engine_registry()
+        registry.add(load_file(
+            "mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"
+        ))
+        diag = live.Diagnostics()
+        diag.publish(registry=registry)
+
+        dde = next(
+            c for c in diag.report()["loaded"]["classes"]
+            if c["name"] == "dde_dyn"
+        )
+
+        self.assertTrue(dde["stagger"])
+        #: 0.5s per firing x 9 members in that file.
+        self.assertAlmostEqual(dde["period_s"], 0.5 * dde["requests"])
+
+    def test_a_disconnect_keeps_what_does_not_depend_on_the_car(self):
+        """
+        A stale SESSION reads as live and is worse than none. The mapping
+        set is a property of how the process was started, not of the
+        link, so it must survive.
+        """
+        registry, extra = self.registry()
+        diag = live.Diagnostics()
+        diag.publish(registry=registry, extra_ids=extra)
+
+        profile = registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+        diag.publish(profile=profile, ecu="DDE")
+
+        self.assertTrue(diag.report()["ready"])
+
+        diag.clear("ConnectionResetError: another tool connected?")
+        report = diag.report()
+
+        self.assertFalse(report["ready"])
+        self.assertIn("another tool", report["detail"])
+        #: session facts gone...
+        self.assertNotIn("session", report)
+        #: ...loaded facts kept.
+        self.assertEqual(len(report["loaded"]["mappings"]), 2)
+
+    def test_a_connected_report_carries_both(self):
+        registry, extra = self.registry()
+        diag = live.Diagnostics()
+        diag.publish(registry=registry, extra_ids=extra)
+        diag.publish(profile=registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        ))
+
+        report = diag.report()
+
+        self.assertTrue(report["ready"])
+        self.assertIn("loaded", report)
+        self.assertIn("mappings", report)
+
+    def test_no_registry_at_all_is_empty_not_a_crash(self):
+        self.assertEqual(live.Diagnostics().report()["loaded"]["mappings"], [])
+
+
 class NotOnTheShareSurface(unittest.TestCase):
     def test_diagnostics_is_not_share_visible(self):
         """
