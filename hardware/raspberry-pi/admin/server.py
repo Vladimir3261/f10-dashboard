@@ -53,6 +53,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -82,7 +83,19 @@ DEFAULTS: Dict[str, Any] = {
     "services": ["f10-dashboard", "f10-sync"],
     #: Where the sync agent's read-only status lives.
     "sync_status_url": "http://127.0.0.1:8091/sync/status",
+    #: The agent's control endpoints. live.py deliberately does NOT
+    #: proxy these - its dashboard can be shared publicly. This panel is
+    #: authenticated and LAN-only, so it is the right place for them.
+    "sync_control_url": "http://127.0.0.1:8091",
+    #: The runtime's own snapshot. "Is the service up?" and "is data
+    #: landing?" are different questions; this answers the second.
+    "dashboard_status_url": "http://127.0.0.1:8080/api/snapshot",
+    #: Per-drive databases, and the agent's watermark file.
+    "sessions_dir": "/home/f10/f10-dashboard/local/sessions",
+    "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",
     "log_lines": 200,
+    #: How far back "is it recording?" looks, in seconds.
+    "recording_window_s": 60,
 }
 
 
@@ -265,6 +278,197 @@ def read_disk(path: str) -> Dict[str, Any]:
     }
 
 
+def _fetch_json(url: str, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def newest_session(sessions_dir: str) -> Optional[str]:
+    """The database the runtime is most likely writing to right now."""
+    try:
+        names = [
+            os.path.join(sessions_dir, n)
+            for n in os.listdir(sessions_dir) if n.endswith(".db")
+        ]
+    except OSError:
+        return None
+
+    if not names:
+        return None
+
+    return max(names, key=lambda p: os.path.getmtime(p))
+
+
+def read_recording(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Is data actually landing?
+
+    A green dot on the service only means the PROCESS is up. It is
+    equally green with the ENET cable out, the car asleep, or the
+    gateway refusing - and that is the failure worth catching in the
+    driveway rather than in the lake a week later. So this counts rows
+    that reached the database in the last minute, which is the only
+    answer that cannot be faked by a healthy-looking process.
+    """
+    window = float(cfg["recording_window_s"])
+    out: Dict[str, Any] = {
+        "db": None, "samples": None, "channels": None, "window_s": window,
+        "run": None, "mode": None, "clock_synced": None, "since": None,
+    }
+
+    #: The runtime's own view: link state, loop rate, drive mode.
+    snap = _fetch_json(cfg["dashboard_status_url"])
+
+    if snap is not None:
+        out.update({
+            "link": bool(snap.get("connected")),
+            "status": snap.get("status") or "",
+            "hz": snap.get("hz"),
+            "mode": snap.get("mode"),
+            "duty": snap.get("duty"),
+            "clock_synced": snap.get("clock_synced"),
+            "ecu": snap.get("ecu"),
+        })
+    else:
+        out["link"] = None
+        out["status"] = "runtime not answering"
+
+    path = newest_session(cfg["sessions_dir"])
+
+    if path is None:
+        return out
+
+    out["db"] = os.path.basename(path)
+
+    try:
+        #: Read-only; the runtime is writing this file. WAL allows
+        #: concurrent readers, and both processes run as the same user.
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+
+        try:
+            cutoff = time.time() - window
+            row = con.execute(
+                "SELECT count(*), count(DISTINCT param_id) FROM samples "
+                "WHERE ts > ?", (cutoff,),
+            ).fetchone()
+            out["samples"], out["channels"] = row[0], row[1]
+
+            #
+            # Only select columns this database actually has. `mode` and
+            # `clock_synced` arrived on 2026-08-30; a drive recorded
+            # before that has neither, and asking for them fails the
+            # whole query - which would blank the recording panel for
+            # every older file on the card.
+            #
+            have = {
+                r[1] for r in con.execute("PRAGMA table_info(runs)")
+            }
+            optional = [c for c in ("mode", "clock_synced") if c in have]
+            columns = ["id", "started_at"] + optional
+
+            run = con.execute(
+                f"SELECT {', '.join(columns)} FROM runs "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+            if run:
+                out["run"] = run[0]
+                out["since"] = run[1]
+
+                for name, value in zip(optional, run[2:]):
+                    out["run_" + name] = value
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+
+    return out
+
+
+def _watermarks(state_file: str) -> Dict[str, int]:
+    """Per-database synced rowid, from the sync agent's state file."""
+    try:
+        with open(state_file, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+    return {
+        os.path.basename(db): int(v.get("samples_rowid") or 0)
+        for db, v in data.items() if isinstance(v, dict)
+    }
+
+
+def read_session_files(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Every per-drive database, with size and whether the lake has it.
+
+    Disk-free tells you the card is filling; this tells you what to do
+    about it. `synced` compares the agent's watermark against the
+    database's own top rowid, so "safe to delete" is a fact rather than
+    a guess.
+    """
+    sessions_dir = cfg["sessions_dir"]
+    marks = _watermarks(cfg["sync_state_file"])
+    active = newest_session(sessions_dir)
+    out: List[Dict[str, Any]] = []
+
+    try:
+        names = sorted(
+            n for n in os.listdir(sessions_dir) if n.endswith(".db")
+        )
+    except OSError:
+        return out
+
+    for name in names:
+        path = os.path.join(sessions_dir, name)
+
+        try:
+            size = os.path.getsize(path)
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+
+        top = None
+
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+
+            try:
+                top = con.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM samples"
+                ).fetchone()[0]
+            finally:
+                con.close()
+        except sqlite3.Error:
+            pass
+
+        synced_to = marks.get(name)
+        out.append({
+            "name": name,
+            "size_mb": round(size / 1e6, 1),
+            "mtime": mtime,
+            "rows": top,
+            "synced_rowid": synced_to,
+            #: Unknown (None) whenever either number is missing - never
+            #: guessed, because the answer gates a deletion.
+            "synced": (
+                None if top is None or synced_to is None
+                else synced_to >= top
+            ),
+            "active": path == active,
+        })
+
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+
+    return out
+
+
 def read_service(unit: str) -> Dict[str, Any]:
     code, state = run(
         ["systemctl", "is-active", unit], timeout=5.0
@@ -348,6 +552,8 @@ def status(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "clock": read_clock(),
         "wifi": read_wifi(),
         "disk": read_disk(repo),
+        "recording": read_recording(cfg),
+        "sessions": read_session_files(cfg),
         "services": [read_service(u) for u in cfg["services"]],
         "git": read_git(repo, cfg["git_remote"], cfg["git_branch"]),
         "sync": read_sync(cfg["sync_status_url"]),
@@ -361,19 +567,151 @@ class ActionError(Exception):
     """A refusal the user should see, not a crash."""
 
 
+#: How far back `logs` may reach. 0 is this boot, -1 the previous one.
+#: After an unexplained reboot or a power cut the interesting log is the
+#: one from BEFORE, which is otherwise an SSH job. Bounded so the
+#: argument can never be an arbitrary string on a journalctl command
+#: line, and shallow because the Pi keeps few boots.
+MAX_BOOTS_BACK = 5
+
+
 def action_logs(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     unit = body.get("unit")
 
     if unit not in cfg["services"]:
         raise ActionError(f"unknown unit {unit!r}")
 
+    boot = body.get("boot", 0)
+
+    if not isinstance(boot, int) or isinstance(boot, bool):
+        raise ActionError("boot must be an integer")
+
+    if not -MAX_BOOTS_BACK <= boot <= 0:
+        raise ActionError(
+            f"boot must be between -{MAX_BOOTS_BACK} and 0"
+        )
+
     lines = int(cfg["log_lines"])
     code, out = run([
-        "journalctl", "-u", unit, "-n", str(lines),
+        "journalctl", "-u", unit, "-n", str(lines), "-b", str(boot),
         "--no-pager", "--output=short-iso",
     ], timeout=20.0)
 
-    return {"unit": unit, "lines": out, "ok": code == 0}
+    #: A boot that far back may simply not exist; that is an answer, not
+    #: a failure.
+    if code != 0 and "Data from the specified boot" in out:
+        return {"unit": unit, "boot": boot, "ok": True,
+                "lines": f"(no journal kept for boot {boot})"}
+
+    return {"unit": unit, "boot": boot, "lines": out, "ok": code == 0}
+
+
+def action_sync(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pause or resume the sync agent.
+
+    live.py deliberately does not proxy these - its dashboard can be
+    handed out as a public share link. This panel is authenticated and
+    LAN-only, so it is where they belong.
+
+    There is no "flush now": the agent already polls every few seconds
+    once it is caught up, so forcing one would save a handful of seconds
+    and add an endpoint for nothing.
+    """
+    import urllib.request
+
+    verb = body.get("verb")
+
+    if verb not in ("pause", "resume"):
+        raise ActionError(f"unknown verb {verb!r}")
+
+    url = cfg["sync_control_url"].rstrip("/") + f"/sync/{verb}"
+
+    try:
+        request = urllib.request.Request(url, data=b"", method="POST")
+
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            response.read()
+    except Exception as exc:
+        raise ActionError(f"sync agent did not answer: {exc}")
+
+    return {"sync": verb}
+
+
+def action_delete_session(cfg: Dict[str, Any],
+                          body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Delete one per-drive database.
+
+    The only action that removes data, so it is the most carefully
+    fenced:
+
+      * the name must be a bare filename - resolved and checked to be
+        inside the sessions directory, so no path can escape it;
+      * the database the runtime is currently writing is never a target;
+      * and it must be fully shipped to the lake, unless the caller
+        explicitly says otherwise. A drive that exists nowhere else is
+        not something to lose to a mis-tap in a car park.
+    """
+    name = body.get("name")
+
+    if not isinstance(name, str) or not name:
+        raise ActionError("name is required")
+
+    #: Reject anything that is not a plain filename BEFORE touching the
+    #: filesystem: no separators, no traversal, no absolute paths.
+    if name != os.path.basename(name) or name in (".", ".."):
+        raise ActionError(f"invalid name {name!r}")
+
+    if not name.endswith(".db"):
+        raise ActionError("only .db session files can be deleted")
+
+    sessions_dir = os.path.realpath(cfg["sessions_dir"])
+    path = os.path.realpath(os.path.join(sessions_dir, name))
+
+    #: Belt and braces: even a symlink inside the directory must not
+    #: resolve to somewhere else.
+    if os.path.dirname(path) != sessions_dir:
+        raise ActionError(f"{name!r} is outside the sessions directory")
+
+    if not os.path.isfile(path):
+        raise ActionError(f"{name!r} does not exist")
+
+    #: Both sides resolved: `path` is a realpath, so comparing it to a
+    #: raw join silently never matches wherever the sessions directory
+    #: sits behind a symlink (/var -> /private/var on macOS, and any
+    #: bind-mounted or linked data directory on the Pi). That would
+    #: leave the live database deletable.
+    active = newest_session(cfg["sessions_dir"])
+
+    if active and os.path.realpath(active) == path:
+        raise ActionError(
+            f"{name!r} is the newest database - the runtime is probably "
+            f"writing it. Stop f10-dashboard first if you really mean to."
+        )
+
+    entry = next(
+        (r for r in read_session_files(cfg) if r["name"] == name), None
+    )
+
+    if not body.get("force") and (entry is None or entry["synced"] is not True):
+        raise ActionError(
+            f"{name!r} is not confirmed synced to the lake - refusing. "
+            f"Deleting it would lose that drive entirely."
+        )
+
+    freed = 0
+
+    for suffix in ("", "-wal", "-shm"):
+        target = path + suffix
+
+        try:
+            freed += os.path.getsize(target)
+            os.remove(target)
+        except OSError:
+            pass
+
+    return {"deleted": name, "freed_mb": round(freed / 1e6, 1)}
 
 
 def action_restart(cfg: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
@@ -508,6 +846,8 @@ ACTIONS = {
     "logs": action_logs,
     "restart": action_restart,
     "service": action_service,
+    "sync": action_sync,
+    "delete_session": action_delete_session,
     "pull": action_pull,
     "reboot": action_reboot,
     "shutdown": action_shutdown,
@@ -515,7 +855,10 @@ ACTIONS = {
 
 #: Actions that interrupt a drive or run new code. The page asks twice
 #: for these; the server records that they were confirmed.
-DESTRUCTIVE = frozenset({"reboot", "shutdown", "pull", "restart", "service"})
+DESTRUCTIVE = frozenset({
+    "reboot", "shutdown", "pull", "restart", "service", "sync",
+    "delete_session",
+})
 
 
 # ------------------------------------------------------------- server
@@ -810,6 +1153,35 @@ PAGE = r"""<!doctype html>
   .msg.ok  { background:#123a2a; color:#a8ecc8; border:1px solid #1d6b4c; }
   .msg.err { background:#3d1e1e; color:#ffc0c0; border:1px solid #7a3232; }
   .flags { margin-top:8px; font-size:12.5px; color:var(--warn); }
+  .rec { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .rec .big { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .rec .big.on  { color:var(--good); }
+  .rec .big.off { color:var(--bad); }
+  .rec .unit { font-size:13px; color:var(--muted); }
+  .recmeta { margin-top:9px; font-size:12.5px; color:var(--muted);
+             display:flex; gap:6px 14px; flex-wrap:wrap;
+             font-variant-numeric:tabular-nums; }
+  .recmeta b { color:var(--text); font-weight:600; }
+  .recwarn { margin-top:9px; font-size:13px; color:var(--bad); }
+  .sess { display:flex; align-items:center; gap:10px; padding:10px 0;
+          border-bottom:1px solid var(--line); }
+  .sess:last-child { border-bottom:0; padding-bottom:0; }
+  .sess:first-child { padding-top:0; }
+  .sess .nm { flex:1; min-width:0; }
+  .sess .nm b { display:block; font-size:12.5px; font-weight:600;
+                font-family:ui-monospace,Menlo,monospace;
+                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .nm span { display:block; font-size:11.5px; color:var(--muted); }
+  .sess .tick { font-size:11px; padding:2px 7px; border-radius:99px;
+                white-space:nowrap; }
+  .tick.yes { background:#0f2f22; color:#8fe3bd; }
+  .tick.no  { background:#3a2a12; color:#e8c489; }
+  .tick.live{ background:#152b45; color:#9dc6f5; }
+  .prevboot { display:inline-flex; align-items:center; gap:7px;
+              margin-top:10px; font-size:12.5px; color:var(--muted); }
+  .prevboot input { width:17px; height:17px; accent-color:var(--accent); }
+  .syncrow { display:flex; gap:8px; margin-top:12px; }
+  .syncrow > button { flex:1; }
   .git { font-size:13px; }
   .git .rev { font-family:ui-monospace,Menlo,monospace; font-weight:600; }
   .git .sub2 { color:var(--muted); font-size:12px; margin-top:3px;
@@ -825,10 +1197,18 @@ PAGE = r"""<!doctype html>
   <h1 id="host">F10 Pi</h1>
   <p class="sub" id="sub">connecting…</p>
 
+  <!-- First card on purpose: "is it recording?" is the question you
+       actually open this page to answer. -->
+  <div class="card" id="reccard">
+    <h2>Recording</h2>
+    <div id="recording"></div>
+  </div>
+
   <div class="card">
     <h2>Health</h2>
     <div class="grid" id="health"></div>
     <div class="flags" id="flags"></div>
+    <div class="syncrow" id="syncrow"></div>
   </div>
 
   <div class="card">
@@ -845,8 +1225,16 @@ PAGE = r"""<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Drive files</h2>
+    <div id="sessions"></div>
+  </div>
+
+  <div class="card">
     <h2>Logs</h2>
     <div class="row" id="logbuttons"></div>
+    <label class="prevboot">
+      <input type="checkbox" id="prevboot"> previous boot
+    </label>
     <pre id="logs" style="display:none"></pre>
   </div>
 
@@ -986,6 +1374,16 @@ function render(s) {
   $("flags").textContent =
     th && !th.ok ? "⚠ " + th.flags.join(" · ") : "";
 
+  /* Pause/resume live here rather than on live.py's dashboard, which
+     can be handed out as a public share link. */
+  $("syncrow").innerHTML = !sync.reachable ? ""
+    : sync.enabled
+      ? '<button data-sync="pause">Pause sync</button>'
+      : '<button data-sync="resume">Resume sync</button>';
+
+  renderRecording(s.recording || {}, s.services || []);
+  renderSessions(s.sessions || []);
+
   $("services").innerHTML = (s.services || []).map(sv => `
     <div class="svc">
       <span class="dot ${sv.active ? "on" : ""}"></span>
@@ -1011,6 +1409,79 @@ function render(s) {
     .join("");
 }
 
+/* "Is the service up?" and "is data landing?" are different questions.
+   A process can be perfectly healthy with the ENET cable out. */
+function renderRecording(r, services) {
+  const n = r.samples;
+  const live = n > 0;
+  const runningUnit = (services.find(x => x.unit === "f10-dashboard") || {});
+  const w = r.window_s || 60;
+
+  let head;
+  if (!runningUnit.active) {
+    head = `<span class="big off">stopped</span>`
+         + `<span class="unit">f10-dashboard is not running</span>`;
+  } else if (n == null) {
+    head = `<span class="big off">?</span>`
+         + `<span class="unit">no drive file yet</span>`;
+  } else {
+    head = `<span class="big ${live ? "on" : "off"}">`
+         + `${n.toLocaleString()}</span>`
+         + `<span class="unit">samples in the last ${w}s`
+         + (r.channels ? ` · ${r.channels} channels` : "") + `</span>`;
+  }
+
+  const bits = [];
+  if (r.link != null) bits.push(`car <b>${r.link ? "linked" : "no link"}</b>`);
+  if (r.hz) bits.push(`<b>${r.hz}</b> Hz`);
+  if (r.mode) bits.push(`mode <b>${escape_(r.mode)}</b>`
+    + (r.duty === "asleep" ? " (asleep)" : ""));
+  if (r.run != null) bits.push(`run <b>${r.run}</b>`);
+  if (r.db) bits.push(escape_(r.db));
+
+  let warn = "";
+  if (runningUnit.active && r.link === false)
+    warn = "⚠ the runtime is up but not talking to the car — check the cable";
+  else if (runningUnit.active && n === 0)
+    warn = "⚠ connected, but nothing has been written for a minute";
+  else if (r.clock_synced === false)
+    warn = "⚠ clock not NTP-synced — timestamps on this run are suspect";
+
+  /* Each item its own element: the row is a flex container with a gap,
+     which does nothing for a single concatenated text run - that is how
+     "9.8 Hz" and "mode normal" ran together as "9.8 Hzmode normal". */
+  $("recording").innerHTML =
+    `<div class="rec">${head}</div>`
+    + `<div class="recmeta">`
+    + bits.map(x => `<span>${x}</span>`).join("")
+    + `</div>`
+    + (warn ? `<div class="recwarn">${escape_(warn)}</div>` : "");
+}
+
+function renderSessions(rows) {
+  if (!rows.length) {
+    $("sessions").innerHTML = '<span class="sub">no drive files</span>';
+    return;
+  }
+
+  $("sessions").innerHTML = rows.map(r => {
+    const tick = r.active ? '<span class="tick live">recording</span>'
+      : r.synced === true ? '<span class="tick yes">in the lake</span>'
+      : r.synced === false ? '<span class="tick no">not shipped</span>'
+      : '<span class="tick no">unknown</span>';
+    const when = new Date(r.mtime * 1000).toLocaleString();
+
+    return `<div class="sess">
+      <span class="nm"><b>${escape_(r.name)}</b>
+        <span>${r.size_mb} MB · ${escape_(when)}</span></span>
+      ${tick}
+      ${r.active ? "" :
+        `<button data-del="${escape_(r.name)}"
+           ${r.synced === true ? "" : "disabled"}>Delete</button>`}
+    </div>`;
+  }).join("");
+}
+
 async function refresh() {
   if (poller === null) return;          // host is rebooting or halting
 
@@ -1026,10 +1497,37 @@ document.addEventListener("click", async ev => {
   if (!b) return;
 
   try {
+    if (b.dataset.del) {
+      arm(b, "Delete", async () => {
+        busy(b, "…");
+        try {
+          const r = await post("delete_session", {name: b.dataset.del});
+          say(`Deleted ${r.deleted} — ${r.freed_mb} MB freed`);
+        } finally {
+          unbusy(b);
+        }
+        refresh();
+      });
+      return;
+    }
+
+    if (b.dataset.sync) {
+      busy(b, "…");
+      try {
+        await post("sync", {verb: b.dataset.sync, confirm: true});
+        say("Sync " + (b.dataset.sync === "pause" ? "paused" : "resumed"));
+      } finally {
+        unbusy(b);
+      }
+      setTimeout(refresh, 800);
+      return;
+    }
+
     if (b.dataset.log) {
       busy(b, "…");
       try {
-        const r = await post("logs", {unit: b.dataset.log});
+        const boot = $("prevboot").checked ? -1 : 0;
+        const r = await post("logs", {unit: b.dataset.log, boot});
         const pre = $("logs");
         pre.style.display = "block";
         pre.textContent = r.lines || "(no journal entries)";
@@ -1037,7 +1535,8 @@ document.addEventListener("click", async ev => {
            into view, since on a phone it opens below the fold. */
         pre.scrollTop = pre.scrollHeight;
         pre.scrollIntoView({behavior: "smooth", block: "nearest"});
-        say(`${b.dataset.log}: ${(r.lines || "").split("\n").length} log lines`);
+        say(`${b.dataset.log}${boot ? " (previous boot)" : ""}: `
+            + `${(r.lines || "").split("\n").length} log lines`);
       } finally {
         unbusy(b);
       }

@@ -14,8 +14,11 @@ anything actually happening.
 import base64
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -533,6 +536,311 @@ class ChangedPull(AdminCase):
         self.assertIn("commits", body)
         self.assertIn("subject", body)
         self.assertIn("note", body)
+
+
+class SessionDeletion(AdminCase):
+    """
+    The only action that removes data, so the most heavily fenced.
+
+    A session database that has not reached the lake exists in exactly
+    one place. Deleting it loses that drive permanently.
+    """
+
+    def setUp(self):
+        self.sessions = tempfile.mkdtemp()
+        self.state = os.path.join(tempfile.mkdtemp(), "sync-state.json")
+        self.config = dict(
+            getattr(type(self), "config", {}),
+            sessions_dir=self.sessions,
+            sync_state_file=self.state,
+            dashboard_status_url="http://127.0.0.1:9/nope",
+        )
+        super().setUp()
+
+    def _session(self, name, rows=10, synced_rows=None, age=0):
+        """A plausible session db, optionally marked synced."""
+        path = os.path.join(self.sessions, name)
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE samples(run_id INT, ts REAL, param_id INT,"
+            " value REAL);"
+            "CREATE TABLE runs(id INTEGER PRIMARY KEY, started_at REAL,"
+            " ended_at REAL, mode TEXT, clock_synced INT);"
+        )
+        con.executemany(
+            "INSERT INTO samples VALUES(1, ?, 1, 1.0)",
+            [(time.time(),) for _ in range(rows)],
+        )
+        con.commit()
+        con.close()
+
+        if age:
+            past = time.time() - age
+            os.utime(path, (past, past))
+
+        if synced_rows is not None:
+            marks = {}
+
+            if os.path.exists(self.state):
+                with open(self.state, encoding="utf-8") as fh:
+                    marks = json.load(fh)
+
+            marks[path] = {"samples_rowid": synced_rows}
+
+            with open(self.state, "w", encoding="utf-8") as fh:
+                json.dump(marks, fh)
+
+        return path
+
+    def test_a_synced_older_session_can_be_deleted(self):
+        self._session("drive-new.db", rows=5)                    # active
+        self._session("drive-old.db", rows=10, synced_rows=10, age=9000)
+
+        body = json.loads(self.post(
+            "delete_session", {"name": "drive-old.db", "confirm": True}
+        ).read())
+
+        self.assertEqual(body["deleted"], "drive-old.db")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.sessions, "drive-old.db"))
+        )
+
+    def test_an_unshipped_session_is_refused(self):
+        """It exists nowhere else. Losing it loses the drive."""
+        self._session("drive-new.db", rows=5)
+        self._session("drive-old.db", rows=10, synced_rows=3, age=9000)
+
+        body = self.assert_status(
+            409, self.post, "delete_session",
+            {"name": "drive-old.db", "confirm": True},
+        )
+
+        self.assertIn("not confirmed synced", body["error"])
+        self.assertTrue(
+            os.path.exists(os.path.join(self.sessions, "drive-old.db"))
+        )
+
+    def test_a_session_with_no_watermark_is_refused(self):
+        """Unknown is not permission."""
+        self._session("drive-new.db", rows=5)
+        self._session("drive-old.db", rows=10, age=9000)
+
+        self.assert_status(
+            409, self.post, "delete_session",
+            {"name": "drive-old.db", "confirm": True},
+        )
+
+    def test_the_active_database_is_never_deletable(self):
+        """The runtime is writing it."""
+        self._session("drive-new.db", rows=5, synced_rows=5)
+
+        body = self.assert_status(
+            409, self.post, "delete_session",
+            {"name": "drive-new.db", "confirm": True},
+        )
+
+        self.assertIn("newest", body["error"])
+
+    def test_path_traversal_is_refused(self):
+        outside = os.path.join(os.path.dirname(self.sessions), "keep.db")
+
+        with open(outside, "w") as fh:
+            fh.write("x")
+
+        for name in ("../keep.db", "/etc/passwd", "sub/../../keep.db",
+                     "..", ".", ""):
+            with self.subTest(name=name):
+                self.assert_status(
+                    409, self.post, "delete_session",
+                    {"name": name, "confirm": True},
+                )
+
+        self.assertTrue(os.path.exists(outside), "escaped the sessions dir")
+
+    def test_only_db_files_can_be_deleted(self):
+        other = os.path.join(self.sessions, "notes.txt")
+
+        with open(other, "w") as fh:
+            fh.write("x")
+
+        self.assert_status(
+            409, self.post, "delete_session",
+            {"name": "notes.txt", "confirm": True},
+        )
+        self.assertTrue(os.path.exists(other))
+
+    def test_deletion_needs_confirmation_like_everything_destructive(self):
+        self._session("drive-new.db", rows=5)
+        self._session("drive-old.db", rows=10, synced_rows=10, age=9000)
+
+        self.assert_status(
+            400, self.post, "delete_session", {"name": "drive-old.db"}
+        )
+        self.assertTrue(
+            os.path.exists(os.path.join(self.sessions, "drive-old.db"))
+        )
+
+    def test_the_listing_marks_what_is_safe(self):
+        self._session("drive-new.db", rows=5)
+        self._session("drive-old.db", rows=10, synced_rows=10, age=9000)
+        self._session("drive-part.db", rows=10, synced_rows=2, age=18000)
+
+        rows = {
+            r["name"]: r
+            for r in json.loads(self.get("/api/status").read())["sessions"]
+        }
+
+        self.assertTrue(rows["drive-new.db"]["active"])
+        self.assertTrue(rows["drive-old.db"]["synced"])
+        self.assertFalse(rows["drive-part.db"]["synced"])
+
+
+class RecordingTruth(AdminCase):
+    """
+    "The service is active" and "data is landing" are different claims.
+
+    A green dot is equally green with the ENET cable out, so the panel
+    counts rows that actually reached the database.
+    """
+
+    def setUp(self):
+        self.sessions = tempfile.mkdtemp()
+        self.config = dict(
+            getattr(type(self), "config", {}),
+            sessions_dir=self.sessions,
+            sync_state_file="/nonexistent/sync-state.json",
+            dashboard_status_url="http://127.0.0.1:9/nope",
+            recording_window_s=60,
+        )
+        super().setUp()
+
+    def _db(self, name, fresh=0, stale=0):
+        path = os.path.join(self.sessions, name)
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE samples(run_id INT, ts REAL, param_id INT,"
+            " value REAL);"
+            "CREATE TABLE runs(id INTEGER PRIMARY KEY, started_at REAL,"
+            " ended_at REAL, mode TEXT, clock_synced INT);"
+        )
+        con.execute(
+            "INSERT INTO runs VALUES(7, ?, NULL, 'normal', 1)",
+            (time.time() - 300,),
+        )
+        now = time.time()
+        con.executemany(
+            "INSERT INTO samples VALUES(7, ?, ?, 1.0)",
+            [(now - 5, i % 4) for i in range(fresh)],
+        )
+        con.executemany(
+            "INSERT INTO samples VALUES(7, ?, 1, 1.0)",
+            [(now - 3600,) for _ in range(stale)],
+        )
+        con.commit()
+        con.close()
+
+    def test_recent_samples_are_counted(self):
+        self._db("drive.db", fresh=120, stale=500)
+
+        rec = json.loads(self.get("/api/status").read())["recording"]
+
+        self.assertEqual(rec["samples"], 120)
+        self.assertEqual(rec["channels"], 4)
+        self.assertEqual(rec["run"], 7)
+
+    def test_an_idle_recorder_reads_zero_not_missing(self):
+        """
+        Zero is the whole point: it is the difference between "up" and
+        "working", and it must be a number rather than an absence.
+        """
+        self._db("drive.db", fresh=0, stale=500)
+
+        rec = json.loads(self.get("/api/status").read())["recording"]
+
+        self.assertEqual(rec["samples"], 0)
+
+    def test_no_drive_file_is_reported_not_crashed(self):
+        rec = json.loads(self.get("/api/status").read())["recording"]
+
+        self.assertIsNone(rec["db"])
+        self.assertIsNone(rec["samples"])
+
+    def test_a_database_predating_mode_and_clock_still_reads(self):
+        """
+        `runs.mode` and `runs.clock_synced` arrived on 2026-08-30. Asking
+        an older drive file for them fails the whole query, which would
+        blank the recording panel for every historical file on the card.
+        """
+        path = os.path.join(self.sessions, "old.db")
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE samples(run_id INT, ts REAL, param_id INT,"
+            " value REAL);"
+            "CREATE TABLE runs(id INTEGER PRIMARY KEY, started_at REAL,"
+            " ended_at REAL);"
+        )
+        con.execute("INSERT INTO runs VALUES(3, 1.0, NULL)")
+        con.execute(
+            "INSERT INTO samples VALUES(3, ?, 1, 1.0)", (time.time(),)
+        )
+        con.commit()
+        con.close()
+
+        rec = json.loads(self.get("/api/status").read())["recording"]
+
+        self.assertNotIn("error", rec)
+        self.assertEqual(rec["run"], 3)
+        self.assertEqual(rec["samples"], 1)
+
+    def test_an_unreachable_runtime_is_reported(self):
+        self._db("drive.db", fresh=10)
+
+        rec = json.loads(self.get("/api/status").read())["recording"]
+
+        self.assertIsNone(rec["link"])
+        self.assertIn("not answering", rec["status"])
+
+
+class BootScopedLogs(AdminCase):
+    def test_the_previous_boot_can_be_read(self):
+        self.post("logs", {"unit": "f10-dashboard", "boot": -1})
+
+        self.assertTrue(self.fake.ran("journalctl", "-b", "-1"))
+
+    def test_the_current_boot_is_the_default(self):
+        self.post("logs", {"unit": "f10-dashboard"})
+
+        self.assertTrue(self.fake.ran("journalctl", "-b", "0"))
+
+    def test_the_boot_argument_is_bounded_and_typed(self):
+        """
+        It reaches a journalctl command line, so it must never be an
+        arbitrary string or an unbounded number.
+        """
+        for boot in ("-1", 1, -99, 2.5, True, None):
+            with self.subTest(boot=boot):
+                self.assert_status(
+                    409, self.post, "logs",
+                    {"unit": "f10-dashboard", "boot": boot},
+                )
+
+        self.assertEqual(self.fake.calls, [])
+
+
+class SyncControl(AdminCase):
+    def test_only_pause_and_resume_are_accepted(self):
+        for verb in ("stop", "flush", "", None):
+            with self.subTest(verb=verb):
+                self.assert_status(
+                    409, self.post, "sync", {"verb": verb, "confirm": True}
+                )
+
+    def test_an_unreachable_agent_is_an_error_not_a_crash(self):
+        body = self.assert_status(
+            409, self.post, "sync", {"verb": "pause", "confirm": True}
+        )
+
+        self.assertIn("did not answer", body["error"])
 
 
 class DeploymentFiles(unittest.TestCase):
