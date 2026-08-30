@@ -32,7 +32,13 @@ from .model import (
     SignalDef,
     Verification,
 )
-from .modes import DRIVE_MODES, DriveMode, apply_mode, get_mode, mode_names
+from .modes import (
+    DEFAULT_MODE_CONFIG,
+    DriveMode,
+    ModeTable,
+    apply_mode,
+    load_modes,
+)
 from .polling import PollingPlan, resolve_classes
 from .registry import AllCapabilities, CapabilitySet, MappingRegistry, ResolvedProfile
 
@@ -40,10 +46,11 @@ __all__ = [
     "fault_kind",
     "AllCapabilities",
     "CapabilitySet",
-    "DRIVE_MODES",
+    "DEFAULT_MODE_CONFIG",
     "Decode",
     "DerivedDef",
     "DriveMode",
+    "ModeTable",
     "MappingError",
     "MappingExecutor",
     "MappingFile",
@@ -58,8 +65,7 @@ __all__ = [
     "apply_derived",
     "apply_mode",
     "compute_derived",
-    "get_mode",
-    "mode_names",
+    "load_modes",
     "decode_response",
     "decode_signal",
     "decode_value",

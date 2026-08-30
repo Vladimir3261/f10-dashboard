@@ -22,7 +22,15 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .errors import PollingError
 from .model import PollingClassDef, RequestDef
-from .modes import DriveMode, apply_mode, get_mode
+from .modes import DriveMode, apply_mode
+
+#: What a plan uses when the caller names no mode: scales nothing, so a
+#: plan built without one behaves exactly as the mappings declare. The
+#: scheduler deliberately does NOT load config/modes.yaml itself - a
+#: caller that wants a named mode passes it in, which keeps this module
+#: free of file I/O and keeps the table's version in the caller's hands
+#: where it can be recorded.
+UNSCALED = DriveMode("normal", "the rates the mappings declare")
 
 __all__ = ["DEFAULT_POLLING_CLASSES", "resolve_classes", "PollingPlan"]
 
@@ -82,7 +90,7 @@ class PollingPlan:
         self.declared = dict(
             classes if classes is not None else resolve_classes()
         )
-        self.mode = mode if mode is not None else get_mode(None)
+        self.mode = mode if mode is not None else UNSCALED
         self.classes = apply_mode(self.declared, self.mode)
         self.requests: List[RequestDef] = list(requests)
         self._last: Dict[str, float] = {}

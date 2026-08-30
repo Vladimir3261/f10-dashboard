@@ -1,0 +1,110 @@
+schema_version: 1
+
+# ======================================================================
+# Drive modes - how hard to poll the car.
+#
+# A mode SCALES the polling classes the mapping files declare. It is not
+# a second scheduler: there stays exactly one mechanism deciding when a
+# request is due (bmwdiag/mapping/polling.py). A mapping says what a
+# channel IS - rpm is fast, coolant is slow - and a mode says how much of
+# that the operator wants right now.
+#
+#     effective_period = declared_period * multiplier
+#
+# A multiplier > 1 polls less often, < 1 more often. `normal` is
+# all-ones by definition: it IS the rates the mappings declare.
+#
+# WHY THIS IS DATA, NOT CODE
+#
+# Everything else the runtime needs to know about polling lives in
+# versioned files; the mode table was the one exception, which made
+# tuning a duty window a code change. Only the TABLE is here - the
+# arithmetic that applies it stays in Python. Nothing in this file
+# executes: there is no expression language, and `multipliers` are plain
+# numbers, exactly like the mapping format.
+#
+# VERSIONING - READ THIS BEFORE EDITING
+#
+# `version` below is stamped onto every recorded session as `mode_ver`,
+# next to the mode's name. That is what keeps the name honest: without
+# it, a run labelled `long` in March and one labelled `long` in June
+# could have been taken at different rates and nothing would say so -
+# which is exactly the invisible confound that recording the mode at all
+# is meant to prevent.
+#
+# So: **increment `version` by one on every change to the numbers in this
+# file.** Not for comments or descriptions - those do not alter what any
+# mode does. Same rule as `mapping.version`, and for the same reason.
+#
+# The class names below (`motion`, `context`, ...) must match classes
+# some loaded mapping actually declares. That is checked at load time -
+# a typo used to silently do nothing.
+# ======================================================================
+
+version: 1
+
+# The declared rates - what `normal` means - live in the mapping files:
+#
+#   motion   10 Hz    rpm, speed, map, pedal
+#   context  1/10 s   load, throttle, relthr, torque, maf, rail, lambda
+#   slow     1/10 s   temps, voltage, fuel rate, cat, EGR
+#   rare     1/60 s   ambient, baro, fuel level, runtime, distance
+#   dde_dyn  ~1/11 s each (22 requests, round-robin, one per 0.5 s)
+#   egs      2 Hz     engaged gear
+#
+# Multipliers are annotated with the rate they produce, since a bare
+# number like 0.01 says nothing on its own.
+
+modes:
+
+  # Offered in this order, quietest first. The order is MEASURED, not
+  # assumed - see tests/test_drive_modes.py, which counts requests over a
+  # full duty period. `sampling` lands below `long` because it silences
+  # the fast tiers entirely for ten minutes in twelve, where `long`
+  # merely slows them.
+
+  off:
+    description: connected but silent - no request is sent
+    # Not the same as not running: the link stays up and the ECUs are
+    # left alone, which is what makes it the right tool for isolating
+    # "does the cable keep the car awake?" from "does the polling?".
+    polls: false
+
+  sampling:
+    description: duty-cycled bursts for multi-hour drives
+    # Two minutes of full-rate data every twelve. While awake it polls at
+    # the full declared rate - that is the point of it.
+    duty: {awake: 120, asleep: 600}
+    # The slow classes never sleep. The events worth catching on a long
+    # drive - a thermal excursion, a regeneration - are exactly the ones
+    # that would start and finish inside a quiet window.
+    exempt: [slow, rare, dde_dyn]
+
+  long:
+    description: motorway cruising - most samples are redundant
+    # On cruise control the car can hold one gear and speed for
+    # kilometres, so the fast tier is nearly all duplicate rows.
+    multipliers:
+      motion: 5.0            # 10 Hz   -> 2 Hz
+      context: 3.0           # 1/10 s  -> 1/30 s
+      egs: 4.0               # 2 Hz    -> 0.5 Hz
+      dde_dyn: 2.0           # ~1/11 s -> ~1/22 s
+
+  normal:
+    description: the rates the mappings declare
+    # Deliberately empty. `normal` scales nothing BY DEFINITION, so
+    # "what rate was this recorded at?" is answered by the mapping
+    # version alone and there is no third source of truth.
+
+  debug:
+    description: everything, fast - for investigating a problem
+    # Reproduces the pre-2026-08-30 behaviour: the whole OBD set at the
+    # loop rate, the DDE reads five times faster.
+    multipliers:
+      context: 0.01          # 1/10 s  -> 10 Hz
+      slow: 0.1              # 1/10 s  -> 1 Hz
+      rare: 0.1              # 1/60 s  -> 1/6 s
+      dde_dyn: 0.2           # ~1/11 s -> ~1/2.2 s
+      egs: 0.5               # 2 Hz    -> 4 Hz
+
+default: normal

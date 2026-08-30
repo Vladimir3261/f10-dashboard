@@ -57,6 +57,25 @@ class RecorderStoresTheMode(unittest.TestCase):
 
         self.assertEqual(self._runs()[0][1], "long")
 
+    def test_the_mode_table_version_is_recorded_beside_the_name(self):
+        """
+        The name alone does not identify a rate. Since the mode table is
+        editable config, `long` before and after an edit are different
+        samplings - `mode_ver` is what distinguishes them.
+        """
+        self.rec.start_run("VINREDACTED", "gw", "DDE", 0x12, "long", 3)
+        time.sleep(0.2)
+        self.rec.close()
+
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(
+                con.execute("SELECT mode, mode_ver FROM runs").fetchone(),
+                ("long", "3"),
+            )
+        finally:
+            con.close()
+
     def test_switching_mode_starts_a_new_run(self):
         self.rec.start_run("VINREDACTED", "gw", "DDE", 0x12, "normal")
         time.sleep(0.2)
@@ -119,14 +138,14 @@ class Shipping(unittest.TestCase):
                 " mapping_set TEXT")
 
         if with_mode:
-            cols += ", mode TEXT"
+            cols += ", mode TEXT, mode_ver TEXT"
 
         con.execute(f"CREATE TABLE runs({cols})")
 
         if with_mode:
             con.execute(
                 "INSERT INTO runs VALUES(1,1.0,2.0,'V','gw','DDE',18,"
-                "'sae-obd-engine@2','long')"
+                "'sae-obd-engine@2','long','1')"
             )
         else:
             con.execute(
@@ -144,6 +163,7 @@ class Shipping(unittest.TestCase):
         rows = sync_agent.read_sessions(db, 0)
 
         self.assertEqual(rows[0]["mode"], "long")
+        self.assertEqual(rows[0]["mode_ver"], "1")
 
     def test_a_database_recorded_before_modes_still_syncs(self):
         """
@@ -156,6 +176,7 @@ class Shipping(unittest.TestCase):
         rows = sync_agent.read_sessions(db, 0)
 
         self.assertEqual(rows[0]["mode"], "")
+        self.assertEqual(rows[0]["mode_ver"], "")
 
     def test_the_ingest_server_builds_the_column(self):
         db = os.path.join(tempfile.mkdtemp(), "t.db")
@@ -171,6 +192,7 @@ class Shipping(unittest.TestCase):
         built = ingest_server.build_sessions(batch)
 
         self.assertEqual(built[0]["mode"], "long")
+        self.assertEqual(built[0]["mode_ver"], "1")
 
     def test_the_mode_survives_the_wire_format(self):
         db = os.path.join(tempfile.mkdtemp(), "t.db")
@@ -214,6 +236,7 @@ class SchemaMatchesTheWriter(unittest.TestCase):
             sql = fh.read()
 
         self.assertIn("ADD COLUMN IF NOT EXISTS mode", sql)
+        self.assertIn("ADD COLUMN IF NOT EXISTS mode_ver", sql)
         self.assertIn("telemetry.sessions", sql)
 
 

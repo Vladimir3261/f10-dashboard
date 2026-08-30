@@ -16,3 +16,11 @@
 ALTER TABLE telemetry.sessions
     ADD COLUMN IF NOT EXISTS mode LowCardinality(String) DEFAULT ''
     AFTER mappings;
+
+-- Version of the mode table the name above refers to. Added with the
+-- move of the mode table out of Python and into config/modes.yaml: once
+-- the table is editable data, a mode NAME no longer identifies a rate on
+-- its own.
+ALTER TABLE telemetry.sessions
+    ADD COLUMN IF NOT EXISTS mode_ver LowCardinality(String) DEFAULT ''
+    AFTER mode;

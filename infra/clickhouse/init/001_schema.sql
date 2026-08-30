@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     -- not comparable, and without this column nothing would say so.
     -- Empty for sessions recorded before modes existed (2026-08-30).
     mode         LowCardinality(String) DEFAULT '',
+    -- Version of the drive-mode table (config/modes.yaml) that `mode`
+    -- names. The name alone does not identify a rate: `long` before and
+    -- after an edit to that file are different samplings.
+    mode_ver     LowCardinality(String) DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)
