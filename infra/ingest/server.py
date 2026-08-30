@@ -176,6 +176,8 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             # exactly one, because switching mode starts a new run. Empty
             # for runs recorded before modes existed.
             "mode": r.get("mode") or "",
+            # Version of the mode table that name refers to.
+            "mode_ver": r.get("mode_ver") or "",
         })
 
     return out

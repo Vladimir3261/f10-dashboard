@@ -17,22 +17,37 @@ trustworthy:
     window.
 """
 
+import os
 import unittest
 
 from . import support
 from bmwdiag.mapping import load_file
-from bmwdiag.mapping.errors import PollingError
+from bmwdiag.mapping.errors import MappingError, PollingError
 from bmwdiag.mapping.model import PollingClassDef
 from bmwdiag.mapping.modes import (
-    DEFAULT_MODE,
-    DRIVE_MODES,
+    DEFAULT_MODE_CONFIG,
     DriveMode,
+    ModeTable,
     apply_mode,
-    get_mode,
-    mode_names,
+    load_modes,
 )
 from bmwdiag.mapping.polling import PollingPlan, resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities, MappingRegistry
+
+
+TABLE = load_modes()
+
+
+def get_mode(name=None):
+    return TABLE.get(name)
+
+
+def mode_names():
+    return TABLE.names()
+
+
+DRIVE_MODES = TABLE.modes
+DEFAULT_MODE = TABLE.default
 
 
 def obd_plan(mode=None):
@@ -85,17 +100,21 @@ class Catalogue(unittest.TestCase):
         """
         A multiplier for a class nobody declares is dead configuration -
         it silently does nothing, and reads as if it were working.
+
+        Checked against the FULL mapping tree, which is where a typo
+        actually shows. At runtime the same check only warns, because a
+        given launch legitimately loads a subset (a bare `live.py` has no
+        `dde_dyn` or `egs`).
         """
-        declared = {"motion", "context", "slow", "rare", "dde_dyn", "egs"}
+        from bmwdiag.mapping import load_tree
 
-        for name, mode in DRIVE_MODES.items():
-            for cls in mode.multipliers:
-                with self.subTest(mode=name, cls=cls):
-                    self.assertIn(cls, declared)
+        declared = {
+            c.name
+            for m in load_tree(support.MAPPINGS, production_only=False)
+            for c in m.polling_classes
+        }
 
-            for cls in mode.duty_exempt:
-                with self.subTest(mode=name, exempt=cls):
-                    self.assertIn(cls, declared)
+        self.assertEqual(TABLE.unknown_classes(declared), {})
 
     def test_an_unknown_mode_is_refused_by_name(self):
         with self.assertRaises(PollingError) as caught:
@@ -106,6 +125,124 @@ class Catalogue(unittest.TestCase):
     def test_no_name_means_the_default(self):
         self.assertIs(get_mode(None), DRIVE_MODES[DEFAULT_MODE])
         self.assertIs(get_mode(""), DRIVE_MODES[DEFAULT_MODE])
+
+
+class TableIsConfig(unittest.TestCase):
+    """
+    The mode table is data, loaded from config/modes.yaml.
+
+    It used to be a dict literal in modes.py, which made tuning a duty
+    window a code change in a project whose whole premise is that
+    operational knowledge lives in versioned files.
+    """
+
+    def _table(self, text):
+        import tempfile
+
+        path = os.path.join(tempfile.mkdtemp(), "modes.yaml")
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+        return load_modes(path)
+
+    MINIMAL = (
+        "version: 1\n"
+        "default: normal\n"
+        "modes:\n"
+        "  normal:\n"
+        "    description: declared rates\n"
+    )
+
+    def test_the_shipped_table_loads(self):
+        table = load_modes()
+
+        self.assertEqual(table.source_path, DEFAULT_MODE_CONFIG)
+        self.assertIsInstance(table, ModeTable)
+        self.assertGreaterEqual(table.version, 1)
+
+    def test_the_table_carries_a_version(self):
+        """
+        The reason this is not a bare dict. `mode_ver` is recorded next to
+        the mode name on every session: without it, `long` before and
+        after an edit to this file would be indistinguishable, which is
+        exactly the confound recording the mode is meant to prevent.
+        """
+        self.assertEqual(self._table(self.MINIMAL).version, 1)
+
+    def test_declaration_order_is_preserved(self):
+        """The file orders modes quietest first; the picker renders that."""
+        self.assertEqual(
+            list(load_modes().names()),
+            ["off", "sampling", "long", "normal", "debug"],
+        )
+
+    def test_an_empty_mode_body_scales_nothing(self):
+        """`normal:` with nothing under it is legitimate, not malformed."""
+        table = self._table(
+            "version: 1\ndefault: normal\nmodes:\n  normal:\n"
+        )
+
+        self.assertEqual(table.get("normal").multipliers, {})
+        self.assertTrue(table.get("normal").polls)
+
+    def test_duty_is_read_as_awake_then_asleep(self):
+        table = self._table(
+            self.MINIMAL
+            + "  s:\n    duty: {awake: 120, asleep: 600}\n"
+              "    exempt: [slow]\n"
+        )
+        mode = table.get("s")
+
+        self.assertEqual(mode.duty, (120.0, 600.0))
+        self.assertEqual(mode.duty_exempt, frozenset({"slow"}))
+        self.assertEqual(mode.duty_period, 720.0)
+
+    def test_a_missing_version_is_refused(self):
+        with self.assertRaises(MappingError):
+            self._table("default: normal\nmodes:\n  normal:\n")
+
+    def test_a_non_positive_multiplier_is_refused_at_load(self):
+        """Catch it in the file, not on the cycle that would divide by it."""
+        for bad in ("0", "-2"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(MappingError):
+                    self._table(
+                        self.MINIMAL
+                        + f"  x:\n    multipliers: {{slow: {bad}}}\n"
+                    )
+
+    def test_a_default_naming_an_undefined_mode_is_refused(self):
+        with self.assertRaises(MappingError):
+            self._table("version: 1\ndefault: nope\nmodes:\n  normal:\n")
+
+    def test_an_unknown_key_is_refused(self):
+        """A typo must not be silently ignored - it would do nothing."""
+        with self.assertRaises(MappingError):
+            self._table(self.MINIMAL + "  x:\n    multiplers: {slow: 2}\n")
+
+    def test_a_bad_duty_is_refused(self):
+        with self.assertRaises(MappingError):
+            self._table(self.MINIMAL + "  x:\n    duty: {awake: 120}\n")
+
+    def test_unknown_classes_are_reported_not_raised(self):
+        """
+        Which mappings load is a per-run choice, so this must not be an
+        exception - a bare launch has no `dde_dyn` and its multipliers
+        correctly do nothing.
+        """
+        table = self._table(
+            self.MINIMAL + "  x:\n    multipliers: {nosuchclass: 2.0}\n"
+        )
+
+        self.assertEqual(
+            table.unknown_classes({"slow"}), {"x": ("nosuchclass",)}
+        )
+        self.assertEqual(table.unknown_classes({"slow", "nosuchclass"}), {})
+
+    def test_a_missing_file_is_a_mapping_error_not_an_oserror(self):
+        with self.assertRaises(MappingError):
+            load_modes("/nonexistent/modes.yaml")
 
 
 class Scaling(unittest.TestCase):

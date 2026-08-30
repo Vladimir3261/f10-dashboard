@@ -3,9 +3,7 @@ Drive modes: one policy knob over the polling plan.
 
 A mode does NOT introduce a second scheduling system. It rescales the
 periods of the polling classes the mappings already declare, so there
-stays exactly one mechanism deciding when a request is due. A mapping
-says what a channel *is* (rpm is fast, coolant is slow); a mode says how
-much of that the operator wants right now.
+stays exactly one mechanism deciding when a request is due.
 
     effective_period = declared_period * multiplier
 
@@ -17,35 +15,49 @@ mapping version plus the mode, with no third source of truth.
 Two modes need something a multiplier cannot express:
 
   * `off` polls nothing at all. It is still connected (the link stays
-    up), which is deliberately different from not running: it lets the
-    parked-battery question be tested with the cable in and the ECUs
-    left alone.
+    up), which is deliberately different from not running.
   * `sampling` duty-cycles - awake for a window, silent for a longer
-    one - for multi-hour drives where most samples are redundant.
-    Slow classes are exempt from the sleep, because the events worth
-    catching on a long drive (a regeneration, a thermal excursion) are
-    exactly the ones that would start and finish inside a sleep window.
+    one - for multi-hour drives where most samples are redundant. Slow
+    classes are exempt from the sleep, because the events worth catching
+    on a long drive are exactly the ones that would hide in a sleep
+    window.
 
-Modes are runtime policy, not vehicle knowledge, so they live in code
-rather than in `mappings/`. They are still plain data - a frozen table,
-no expression language, nothing that executes - so an embedded runtime
-can compile them the same way it compiles a mapping.
+WHAT LIVES WHERE
+
+The mode TABLE is data: `config/modes.yaml`, loaded through the same
+dependency-free parser as the mappings. The arithmetic that applies it
+is here, in Python, and stays here - putting it in the file would mean
+adding an expression language to the config format, which is the one
+thing that format must never have.
+
+The table carries a `version`, stamped onto every session as
+`mode_ver`. Without it a mode name would not identify a rate: `long` in
+March and `long` in June could differ and nothing would say so. See the
+header of config/modes.yaml.
 """
 
+import os
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Tuple
 
-from .errors import PollingError
+from . import yamlsubset
+from .errors import MappingError, PollingError
 from .model import PollingClassDef
 
 __all__ = [
     "DriveMode",
-    "DRIVE_MODES",
-    "DEFAULT_MODE",
-    "get_mode",
-    "mode_names",
+    "ModeTable",
+    "DEFAULT_MODE_CONFIG",
+    "load_modes",
     "apply_mode",
 ]
+
+#: Shipped mode table. Overridable with --modes, so an experiment does
+#: not have to edit the file the repository ships.
+DEFAULT_MODE_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "config", "modes.yaml",
+)
 
 
 @dataclass(frozen=True)
@@ -60,7 +72,7 @@ class DriveMode:
     """
 
     name: str
-    description: str
+    description: str = ""
     #: class name -> multiplier on the class period (2.0 = half as often)
     multipliers: Mapping[str, float] = field(default_factory=dict)
     #: False = send nothing; the link stays up but no request is due
@@ -89,96 +101,206 @@ class DriveMode:
 
         return (elapsed % period) < self.duty[0]
 
-
-#
-# The declared rates (what `normal` means) live in the mapping files:
-#
-#   motion   10 Hz    rpm, speed, map, pedal
-#   context  1/10 s   load, throttle, relthr, torque, maf, rail, lambda
-#   slow     1/10 s   temps, voltage, fuel rate, cat, EGR
-#   rare     1/60 s   ambient, baro, fuel level, runtime, distance
-#   dde_dyn  ~1/11 s each (22 requests, round-robin, one per 0.5 s)
-#   egs      2 Hz     engaged gear
-#
-# The multipliers below are annotated with the rate they produce, since
-# a bare number like 0.01 says nothing on its own.
-#
-DRIVE_MODES: Dict[str, DriveMode] = {
-    "off": DriveMode(
-        name="off",
-        description="connected but silent - no request is sent",
-        polls=False,
-    ),
-    "debug": DriveMode(
-        name="debug",
-        description="everything, fast - for investigating a problem",
-        multipliers={
-            #: back to the pre-2026-08-30 behaviour: the whole OBD set
-            #: at the loop rate, the DDE reads five times faster.
-            "context": 0.01,        # 1/10 s  -> 10 Hz
-            "slow": 0.1,            # 1/10 s  -> 1 Hz
-            "rare": 0.1,            # 1/60 s  -> 1/6 s
-            "dde_dyn": 0.2,         # ~1/11 s -> ~1/2.2 s
-            "egs": 0.5,             # 2 Hz    -> 4 Hz
-        },
-    ),
-    "normal": DriveMode(
-        name="normal",
-        description="the rates the mappings declare",
-    ),
-    "long": DriveMode(
-        name="long",
-        description="motorway cruising - most samples are redundant",
-        multipliers={
-            #: On cruise control the car can hold one gear and speed for
-            #: kilometres, so the fast tier is nearly all duplicate rows.
-            "motion": 5.0,          # 10 Hz   -> 2 Hz
-            "context": 3.0,         # 1/10 s  -> 1/30 s
-            "egs": 4.0,             # 2 Hz    -> 0.5 Hz
-            "dde_dyn": 2.0,         # ~1/11 s -> ~1/22 s
-        },
-    ),
-    "sampling": DriveMode(
-        name="sampling",
-        description="duty-cycled bursts for multi-hour drives",
-        #: Two minutes of full-rate data every twelve. The slow classes
-        #: never sleep, so a regeneration or a thermal event that starts
-        #: inside a quiet window is still recorded - only the fast,
-        #: highly-redundant channels are duty-cycled.
-        duty=(120.0, 600.0),
-        duty_exempt=frozenset({"slow", "rare", "dde_dyn"}),
-    ),
-}
-
-DEFAULT_MODE = "normal"
+    def classes_used(self) -> FrozenSet[str]:
+        """Every polling class this mode names, for validation."""
+        return frozenset(self.multipliers) | self.duty_exempt
 
 
-def mode_names() -> Tuple[str, ...]:
+@dataclass(frozen=True)
+class ModeTable:
     """
-    Modes in the order they should be offered: quietest first.
+    A loaded `config/modes.yaml`.
 
-    The order is measured, not assumed - see
-    tests/test_drive_modes.py::test_the_modes_are_monotonically_quieter,
-    which counts requests over a full duty period. `sampling` lands below
-    `long` because it silences the fast tiers entirely for ten minutes in
-    twelve, where `long` merely slows them. They are different trades
-    (full resolution in bursts vs. coarse resolution throughout), not
-    just different amounts.
+    `version` is the reason this is a type rather than a bare dict: it
+    has to reach the recorder, so that a session records WHICH revision
+    of the table its mode name refers to.
     """
-    return ("off", "sampling", "long", "normal", "debug")
+
+    version: int
+    default: str
+    modes: Mapping[str, DriveMode]
+    source_path: str = ""
+
+    def get(self, name: Optional[str]) -> DriveMode:
+        if not name:
+            return self.modes[self.default]
+
+        try:
+            return self.modes[name]
+        except KeyError:
+            raise PollingError(
+                f"unknown drive mode {name!r}; known modes are "
+                + ", ".join(sorted(self.modes))
+            )
+
+    def names(self) -> Tuple[str, ...]:
+        """Modes in declaration order - the file orders them quietest first."""
+        return tuple(self.modes)
+
+    def unknown_classes(self, declared_classes: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+        """
+        Mode -> the polling classes it names that nothing declares.
+
+        A multiplier for a class nobody declares is dead configuration:
+        it silently does nothing while reading as if it were working.
+
+        Deliberately NOT an exception. Which mappings load is a per-run
+        choice - a bare `live.py` loads standard OBD only, so `dde_dyn`
+        and `egs` are legitimately absent and their multipliers correctly
+        do nothing that run. Refusing to start would be wrong. The caller
+        decides: the runtime warns, and a test asserts this is empty
+        against the FULL mapping tree, which is where a real typo shows.
+        """
+        known = set(declared_classes)
+        out: Dict[str, Tuple[str, ...]] = {}
+
+        for mode in self.modes.values():
+            missing = tuple(sorted(mode.classes_used() - known))
+
+            if missing:
+                out[mode.name] = missing
+
+        return out
 
 
-def get_mode(name: Optional[str]) -> DriveMode:
-    if not name:
-        return DRIVE_MODES[DEFAULT_MODE]
+# ------------------------------------------------------------- loading
+
+
+def _positive_int(raw: Any, source: str, path: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise MappingError(
+            f"{source}: {path} must be a positive integer, got {raw!r}"
+        )
+
+    return raw
+
+
+def _multiplier(raw: Any, source: str, mode: str, cls: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        raise MappingError(
+            f"{source}: modes.{mode}.multipliers.{cls} must be a positive "
+            f"number, got {raw!r}"
+        )
+
+    return float(raw)
+
+
+def _duty(raw: Any, source: str, mode: str) -> Optional[Tuple[float, float]]:
+    if raw is None:
+        return None
+
+    if not isinstance(raw, dict):
+        raise MappingError(
+            f"{source}: modes.{mode}.duty must be a mapping with "
+            f"`awake` and `asleep`, got {raw!r}"
+        )
+
+    out = []
+
+    for key in ("awake", "asleep"):
+        value = raw.get(key)
+
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or value <= 0:
+            raise MappingError(
+                f"{source}: modes.{mode}.duty.{key} must be a positive "
+                f"number of seconds, got {value!r}"
+            )
+
+        out.append(float(value))
+
+    return (out[0], out[1])
+
+
+def _mode(name: str, raw: Any, source: str) -> DriveMode:
+    #: `normal:` with nothing under it is a legitimate mode - it scales
+    #: nothing. The parser gives None for an empty block.
+    body = {} if raw is None else raw
+
+    if not isinstance(body, dict):
+        raise MappingError(
+            f"{source}: modes.{name} must be a mapping, got {raw!r}"
+        )
+
+    unknown = set(body) - {"description", "multipliers", "polls", "duty",
+                           "exempt"}
+
+    if unknown:
+        raise MappingError(
+            f"{source}: modes.{name} has unknown key(s) "
+            f"{', '.join(sorted(unknown))}"
+        )
+
+    multipliers = body.get("multipliers") or {}
+
+    if not isinstance(multipliers, dict):
+        raise MappingError(
+            f"{source}: modes.{name}.multipliers must be a mapping"
+        )
+
+    exempt = body.get("exempt") or []
+
+    if not isinstance(exempt, list):
+        raise MappingError(f"{source}: modes.{name}.exempt must be a list")
+
+    polls = body.get("polls", True)
+
+    if not isinstance(polls, bool):
+        raise MappingError(
+            f"{source}: modes.{name}.polls must be true or false, "
+            f"got {polls!r}"
+        )
+
+    return DriveMode(
+        name=name,
+        description=str(body.get("description") or ""),
+        multipliers={
+            cls: _multiplier(value, source, name, cls)
+            for cls, value in multipliers.items()
+        },
+        polls=polls,
+        duty=_duty(body.get("duty"), source, name),
+        duty_exempt=frozenset(str(c) for c in exempt),
+    )
+
+
+def load_modes(path: Optional[str] = None) -> ModeTable:
+    """Read a mode table. Raises MappingError on anything malformed."""
+    source = path or DEFAULT_MODE_CONFIG
 
     try:
-        return DRIVE_MODES[name]
-    except KeyError:
-        raise PollingError(
-            f"unknown drive mode {name!r}; known modes are "
-            + ", ".join(sorted(DRIVE_MODES))
+        document = yamlsubset.load(source)
+    except OSError as exc:
+        raise MappingError(f"cannot read mode table {source}: {exc}")
+
+    if not isinstance(document, dict):
+        raise MappingError(f"{source}: expected a mapping at the top level")
+
+    raw_modes = document.get("modes")
+
+    if not isinstance(raw_modes, dict) or not raw_modes:
+        raise MappingError(f"{source}: `modes` must be a non-empty mapping")
+
+    modes = {
+        name: _mode(name, body, source) for name, body in raw_modes.items()
+    }
+    default = str(document.get("default") or "normal")
+
+    if default not in modes:
+        raise MappingError(
+            f"{source}: default mode {default!r} is not defined; "
+            f"defined modes are {', '.join(sorted(modes))}"
         )
+
+    return ModeTable(
+        version=_positive_int(document.get("version"), source, "version"),
+        default=default,
+        modes=modes,
+        source_path=source,
+    )
+
+
+# ---------------------------------------------------------- arithmetic
 
 
 def apply_mode(
