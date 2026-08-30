@@ -102,9 +102,16 @@ DEFAULTS: Dict[str, Any] = {
     #: its tab is open - it is a much larger payload than the status
     #: poll and nothing about it changes second to second.
     "diagnostics_url": "http://127.0.0.1:8080/api/diagnostics",
-    #: Per-drive databases, and the agent's watermark file.
-    "sessions_dir": "/home/f10/f10-dashboard/local/sessions",
-    "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",
+    #: Per-drive databases, and the agent's watermark file. Empty by
+    #: default and DERIVED from `repo_dir` - never a hardcoded
+    #: /home/<guess>/ path. A config written by an older version of the
+    #: installer lacks these keys entirely (install.sh will not overwrite
+    #: an existing config, so it cannot clobber the password), and a
+    #: guessed username silently pointed at a directory that does not
+    #: exist - which read as "no drive file yet" while the runtime was
+    #: recording perfectly well.
+    "sessions_dir": "",
+    "sync_state_file": "",
     "log_lines": 200,
     #: How far back "is it recording?" looks, in seconds.
     "recording_window_s": 60,
@@ -140,6 +147,20 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
 
         current = cfg[key]
         cfg[key] = env if isinstance(current, (list, dict)) else type(current)(env)
+
+    #
+    # Anything path-shaped that was not given is derived from the repo,
+    # which every config has carried since the first version. This is what
+    # lets a config written by an older installer keep working across an
+    # upgrade instead of falling back to a guess.
+    #
+    repo = cfg["repo_dir"]
+
+    if not cfg["sessions_dir"]:
+        cfg["sessions_dir"] = os.path.join(repo, "local", "sessions")
+
+    if not cfg["sync_state_file"]:
+        cfg["sync_state_file"] = os.path.join(repo, "local", "sync-state.json")
 
     return cfg
 
@@ -367,6 +388,15 @@ def read_recording(cfg: Dict[str, Any]) -> Dict[str, Any]:
     path = newest_session(cfg["sessions_dir"])
 
     if path is None:
+        #
+        # "no drive file yet" is a fine answer before the first drive and
+        # a misleading one when the directory is simply wrong. Say which,
+        # because the two look identical on the page and the second is a
+        # configuration bug that reads as a quiet runtime.
+        #
+        out["sessions_dir"] = cfg["sessions_dir"]
+        out["sessions_dir_exists"] = os.path.isdir(cfg["sessions_dir"])
+
         return out
 
     out["db"] = os.path.basename(path)
@@ -1917,8 +1947,14 @@ function renderRecording(r, services) {
     head = `<span class="big off">stopped</span>`
          + `<span class="unit">f10-dashboard is not running</span>`;
   } else if (n == null) {
-    head = `<span class="big off">?</span>`
-         + `<span class="unit">no drive file yet</span>`;
+    /* Distinguish "before the first drive" from "the configured
+       directory does not exist" - identical on screen otherwise, and the
+       second is a config bug masquerading as a quiet runtime. */
+    const bad = r.sessions_dir && r.sessions_dir_exists === false;
+    head = `<span class="big off">${bad ? "!" : "?"}</span>`
+         + `<span class="unit">${bad
+             ? "sessions_dir does not exist: " + escape_(r.sessions_dir)
+             : "no drive file yet"}</span>`;
   } else {
     head = `<span class="big ${live ? "on" : "off"}">`
          + `${n.toLocaleString()}</span>`

@@ -64,7 +64,40 @@ PY
   echo "[+] wrote $CONFIG"
   NEW_CONFIG=1
 else
-  echo "[=] $CONFIG exists, leaving it alone"
+  #
+  # Merge, do not skip. Leaving an existing config completely alone was
+  # right for the password and wrong for everything else: a config
+  # written by an earlier version silently lacks every key added since,
+  # and the runtime then falls back to defaults that may not fit this
+  # box. Existing values always win; only absent keys are added.
+  #
+  python3 - "$CONFIG" <<'MERGE'
+import json, sys
+
+path = sys.argv[1]
+
+with open(path) as fh:
+    cfg = json.load(fh)
+
+added = []
+
+for key, value in (
+    ("sync_control_url", "http://127.0.0.1:8091"),
+    ("dashboard_status_url", "http://127.0.0.1:8080/api/snapshot"),
+    ("diagnostics_url", "http://127.0.0.1:8080/api/diagnostics"),
+    ("recording_window_s", 60),
+):
+    if key not in cfg:
+        cfg[key] = value
+        added.append(key)
+
+if added:
+    with open(path, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("[=] added to config.json: " + ", ".join(added))
+else:
+    print("[=] config.json already has every key")
+MERGE
   NEW_CONFIG=0
 fi
 
