@@ -1,5 +1,25 @@
 # Session report — run 1
 
+> **CORRECTION (2026-08-31), applied after generation.** Two statements
+> below about the oil/coolant relationship are WRONG and must not be
+> cited. The generator emitted them unconditionally, without ever
+> comparing the two channels or checking whether the car had moved:
+>
+> - *"a healthy warm-up with no lag anomaly"* (Key findings)
+> - *"oil lags coolant — the expected warm-up signature"* (Cold-start
+>   warm-up)
+>
+> This session was **stationary throughout**. The oil lag is load-driven —
+> oil takes heat from work done — so at idle it warms from the block and
+> tracks coolant. A lag could not have appeared, and its absence is not a
+> finding. At the 80 °C crossing oil was 79.8 °C, i.e. 0.2 °C below, which
+> is agreement within noise and not a lag.
+>
+> The measurements in this report are sound; only those two
+> interpretations are not. The generator was fixed so it states the delta
+> and interprets it only where the session supports one. See NOTES.md and
+> `analysis/session_report.py`.
+
 - ECU: 0x12 (ECM-EngineControl)  (addr 18)
 - Duration: 41.0 min, 129567 samples across 45 channels
 - Started (UTC): 2026-08-30T21:39:14Z

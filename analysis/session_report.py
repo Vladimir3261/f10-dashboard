@@ -169,8 +169,21 @@ def warmup(run: Dict) -> Dict:
             "unit": run["units"].get(key, "°C"),
         }
 
-    # oil should lag coolant during warm-up: at the coolant-hits-80 time,
-    # oil is typically cooler.
+    #
+    # Oil vs coolant at the moment coolant reaches 80 C.
+    #
+    # This used to assert "oil lags coolant - the expected warm-up
+    # signature" unconditionally, without looking. On the first genuine
+    # cold start (2026-08-31) oil ran 0.27 C ABOVE coolant and the report
+    # said it lagged anyway - a confident wrong answer, which is the
+    # failure mode this project is least able to afford.
+    #
+    # The lag is real but LOAD-driven: oil takes heat from work done. At
+    # idle there is no work, so oil heats from the block and tracks
+    # coolant or sits slightly above it. Whether a lag should be expected
+    # therefore depends on whether the car moved, so record that too and
+    # let the prose decide rather than assuming.
+    #
     cool = run["series"].get("coolant")
     oil = run["series"].get("n47d_oil_temp")
 
@@ -178,9 +191,17 @@ def warmup(run: Dict) -> Dict:
         warmed_t = next((ts for ts, v in cool if v >= WARM_C), None)
 
         if warmed_t is not None:
+            oil_at = _nearest(oil, warmed_t)
+            speed = run["series"].get("speed") or []
+            moved = max((v for _, v in speed), default=None)
+
             out["oil_vs_coolant_at_coolant80"] = {
                 "coolant": WARM_C,
-                "oil": round(_nearest(oil, warmed_t), 1),
+                "oil": round(oil_at, 1),
+                "delta": round(oil_at - WARM_C, 2),
+                #: None when speed was not captured - unknown, not "no".
+                "moved": None if not speed else bool(moved and moved > 5),
+                "max_speed": None if not speed else round(moved, 1),
             }
 
     return out
@@ -315,14 +336,35 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
     """
     out: List[str] = []
 
-    # warm-up
+    #
+    # Warm-up. State what was measured; conclude only what the session
+    # could show. This used to end "Oil and engine temp tracked it
+    # closely - a healthy warm-up with no lag anomaly", unconditionally
+    # and regardless of whether oil lagged, led, or whether the car had
+    # moved at all. "No lag anomaly" on a stationary idle is not a clean
+    # bill of health; it is a measurement that was never possible.
+    #
     cool = wu.get("coolant")
     if cool and cool.get("seconds_to_80C"):
-        out.append(
+        line = (
             f"Cold start captured from {cool['start']} °C; coolant reached "
             f"80 °C in {cool['seconds_to_80C']/60:.1f} min and stabilised near "
-            f"{cool['max']} °C. Oil and engine temp tracked it closely — a "
-            "healthy warm-up with no lag anomaly.")
+            f"{cool['max']} °C.")
+
+        ovc = wu.get("oil_vs_coolant_at_coolant80")
+
+        if ovc and ovc.get("moved") is False:
+            line += (" Stationary throughout, so the load-driven oil lag "
+                     "could not be observed either way — this is not "
+                     "evidence of a healthy warm-up, only of a warm-up.")
+        elif ovc and ovc["delta"] <= -1.0:
+            line += (f" Oil lagged coolant by {abs(ovc['delta']):.1f} °C at "
+                     "the 80 °C crossing — the expected signature.")
+        elif ovc:
+            line += (f" Oil was {ovc['delta']:+.1f} °C against coolant at the "
+                     "80 °C crossing, so no lag was seen.")
+
+        out.append(line)
 
     # OBD MAP saturation vs DDE boost — a data-quality finding, not a
     # cross-check failure.
@@ -554,9 +596,35 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         ovc = wu.get("oil_vs_coolant_at_coolant80")
 
         if ovc:
+            delta = ovc["delta"]
             L.append("")
-            L.append(f"- When coolant reached 80 °C, oil was **{ovc['oil']} °C** "
-                     "(oil lags coolant — the expected warm-up signature).")
+            L.append(f"- When coolant reached 80 °C, oil was "
+                     f"**{ovc['oil']} °C** ({delta:+.2f} °C vs coolant).")
+
+            #
+            # State the observation, then interpret it only where the
+            # data supports an interpretation. The oil lag is driven by
+            # LOAD, so a stationary session cannot show one and must not
+            # be read as if it failed to.
+            #
+            if ovc["moved"] is False:
+                L.append(f"  The car did not move (max speed "
+                         f"{ovc['max_speed']} km/h), so **no lag should be "
+                         "expected**: oil takes heat from work done, and at "
+                         "idle it warms from the block instead. This says "
+                         "nothing either way about the load-driven warm-up "
+                         "signature, which needs a cold start followed by "
+                         "driving.")
+            elif delta <= -1.0:
+                L.append("  Oil lags coolant — the expected load-driven "
+                         "warm-up signature.")
+            elif delta >= 1.0:
+                L.append("  **Oil is above coolant**, which is not the "
+                         "expected signature under load. Worth checking "
+                         "before it is used as a baseline.")
+            else:
+                L.append("  The two track each other to within 1 °C — no "
+                         "lag either way.")
     else:
         L.append("_no temperature channels captured_")
 
