@@ -59,6 +59,30 @@ def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
 #: noticed within one polling cycle - failing requests return immediately.
 TRANSPORT_FAULT_BUDGET = 6
 
+#: Consecutive faults against ONE request before it is rested rather than
+#: retried every time it comes due. Absorbing a fault is cheap; absorbing
+#: the same fault forever is not, because a request that will never answer
+#: still costs its full timeout on every turn. Mirrors the three-strikes
+#: rule ObdSession already applies to PIDs an ECU ignores.
+REQUEST_FAULT_LIMIT = 3
+
+#: How long a rested request sits out, and the ceiling the rest doubles
+#: towards. **Wall-clock seconds, deliberately - not turns.**
+#:
+#: A turn is not a unit of anything: the same count spans 3s on `motion`
+#: (0.1s/turn) and 32 minutes on `rare` (60s/turn) - a 640x spread from one
+#: constant. And the cost being suppressed IS wall-clock: a 0.4s timeout on
+#: a 2 Hz channel is a 40% tax on the poll loop, while the same timeout on
+#: a 60s channel is 0.7% and not worth suppressing at all. Counting turns
+#: makes the constant mean the opposite of the intent at each end of the
+#: range.
+#:
+#: In seconds it scales itself: `egs` sits out many turns, `rare` at most
+#: one. It always comes back - an ECU that was briefly asleep, or a gateway
+#: mid-reconfiguration, must not be written off for the rest of the drive.
+REQUEST_REST_SECONDS = 5.0
+REQUEST_REST_MAX_SECONDS = 60.0
+
 
 class NoResponse(Exception):
     """
@@ -129,9 +153,25 @@ class MappingExecutor:
     """
     Runs a set of due requests and returns normalised signal values.
 
-    Decode failures are swallowed per request - a garbled reply costs one
-    channel for one cycle, exactly as before. Transport failures are not:
-    they belong to the application's reconnect logic.
+    Decode failures are swallowed per request: a garbled reply costs one
+    channel for one cycle.
+
+    Transport failures are judged rather than blindly escalated, because
+    the engine polls more than one ECU and a fault against one says nothing
+    about the link carrying the rest. One failed exchange is skipped;
+    enough failures in a row mean the link, not the ECU, and the error is
+    re-raised for the application's reconnect logic. A request that keeps
+    failing is then rested for a while, so an ECU that is simply absent
+    stops costing its full timeout every time it comes due.
+
+    All of it is decided from behaviour, never from an address: the engine
+    has no notion of a "primary" ECU.
+
+    **The OBD path is deliberately exempt.** `ObdSession` already retires
+    PIDs an ECU ignores, after its own three strikes, because standard OBD
+    batches several PIDs into one exchange and the retry policy has to live
+    where that batching is understood. Duplicating it here would mean two
+    layers backing off against each other for the same silence.
     """
 
     def __init__(
@@ -173,6 +213,21 @@ class MappingExecutor:
         # the ECU, and the error is re-raised. Any success resets it.
         #
         self._transport_faults = 0
+        #
+        # Per-request fault history, and how long each is currently sitting
+        # out. Per-connection state like everything else here: the
+        # application builds a fresh executor after a reconnect, which
+        # clears every count and every rest.
+        #
+        self._request_faults: Dict[str, int] = {}
+        self._rest_len: Dict[str, float] = {}
+        self._rested_until: Dict[str, float] = {}
+        #
+        # The fault count that triggered the current rest. Kept separately
+        # because the live count is zeroed when a rest starts, and the
+        # diagnostics view still needs to say what the rest was FOR.
+        #
+        self._rested_after: Dict[str, int] = {}
 
     # -- helpers ----------------------------------------------------
 
@@ -182,6 +237,29 @@ class MappingExecutor:
             "kinds": {}, "last_ok": None, "last_error": None,
             "last_error_at": None,
         })
+
+    def _rest_fields(self, request_id: str) -> Dict[str, Any]:
+        """
+        Why a request is quiet, for the diagnostics view.
+
+        Folded into `stats()` rather than exposed separately: that view is
+        already per-request and already what the Car link tab consumes, and
+        two overlapping introspection APIs on one object is a trap.
+        """
+        left = self._rest_left(request_id)
+
+        return {
+            "resting_for": round(left, 1) if left else 0.0,
+            #
+            # While resting, report the count that caused it - the live
+            # count is zero by then, and "resting, 40s left after 3
+            # timeouts" is the sentence the view needs to be able to write.
+            #
+            "consecutive_faults": (
+                self._rested_after.get(request_id, 0) if left
+                else self._request_faults.get(request_id, 0)
+            ),
+        }
 
     def stats(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -197,7 +275,11 @@ class MappingExecutor:
         for _ in range(3):
             try:
                 return {
-                    rid: {**st, "kinds": dict(st["kinds"])}
+                    rid: {
+                        **st,
+                        "kinds": dict(st["kinds"]),
+                        **self._rest_fields(rid),
+                    }
                     for rid, st in self._stats.items()
                 }
             except RuntimeError:                # changed size during iteration
@@ -239,6 +321,53 @@ class MappingExecutor:
 
     def _note(self, request_id: str, exc: Exception) -> None:
         self._record_fault(request_id, fault_kind(exc), str(exc), exc)
+
+    def _rest_left(self, request_id: str) -> float:
+        """
+        Seconds of rest still owed by this request; 0 if it is due.
+
+        **Monotonic, not wall time.** A rest is a DURATION, and this host
+        has no RTC: its clock is corrected forward at boot and can step
+        backwards on an NTP overshoot or a fake-hwclock save from a fast
+        clock. Against `time.time()` a backward step of 30 minutes turns a
+        5-second rest into a 30-minute one and strands the channel.
+        `PollingPlan` already schedules on `time.monotonic()` for the same
+        reason.
+
+        Note the deliberate split with `last_ok` / `last_error_at` a few
+        lines up, which stay on `time.time()`: those are TIMESTAMPS for
+        display, and `/api/diagnostics` ages them against wall time. So -
+        durations monotonic, timestamps wall. Do not "fix" the
+        inconsistency by making them match.
+        """
+        until = self._rested_until.get(request_id)
+
+        if until is None:
+            return 0.0
+
+        return max(0.0, until - time.monotonic())
+
+    def _rest_request(self, request_id: str) -> None:
+        """Stand a repeatedly-failing request down, for longer each time."""
+        rest = min(
+            max(REQUEST_REST_SECONDS, self._rest_len.get(request_id, 0.0) * 2),
+            REQUEST_REST_MAX_SECONDS,
+        )
+        self._rest_len[request_id] = rest
+        self._rested_until[request_id] = time.monotonic() + rest
+        self._rested_after[request_id] = self._request_faults.get(request_id, 0)
+        #
+        # Start counting again from zero so the request gets a genuine
+        # retry when its rest ends, rather than being stood down again on
+        # the very next fault.
+        #
+        self._request_faults[request_id] = 0
+
+    def _request_recovered(self, request_id: str) -> None:
+        self._request_faults.pop(request_id, None)
+        self._rest_len.pop(request_id, None)
+        self._rested_until.pop(request_id, None)
+        self._rested_after.pop(request_id, None)
 
     def bind(self, request: RequestDef) -> DiagnosticRequest:
         return build_request(request, self.targets)
@@ -341,6 +470,22 @@ class MappingExecutor:
         out: List[DecodedResponse] = []
 
         for request in requests:
+            #
+            # A request that has failed repeatedly sits out for a while.
+            # Checked before bind() AND before _record_sent: resting is not
+            # the same as failing, so it must not land in the diagnostics
+            # view as asked-and-unanswered and collapse the success rate.
+            #
+            # Known property: a resting member of a staggered (round-robin)
+            # class still consumes its slot, so that firing does nothing and
+            # the other members' effective rate drops slightly. With 22 DDE
+            # members and one or two resting it is noise. It would only be
+            # worth handling if a whole ECU's worth of a staggered class
+            # rested at once.
+            #
+            if self._rest_left(request.id) > 0:
+                continue
+
             bound = self.bind(request)
             self._record_sent(request.id)
 
@@ -386,8 +531,28 @@ class MappingExecutor:
                 # wall time lost, but every drive needing to be stitched
                 # back together before it could be analysed.
                 #
-                self._transport_faults += 1
                 self._note(request.id, exc)
+
+                #
+                # A negative acknowledgement is the gateway ANSWERING, in
+                # order to refuse one target. That is positive evidence the
+                # link is alive, so it must not count towards concluding
+                # the link is dead - only silence can do that.
+                #
+                if fault_kind(exc) != "transport_nack":
+                    self._transport_faults += 1
+
+                faults = self._request_faults.get(request.id, 0) + 1
+                self._request_faults[request.id] = faults
+
+                if faults >= REQUEST_FAULT_LIMIT:
+                    #
+                    # This one request keeps failing. Stand it down for a
+                    # while so an ECU that is simply absent stops costing a
+                    # full timeout every time it comes due - at 2 Hz that
+                    # is otherwise a permanent tax on the whole loop.
+                    #
+                    self._rest_request(request.id)
 
                 if self._transport_faults >= TRANSPORT_FAULT_BUDGET:
                     #
@@ -400,9 +565,11 @@ class MappingExecutor:
 
             #
             # A completed exchange means the link is healthy, whatever
-            # individual ECUs are doing.
+            # individual ECUs are doing - and that this particular request
+            # is answering again, so its fault history goes too.
             #
             self._transport_faults = 0
+            self._request_recovered(request.id)
             self.last_responses[request.id] = bytes(response)
 
             try:
