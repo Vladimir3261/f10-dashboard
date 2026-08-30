@@ -19,6 +19,7 @@ differently on the wire:
 Adding a protocol means adding a branch here, not touching the decoder.
 """
 
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..protocol.request import (
@@ -142,6 +143,13 @@ class MappingExecutor:
         #
         self._armed: Dict[int, tuple] = {}
         #
+        # Per-request health, so "which channels are actually answering?"
+        # is a lookup rather than an inference from missing rows. A
+        # request that has never succeeded and one nobody asked for look
+        # identical in the sample table; here they do not.
+        #
+        self._stats: Dict[str, Dict[str, Any]] = {}
+        #
         # Consecutive per-request transport faults. One ECU that is slow or
         # absent must not tear down a link that is otherwise fine, but a link
         # that has genuinely died has to reach the reconnect logic - and it
@@ -153,7 +161,51 @@ class MappingExecutor:
 
     # -- helpers ----------------------------------------------------
 
+    def _stat(self, request_id: str) -> Dict[str, Any]:
+        return self._stats.setdefault(request_id, {
+            "sent": 0, "ok": 0, "failed": 0,
+            "kinds": {}, "last_ok": None, "last_error": None,
+            "last_error_at": None,
+        })
+
+    def stats(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Per-request counters, for the diagnostics view. Copied, not shared.
+
+        Read from the HTTP thread while the poll loop writes. Value
+        updates are safe under the GIL; only INSERTING a new request id
+        can resize the dict mid-iteration, and the set of ids is fixed
+        after the first cycle or two. So retry rather than lock - a lock
+        here would sit on the hot path for a race that closes on its own
+        within a second of startup.
+        """
+        for _ in range(3):
+            try:
+                return {
+                    rid: {**st, "kinds": dict(st["kinds"])}
+                    for rid, st in self._stats.items()
+                }
+            except RuntimeError:                # changed size during iteration
+                continue
+
+        return {}
+
+    def _record_sent(self, request_id: str) -> None:
+        self._stat(request_id)["sent"] += 1
+
+    def _record_ok(self, request_id: str, when: float) -> None:
+        stat = self._stat(request_id)
+        stat["ok"] += 1
+        stat["last_ok"] = when
+
     def _note(self, request_id: str, exc: Exception) -> None:
+        stat = self._stat(request_id)
+        stat["failed"] += 1
+        kind = fault_kind(exc)
+        stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
+        stat["last_error"] = f"{kind}: {exc}"
+        stat["last_error_at"] = time.time()
+
         if self.on_error is not None:
             self.on_error(request_id, exc)
 
@@ -207,9 +259,26 @@ class MappingExecutor:
             if request.pid not in by_pid:
                 by_pid[request.pid] = request
                 pids.append(request.pid)
+                self._record_sent(request.id)
 
         got = self.obd_reader.read(pids)
         out: List[DecodedResponse] = []
+
+        #
+        # A PID the reader dropped is not an exception - the session
+        # retires PIDs the ECU ignores - so it would otherwise leave no
+        # trace at all. Count it: "asked 400 times, answered 0" is
+        # exactly what identifies a channel the car does not really have.
+        #
+        for pid, request in by_pid.items():
+            if pid not in got:
+                stat = self._stat(request.id)
+                stat["failed"] += 1
+                stat["kinds"]["no_response"] = (
+                    stat["kinds"].get("no_response", 0) + 1
+                )
+                stat["last_error"] = "no_response: the ECU did not return this PID"
+                stat["last_error_at"] = time.time()
 
         for pid, data in got.items():
             request = by_pid.get(pid)
@@ -229,6 +298,7 @@ class MappingExecutor:
                 self._note(request.id, exc)
                 continue
 
+            self._record_ok(request.id, time.time())
             out.append(DecodedResponse(request.id, response, values))
 
         return out
@@ -244,6 +314,7 @@ class MappingExecutor:
 
         for request in requests:
             bound = self.bind(request)
+            self._record_sent(request.id)
 
             #
             # Setup frames (e.g. the 2C clear+define of a dynamic DID) go
@@ -315,6 +386,7 @@ class MappingExecutor:
                 self._note(request.id, exc)
                 continue
 
+            self._record_ok(request.id, time.time())
             out.append(DecodedResponse(request.id, bytes(response), values))
 
         return out

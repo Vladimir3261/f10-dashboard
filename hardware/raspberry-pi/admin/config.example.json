@@ -32,6 +32,7 @@
   "sync_status_url": "http://127.0.0.1:8091/sync/status",
   "sync_control_url": "http://127.0.0.1:8091",
   "dashboard_status_url": "http://127.0.0.1:8080/api/snapshot",
+  "diagnostics_url": "http://127.0.0.1:8080/api/diagnostics",
 
   "sessions_dir": "/home/f10/f10-dashboard/local/sessions",
   "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",

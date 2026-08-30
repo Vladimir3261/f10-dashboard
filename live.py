@@ -1156,6 +1156,206 @@ class ModeControl:
         return pending
 
 
+class Diagnostics:
+    """
+    The full car-communication picture for this session, for the HTTP
+    thread to read while the poll loop owns the objects.
+
+    This exists because the interesting question when a channel is
+    missing - "did we not ask, did the ECU not answer, or did resolution
+    drop it?" - had no answer anywhere. The sample table cannot tell a
+    request nobody made from one that always fails, and resolution
+    filters silently by design.
+
+    The poll loop publishes REFERENCES once per connection; the report is
+    built on demand, so a page nobody opens costs nothing per cycle.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state: Dict[str, Any] = {}
+
+    def publish(self, **kwargs: Any) -> None:
+        with self._lock:
+            self._state.update(kwargs)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._state = {}
+
+    def _get(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._state)
+
+    def report(self) -> Dict[str, Any]:
+        state = self._get()
+        profile = state.get("profile")
+
+        if profile is None:
+            return {"ready": False, "detail": "not connected to the car yet"}
+
+        executor = state.get("executor")
+        plan = state.get("plan")
+        stats = executor.stats() if executor is not None else {}
+        extra_ids = set(state.get("extra_ids") or ())
+        now = time.time()
+
+        #: request id -> the mapping file that declares it
+        owner: Dict[str, Any] = {}
+
+        for mapping in profile.mappings:
+            for request in mapping.requests:
+                owner[request.id] = mapping
+
+        classes = plan.classes if plan is not None else {}
+        counts: Dict[str, int] = {}
+
+        for request in profile.requests:
+            counts[request.polling_class] = counts.get(
+                request.polling_class, 0
+            ) + 1
+
+        requests = []
+        totals = {"sent": 0, "ok": 0, "failed": 0}
+
+        for request in profile.requests:
+            st = stats.get(request.id, {})
+            mapping = owner.get(request.id)
+            cls = classes.get(request.polling_class)
+            sent = st.get("sent", 0)
+            ok = st.get("ok", 0)
+
+            for key in totals:
+                totals[key] += st.get(key, 0)
+
+            #
+            # A staggered class fires one member per firing, so its
+            # period is the gap between firings of the CLASS - a member's
+            # own interval is period x members. Reporting the raw period
+            # would overstate these ~22x.
+            #
+            period = None
+
+            if cls is not None:
+                members = counts.get(request.polling_class, 1)
+                period = cls.period * (members if cls.stagger else 1)
+
+            requests.append({
+                "id": request.id,
+                "mapping": mapping.id if mapping else "",
+                "protocol": request.protocol,
+                "target": request.target.describe(),
+                "address": (
+                    f"0x{request.target.resolve(profile.targets):02X}"
+                    if request.target.resolve(profile.targets) is not None
+                    else request.target.describe()
+                ),
+                "pid": None if request.pid is None else f"0x{request.pid:02X}",
+                "did": None if request.did is None else f"0x{request.did:04X}",
+                "setup_frames": len(request.setup or ()),
+                "class": request.polling_class,
+                "period_s": period,
+                "signals": [sig.key for sig in request.signals],
+                "sent": sent,
+                "ok": ok,
+                "failed": st.get("failed", 0),
+                "kinds": st.get("kinds", {}),
+                #: None, not 0, until something has actually been asked -
+                #: "0% success" on an unpolled request would read as a
+                #: failure rather than as no data yet.
+                "success_pct": None if not sent else round(100.0 * ok / sent, 1),
+                "last_ok_age": (
+                    None if not st.get("last_ok")
+                    else round(now - st["last_ok"], 1)
+                ),
+                "last_error": st.get("last_error"),
+                "last_error_age": (
+                    None if not st.get("last_error_at")
+                    else round(now - st["last_error_at"], 1)
+                ),
+            })
+
+        values = state.get("values") or {}
+        channels = []
+
+        for meta in profile.meta():
+            key = meta["key"]
+            #: `signal()` is the read channels; anything it does not
+            #: know is derived. A hasattr guard here silently reported
+            #: EVERY channel as derived, including rpm.
+            signal = profile.signal(key)
+            request_id = signal.request_id if signal is not None else ""
+
+            channels.append({
+                "key": key,
+                "label": meta.get("label", ""),
+                "unit": meta.get("unit", ""),
+                "request": request_id,
+                "derived": not request_id,
+                "logged": profile.is_logged(key),
+                "version": profile.channel_version(key),
+                "value": values.get(key),
+            })
+
+        mappings = []
+
+        for mapping in profile.mappings:
+            mappings.append({
+                "id": mapping.id,
+                "version": mapping.version,
+                "production": mapping.production,
+                "path": mapping.source_path,
+                "source_type": mapping.provenance.type,
+                "verification": mapping.verification.status,
+                "ecu_family": mapping.ecu.family,
+                "ecu_target": mapping.ecu.target.describe(),
+                #: Loaded only because --extra-mappings named it. This is
+                #: the repo's "no proprietary data in the production set"
+                #: line, made visible per run.
+                "extra": mapping.id in extra_ids,
+                "requests": len([
+                    r for r in profile.requests if owner.get(r.id) is mapping
+                ]),
+            })
+
+        return {
+            "ready": True,
+            "session": {
+                "ecu": state.get("ecu"),
+                "ecu_addr": (
+                    None if state.get("ecu_addr") is None
+                    else f"0x{state['ecu_addr']:02X}"
+                ),
+                "gateway": state.get("gateway"),
+                "other_ecus": state.get("other_ecus") or [],
+                "variants": sorted(state.get("variants") or ()),
+                "supported_pids": state.get("supported_pids"),
+                "mapping_set": profile.mapping_set(
+                    state.get("extra_versions") or ()
+                ),
+                "mode": state.get("mode"),
+                "connected_at": state.get("connected_at"),
+                "uptime_s": (
+                    None if not state.get("connected_at")
+                    else round(now - state["connected_at"], 1)
+                ),
+            },
+            "mappings": mappings,
+            "dropped": [d.as_dict() for d in profile.report.dropped],
+            "requests": requests,
+            "channels": channels,
+            "totals": {
+                **totals,
+                "requests": len(profile.requests),
+                "channels": len(channels),
+                "success_pct": (
+                    None if not totals["sent"]
+                    else round(100.0 * totals["ok"] / totals["sent"], 1)
+                ),
+            },
+        }
+
+
 class Telemetry:
     def __init__(self):
         self.lock = threading.Lock()
@@ -1433,7 +1633,9 @@ def poll_loop(
     rec: Optional["Recorder"] = None,
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
+    diag: Optional[Diagnostics] = None,
 ) -> None:
+    diag = diag if diag is not None else Diagnostics()
     #: The caller normally supplies this; constructing one here keeps
     #: the loop runnable on its own (tests, ad-hoc use).
     modes = modes if modes is not None else ModeControl(
@@ -1587,6 +1789,21 @@ def poll_loop(
 
             tel.set_meta(profile.meta())
 
+            #
+            # Everything the diagnostics view needs, published once per
+            # connection. References, not copies: the report is built on
+            # demand so a page nobody opens costs nothing per cycle.
+            #
+            diag.publish(
+                profile=profile, executor=executor, plan=plan,
+                ecu=engine.label(), ecu_addr=engine.addr, gateway=ip,
+                other_ecus=[e.label() for e in ecus if e.addr != engine.addr],
+                variants=variants,
+                supported_pids=len(engine.supported or ()),
+                extra_versions=[modes.table.fingerprint()],
+                mode=modes.current, connected_at=time.time(),
+            )
+
             counts = plan.counts()
 
             print(
@@ -1697,6 +1914,8 @@ def poll_loop(
                     clock_synced=synced,
                 )
 
+                diag.publish(values=values, mode=modes.current)
+
                 cycle += 1
 
                 sleep_for = interval - (time.monotonic() - started)
@@ -1718,6 +1937,9 @@ def poll_loop(
 
             print(f"[!] {msg}", flush=True)
             tel.update(connected=False, status=msg)
+            #: A disconnected picture is worse than none - the counters
+            #: would keep reading as if the link were live.
+            diag.clear()
 
             if rec is not None:
                 rec.event("error", msg)
@@ -1734,6 +1956,7 @@ def demo_loop(
     rec: Optional["Recorder"] = None,
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
+    diag: Optional[Diagnostics] = None,
 ) -> None:
     #: The demo synthesises values rather than scheduling requests, so a
     #: mode has nothing to scale here - it is accepted and reported so the
@@ -2999,6 +3222,7 @@ def make_handler(
     shares: Optional["ShareTokens"] = None,
     share_base_url: str = "",
     modes: Optional["ModeControl"] = None,
+    diag: Optional["Diagnostics"] = None,
 ):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -3274,6 +3498,20 @@ def make_handler(
                 self._body("application/json", payload)
                 return
 
+            if path == "/api/diagnostics":
+                #
+                # The full car-communication picture for this session:
+                # which mappings loaded, what resolution dropped and why,
+                # per-request success rates and last errors. Read-only,
+                # and not in the share allowlist - it names file paths
+                # and ECU addresses.
+                #
+                self._body("application/json",
+                           json.dumps(
+                               diag.report() if diag else {"ready": False}
+                           ).encode())
+                return
+
             if path == "/api/modes":
                 #: The catalogue the mode picker renders from, so the
                 #: page never hardcodes a list that can drift from the
@@ -3501,9 +3739,16 @@ def main() -> int:
     #
     try:
         registry = load_registry(args.mappings)
+        #: Which mappings are here only because --extra-mappings named
+        #: them. That flag is the repo's "no proprietary data in the
+        #: production set" line, and the diagnostics view shows per run
+        #: which side of it every loaded file sits on.
+        base_ids = {m.id for m in registry.mappings}
 
         if args.extra_mappings:
             load_extra(registry, args.extra_mappings)
+
+        extra_ids = {m.id for m in registry.mappings} - base_ids
     except MappingError as exc:
         print(f"[!] mapping error: {exc}", file=sys.stderr)
         return 2
@@ -3559,9 +3804,12 @@ def main() -> int:
         rec = Recorder(args.db, chunk=args.db_chunk, interval=args.db_flush)
         rec.open()
 
+    diag = Diagnostics()
+    diag.publish(extra_ids=extra_ids)
+
     worker = threading.Thread(
         target=demo_loop if args.demo else poll_loop,
-        args=(tel, args, rec, registry, modes),
+        args=(tel, args, rec, registry, modes, diag),
         daemon=True,
     )
     worker.start()
@@ -3576,6 +3824,7 @@ def main() -> int:
             shares,
             args.share_base_url,
             modes,
+            diag,
         ),
     )
     server.daemon_threads = True

@@ -155,18 +155,31 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   owner's notes, not git. `analysis/clickhouse/insights.sql` is the query
   battery.
 - **The Pi admin panel** (`hardware/raspberry-pi/admin/`): a phone-sized
-  page on `:8088` for what you would otherwise SSH in to do — health
-  (temp/throttle/disk/Wi-Fi/**clock**), service start/stop/restart, logs,
-  `git pull` (fast-forward only, pinned remote), reboot, and a clean
-  shutdown. Basic auth, LAN-only bind, sudoers allowlist. Its own systemd
-  unit, deliberately: it must survive `live.py` being broken.
+  page on `:8088`, three tabs. *System* — health
+  (temp/throttle/disk/Wi-Fi/**clock**), recording truth (samples/min, not
+  just "service active"), drive files with delete-if-synced, services,
+  logs incl. previous boot, `git pull` (ff-only, pinned remote), reboot,
+  clean shutdown. *Car link* — see below. *Claude* — the optional agent
+  session: status, crash-loop detection, tmux pane, restart; no terminal
+  and no prompt box, deliberately. Basic auth, LAN-only bind, sudoers
+  allowlist. Its own systemd unit: it must survive `live.py` being broken.
+- **`/api/diagnostics` — the verification view** (Car link tab). The full
+  car-communication picture for a session: mappings loaded (with an
+  `--extra` badge), what resolution **dropped and why**, per-request
+  sent/ok/failed with success rates and last errors, and every channel
+  traced to its request and mapping version. `resolve()` now returns a
+  `ResolutionReport`, so *"why is this channel missing?"* is a lookup
+  rather than an SSH-and-guess: the ECU does not advertise the PID, the
+  file is for another variant, or a derived channel lost an input.
+  **`sent` with no `ok` is a channel the car is not answering** — in the
+  sample table that is indistinguishable from one nobody asked for.
 - **The host clock is handled** (fixed 2026-08-30). The Pi has no RTC and
   once corrected itself 76.5 min mid-recording, corrupting a timeline.
   Now: services wait on `time-sync.target`, `--wait-for-clock` gives NTP
   a bounded chance, every run records `clock_synced`, and a mid-run step
   ends the run so none spans a discontinuity. **Anything time-derived
   must filter `sessions.clock_synced = 1`.**
-- 474 tests, no car / no network / no BMW data required.
+- 535 tests, no car / no network / no BMW data required.
 
 ## Repo map
 

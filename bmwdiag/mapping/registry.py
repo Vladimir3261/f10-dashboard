@@ -12,6 +12,7 @@ Nothing in here knows what a PID is. Capability *matching* is generic -
 to that question lives in bmwdiag.obd.
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .derive import apply_derived, compute_derived
@@ -45,6 +46,16 @@ class CapabilitySet:
     def satisfies_all(self, capabilities: Iterable[Capability]) -> bool:
         return all(self.satisfies(c) for c in capabilities)
 
+    def unmet(self, capabilities: Iterable[Capability]) -> Tuple[Capability, ...]:
+        """
+        Which requirements this ECU does NOT meet.
+
+        `satisfies_all` answers whether something was filtered;
+        this answers WHY, which is the question anyone debugging a
+        missing channel actually has. Resolution used to discard it.
+        """
+        return tuple(c for c in capabilities if not self.satisfies(c))
+
 
 class AllCapabilities(CapabilitySet):
     """Accepts everything. Used by demo mode and by the mapping CLI."""
@@ -56,6 +67,65 @@ class AllCapabilities(CapabilitySet):
 
     def __repr__(self) -> str:
         return "AllCapabilities()"
+
+
+def _capability_text(capability: "Capability") -> str:
+    """
+    A capability as a human would write it.
+
+    Diagnostic identifiers are conventionally hex - "obd_mode01_pid=0x0D"
+    is greppable against a mapping file, "=13" is not.
+    """
+    value = capability.value
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{capability.kind}=0x{value:02X}"
+
+    return f"{capability.kind}={value!r}"
+
+
+@dataclass(frozen=True)
+class Dropped:
+    """One thing that did not survive resolution, and the reason."""
+
+    kind: str          # "mapping" | "request" | "derived"
+    id: str
+    reason: str        # short, stable: "ecu_mismatch" | "capability" | "inputs"
+    detail: str        # human sentence naming what was missing
+    mapping_id: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind, "id": self.id, "reason": self.reason,
+            "detail": self.detail, "mapping_id": self.mapping_id,
+        }
+
+
+@dataclass(frozen=True)
+class ResolutionReport:
+    """
+    What resolution decided, including what it threw away.
+
+    Resolution is silent by design - a mapping that does not apply to
+    this ECU is skipped, not an error. But that silence is also why
+    "channel X is missing and I do not know why" has been an SSH-and-
+    guess exercise. This records every decision so the answer is a
+    lookup: the file was for another variant, the ECU does not advertise
+    the PID, or a derived channel lost an input it needed.
+    """
+
+    #: Mapping files that contributed at least one request or derived.
+    active: Tuple[str, ...] = ()
+    dropped: Tuple[Dropped, ...] = ()
+
+    def by_reason(self, reason: str) -> Tuple[Dropped, ...]:
+        return tuple(d for d in self.dropped if d.reason == reason)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "active": list(self.active),
+            "dropped": [d.as_dict() for d in self.dropped],
+        }
 
 
 class ResolvedProfile:
@@ -76,7 +146,11 @@ class ResolvedProfile:
         targets: Optional[Dict[str, int]] = None,
         polling_classes: Sequence[PollingClassDef] = (),
         mappings: Sequence[MappingFile] = (),
+        report: Optional["ResolutionReport"] = None,
     ):
+        #: What resolution decided, including what it discarded and why.
+        #: Empty when a profile is built directly rather than resolved.
+        self.report = report if report is not None else ResolutionReport()
         self.requests: List[RequestDef] = list(requests)
         self.derived: List[DerivedDef] = list(derived)
         self.config: Dict[str, Any] = dict(config or {})
@@ -440,15 +514,44 @@ class MappingRegistry:
         derived: List[DerivedDef] = []
         used: List[MappingFile] = []
         classes: List[PollingClassDef] = []
+        dropped: List[Dropped] = []
 
         for mapping in self.mappings:
             if family is not None and mapping.ecu.family != family:
+                dropped.append(Dropped(
+                    "mapping", mapping.id, "family",
+                    f"file targets the {mapping.ecu.family!r} ECU family, "
+                    f"resolving for {family!r}",
+                    mapping.id,
+                ))
                 continue
 
-            if not caps.satisfies_all(mapping.ecu.match):
+            missing = caps.unmet(mapping.ecu.match)
+
+            if missing:
+                dropped.append(Dropped(
+                    "mapping", mapping.id, "ecu_mismatch",
+                    "this ECU does not satisfy "
+                    + ", ".join(_capability_text(c) for c in missing),
+                    mapping.id,
+                ))
                 continue
 
-            enabled = [r for r in mapping.requests if caps.satisfies_all(r.requires)]
+            enabled = []
+
+            for request in mapping.requests:
+                unmet = caps.unmet(request.requires)
+
+                if unmet:
+                    dropped.append(Dropped(
+                        "request", request.id, "capability",
+                        "the ECU does not advertise "
+                        + ", ".join(_capability_text(c) for c in unmet),
+                        mapping.id,
+                    ))
+                    continue
+
+                enabled.append(request)
 
             if not enabled and not mapping.derived:
                 continue
@@ -486,6 +589,26 @@ class MappingRegistry:
                 if not progressed:
                     break
 
+            #
+            # Whatever is still a candidate could not be satisfied. A
+            # derived channel with no inputs would publish a channel that
+            # can never produce a value, so it is dropped - and now says
+            # which input it lost.
+            #
+            for definition in candidates:
+                fallbacks = definition.fallback_map()
+                absent = [
+                    name for role, name in definition.inputs
+                    if role not in fallbacks and name not in available
+                ]
+                dropped.append(Dropped(
+                    "derived", definition.key, "inputs",
+                    "needs " + ", ".join(absent) + ", which "
+                    + ("is" if len(absent) == 1 else "are")
+                    + " not being read",
+                    mapping.id,
+                ))
+
         return ResolvedProfile(
             requests=requests,
             derived=derived,
@@ -493,6 +616,10 @@ class MappingRegistry:
             targets=targets,
             polling_classes=classes,
             mappings=used,
+            report=ResolutionReport(
+                active=tuple(m.id for m in used),
+                dropped=tuple(dropped),
+            ),
         )
 
     def __repr__(self) -> str:

@@ -98,6 +98,10 @@ DEFAULTS: Dict[str, Any] = {
     #: The runtime's own snapshot. "Is the service up?" and "is data
     #: landing?" are different questions; this answers the second.
     "dashboard_status_url": "http://127.0.0.1:8080/api/snapshot",
+    #: The runtime's full car-communication picture. Fetched only while
+    #: its tab is open - it is a much larger payload than the status
+    #: poll and nothing about it changes second to second.
+    "diagnostics_url": "http://127.0.0.1:8080/api/diagnostics",
     #: Per-drive databases, and the agent's watermark file.
     "sessions_dir": "/home/f10/f10-dashboard/local/sessions",
     "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",
@@ -1091,6 +1095,23 @@ def make_handler(cfg: Dict[str, Any]):
                 self._json(200, status(cfg))
                 return
 
+            if path == "/api/diagnostics":
+                #: Proxied rather than merged into /api/status: it is a
+                #: far bigger payload, it changes slowly, and only one
+                #: tab needs it.
+                data = _fetch_json(cfg["diagnostics_url"], timeout=5.0)
+
+                if data is None:
+                    self._json(200, {
+                        "ready": False,
+                        "detail": "the runtime is not answering on "
+                                  + cfg["diagnostics_url"],
+                    })
+                    return
+
+                self._json(200, data)
+                return
+
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
 
         def do_POST(self):
@@ -1310,6 +1331,28 @@ PAGE = r"""<!doctype html>
   .prevboot input { width:17px; height:17px; accent-color:var(--accent); }
   .syncrow { display:flex; gap:8px; margin-top:12px; }
   .syncrow > button { flex:1; }
+  .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  table { border-collapse:collapse; width:100%; font-size:12px;
+          font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:6px 9px; white-space:nowrap;
+           border-bottom:1px solid var(--line); }
+  th { font-size:10.5px; letter-spacing:.05em; text-transform:uppercase;
+       color:var(--muted); font-weight:600; }
+  td.k { font-family:ui-monospace,Menlo,monospace; }
+  td.bad { color:var(--bad); } td.ok { color:var(--good); }
+  td.warn { color:var(--warn); }
+  tr.rowbad td.k { color:var(--bad); }
+  .drop { padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .drop:last-child { border-bottom:0; }
+  .drop b { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
+  .drop span { display:block; color:var(--muted); font-size:12px; }
+  .dropwhy { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--muted); margin:14px 0 4px; font-weight:600; }
+  .dropwhy:first-child { margin-top:0; }
+  .badge { font-size:10.5px; padding:2px 6px; border-radius:99px;
+           background:var(--card2); color:var(--muted); margin-left:6px; }
+  .badge.extra { background:#2a2340; color:#c3b6f5; }
+  .badge.rej { background:#3a1f1f; color:#ffb4b4; }
   .tabs { display:flex; gap:6px; margin:0 0 14px; }
   .tab { flex:1; background:none; border:1px solid var(--line);
          color:var(--muted); font-size:13.5px; }
@@ -1344,6 +1387,7 @@ PAGE = r"""<!doctype html>
        installed. -->
   <nav class="tabs" id="tabs">
     <button class="tab on" data-tab="system">System</button>
+    <button class="tab" data-tab="car">Car link</button>
     <button class="tab" data-tab="claude" id="tab-claude" style="display:none">Claude</button>
   </nav>
 
@@ -1391,6 +1435,46 @@ PAGE = r"""<!doctype html>
   </div>
 
   </div><!-- /pane-system -->
+
+  <!-- The verification view: what this session decided to ask the car,
+       what answered, and what resolution threw away. -->
+  <div id="pane-car" style="display:none">
+    <div class="card">
+      <h2>This session</h2>
+      <div id="carsession"></div>
+    </div>
+
+    <div class="card">
+      <h2>Mappings loaded</h2>
+      <div id="carmappings"></div>
+    </div>
+
+    <div class="card">
+      <h2>Requests</h2>
+      <p class="hint" style="margin-top:0">
+        Failing first. <b>sent</b> is how many times this session asked;
+        a request with sent but no ok is a channel the car is not
+        answering, which is otherwise indistinguishable from one nobody
+        asked for.
+      </p>
+      <div class="tablewrap"><table id="carrequests"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Not being read</h2>
+      <p class="hint" style="margin-top:0">
+        Resolution filters silently by design — a mapping for another ECU
+        variant is skipped, not an error. This is that decision, written
+        down: the answer to “why is this channel missing?”
+      </p>
+      <div id="cardropped"></div>
+    </div>
+
+    <div class="card">
+      <h2>Channels</h2>
+      <div class="tablewrap"><table id="carchannels"></table></div>
+    </div>
+  </div>
 
   <div id="pane-claude" style="display:none">
     <div class="card">
@@ -1593,6 +1677,129 @@ function render(s) {
     .join("");
 }
 
+/* ---------------------------------------------------- car link tab */
+/* Fetched only while its tab is open: a much bigger payload than the
+   status poll, and nothing in it changes second to second. */
+let carLoaded = false;
+
+async function loadCar(force) {
+  if (carLoaded && !force) return;
+
+  try {
+    renderCar(await api("/api/diagnostics"));
+    carLoaded = true;
+  } catch (e) {
+    $("carsession").innerHTML =
+      `<div class="recwarn">${escape_(e.message)}</div>`;
+  }
+}
+
+function renderCar(d) {
+  if (!d.ready) {
+    $("carsession").innerHTML =
+      `<div class="recwarn">${escape_(d.detail || "not connected")}</div>`;
+    for (const id of ["carmappings", "cardropped"]) $(id).innerHTML = "";
+    for (const id of ["carrequests", "carchannels"]) $(id).innerHTML = "";
+    return;
+  }
+
+  const s = d.session || {}, t = d.totals || {};
+
+  $("carsession").innerHTML =
+    `<div class="grid">`
+    + stat("Requests sent", (t.sent || 0).toLocaleString())
+    + stat("Success", t.success_pct == null ? "—" : t.success_pct + "%",
+           t.success_pct == null ? "" :
+           t.success_pct > 98 ? "good" : t.success_pct > 90 ? "warn" : "bad")
+    + stat("Channels", `${t.channels || 0}`)
+    + stat("Polled", `${t.requests || 0} requests`, "", true)
+    + `</div>`
+    + `<div class="recmeta" style="margin-top:12px">`
+    + [`ECU <b>${escape_(s.ecu || "?")}</b> at <b>${escape_(s.ecu_addr || "?")}</b>`,
+       `variants <b>${escape_((s.variants || []).join(", ") || "none")}</b>`,
+       `${s.supported_pids || 0} PIDs advertised`,
+       `mode <b>${escape_(s.mode || "?")}</b>`,
+       s.other_ecus && s.other_ecus.length
+         ? `also on the bus: ${escape_(s.other_ecus.join(", "))}` : "",
+      ].filter(Boolean).map(x => `<span>${x}</span>`).join("")
+    + `</div>`
+    /* The full fingerprint: every versioned file that shaped this
+       session, which is what a recorded drive is compared on. */
+    + `<div class="hint" style="word-break:break-all">`
+    + `mapping set: ${escape_(s.mapping_set || "")}</div>`;
+
+  $("carmappings").innerHTML = (d.mappings || []).map(m => `
+    <div class="sess">
+      <span class="nm"><b>${escape_(m.id)}</b>
+        <span>v${m.version} · ${m.requests} request${m.requests === 1 ? "" : "s"}
+          · ${escape_(m.ecu_family)} ${escape_(m.ecu_target)}
+          · ${escape_(m.source_type)}</span></span>
+      ${m.extra ? '<span class="badge extra">--extra</span>' : ""}
+      ${m.verification === "verified" ? '<span class="tick yes">verified</span>'
+        : `<span class="badge rej">${escape_(m.verification)}</span>`}
+    </div>`).join("");
+
+  /* Failing first: that is the order you debug in. */
+  const reqs = (d.requests || []).slice().sort((a, b) => {
+    const fa = a.sent && !a.ok ? 0 : a.failed ? 1 : 2;
+    const fb = b.sent && !b.ok ? 0 : b.failed ? 1 : 2;
+    return fa - fb || a.id.localeCompare(b.id);
+  });
+
+  $("carrequests").innerHTML =
+    `<thead><tr><th>request</th><th>where</th><th>every</th>
+      <th>sent</th><th>ok</th><th>fail</th><th>rate</th><th>last error</th>
+      </tr></thead><tbody>`
+    + reqs.map(q => {
+        const dead = q.sent && !q.ok;
+        const rate = q.success_pct == null ? "—" : q.success_pct + "%";
+        const cls = q.success_pct == null ? "" :
+          q.success_pct > 98 ? "ok" : q.success_pct > 90 ? "warn" : "bad";
+        const what = q.pid ? `${escape_(q.address)} pid ${escape_(q.pid)}`
+          : q.did ? `${escape_(q.address)} did ${escape_(q.did)}`
+          : escape_(q.address);
+        return `<tr class="${dead ? "rowbad" : ""}">
+          <td class="k">${escape_(q.id)}</td>
+          <td>${what}</td>
+          <td>${q.period_s == null ? "—" : q.period_s + "s"}</td>
+          <td>${q.sent}</td><td>${q.ok}</td><td>${q.failed}</td>
+          <td class="${cls}">${rate}</td>
+          <td>${escape_(q.last_error || "")}</td></tr>`;
+      }).join("")
+    + `</tbody>`;
+
+  const why = {
+    ecu_mismatch: "Mapping files for another ECU or variant",
+    capability: "Requests this ECU does not advertise",
+    inputs: "Derived channels missing an input",
+    family: "Filtered by ECU family",
+  };
+  const groups = {};
+  for (const x of d.dropped || []) (groups[x.reason] ||= []).push(x);
+
+  $("cardropped").innerHTML = Object.keys(groups).length === 0
+    ? '<span class="sub">nothing was filtered — every mapping applies</span>'
+    : Object.entries(groups).map(([reason, items]) =>
+        `<div class="dropwhy">${escape_(why[reason] || reason)}
+           (${items.length})</div>`
+        + items.map(x => `<div class="drop"><b>${escape_(x.id)}</b>
+            <span>${escape_(x.detail)}</span></div>`).join("")
+      ).join("");
+
+  $("carchannels").innerHTML =
+    `<thead><tr><th>channel</th><th>unit</th><th>from</th>
+      <th>v</th><th>stored</th><th>value</th></tr></thead><tbody>`
+    + (d.channels || []).map(c => `<tr>
+        <td class="k">${escape_(c.key)}</td>
+        <td>${escape_(c.unit || "")}</td>
+        <td>${escape_(c.derived ? "derived" : c.request)}</td>
+        <td>${c.version == null ? "—" : c.version}</td>
+        <td class="${c.logged ? "" : "warn"}">${c.logged ? "yes" : "no"}</td>
+        <td>${c.value == null ? "—" : escape_(String(c.value))}</td>
+        </tr>`).join("")
+    + `</tbody>`;
+}
+
 /* The agent is optional. Where the unit is not installed the server
    sends null and the tab never appears. */
 function renderClaude(c) {
@@ -1720,10 +1927,12 @@ document.addEventListener("click", async ev => {
   if (!b) return;
 
   if (b.dataset.tab) {
+    const want = b.dataset.tab;
     for (const t of document.querySelectorAll(".tab"))
       t.classList.toggle("on", t === b);
-    $("pane-system").style.display = b.dataset.tab === "system" ? "" : "none";
-    $("pane-claude").style.display = b.dataset.tab === "claude" ? "" : "none";
+    for (const name of ["system", "car", "claude"])
+      $("pane-" + name).style.display = name === want ? "" : "none";
+    if (want === "car") loadCar(true);
     return;
   }
 
