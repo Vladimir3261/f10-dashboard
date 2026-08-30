@@ -968,6 +968,30 @@ class ClaudeDisabled(AdminCase):
         )
 
 
+class DiagnosticsProxy(AdminCase):
+    config = {"diagnostics_url": "http://127.0.0.1:9/nope"}
+
+    def test_it_is_a_separate_endpoint_not_part_of_status(self):
+        """
+        A much bigger payload that changes slowly. Folding it into the
+        5-second status poll would make every phone pay for a tab it may
+        never open.
+        """
+        body = json.loads(self.get("/api/status").read())
+
+        self.assertNotIn("requests", body)
+        self.assertNotIn("dropped", body)
+
+    def test_an_unreachable_runtime_is_reported_not_a_500(self):
+        body = json.loads(self.get("/api/diagnostics").read())
+
+        self.assertFalse(body["ready"])
+        self.assertIn("not answering", body["detail"])
+
+    def test_it_needs_credentials(self):
+        self.assert_status(401, self.get, "/api/diagnostics", headers={})
+
+
 class DeploymentFiles(unittest.TestCase):
     ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")
 

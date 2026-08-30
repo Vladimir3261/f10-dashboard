@@ -41,6 +41,45 @@ leaves an existing `config.json` alone.
 | **Drive files** | every session database with size and whether the lake has it, and a Delete for the ones already shipped |
 | **Logs** | last 200 journal lines per unit; tick *previous boot* to read the log from before an unexplained reboot |
 
+## The Car link tab
+
+The verification view: what this session decided to ask the car, what
+answered, and what resolution threw away. Fetched only while the tab is
+open — it is a much larger payload than the status poll and nothing in it
+changes second to second.
+
+**This session** — the ECU that answered and at what address, the SGBD
+variants confirmed *by probe*, how many PIDs it advertises, and the full
+`id@version` fingerprint of every versioned file that shaped the run,
+mode table included. That string is what two drives are compared on.
+
+**Mappings loaded** — each file with its version, request count, source
+type and verification status, and an `--extra` badge for the ones loaded
+only because `--extra-mappings` named them. That flag is the repo's "no
+proprietary data in the production set" line, made visible per run.
+
+**Requests**, failing first — where each goes (`0x12 pid 0x0C`,
+`0x18 did 0xDA2E`), its real interval, and sent / ok / failed with a
+success rate and the last error. **`sent` with no `ok` is a channel the
+car is not answering**, which in the sample table is indistinguishable
+from one nobody asked for: both are simply absent rows.
+
+Staggered classes report their *per-channel* interval. The DDE reads
+declare 0.5 s, but that is the gap between firings of the class and one
+member goes out per firing — so the honest number is ~11 s, not 0.5.
+
+**Not being read** — the answer to *"why is this channel missing?"*
+Resolution filters silently by design: a mapping for another ECU variant
+is skipped, not an error. This is that decision written down, grouped by
+reason — the ECU does not advertise the PID, the file is for a different
+variant, a derived channel lost an input. Identifiers render in hex, so
+they are greppable against a mapping file.
+
+**Channels** — every channel with its unit, the request it came from (or
+*derived*), the mapping version that decoded it, and whether it is
+stored. A channel marked not-stored is `log: false` — read and displayed
+on purpose, never written.
+
 ## The Claude tab
 
 Only appears if the optional agent session is installed
