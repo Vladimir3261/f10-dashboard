@@ -50,13 +50,50 @@ model-without-feedback does:
   channel integrates forward with nothing physical to correct it or zero
   it against.
 - **Near-perfect linearity in distance** — with no measurable ΔP to
-  drive it, the estimate can only be a distance/fuel-based model. The
-  data said "this is a model, not a measurement" before we knew why.
+  drive it, the estimate can only be a modelled one. The data said "this
+  is a model, not a measurement" before we knew why. *(Distance turned
+  out to be the wrong variable — see the third line of evidence below.
+  It is time and fuelling.)*
 - **`soot_meas` ≈ `soot_model` to ~0.01 g despite scales differing by
   1.53×** — with no real measurement available, "measured" almost
   certainly falls back to the modelled value. They agree because they
   are the same estimate, so their agreement was never the independent
   corroboration the original verification took it for.
+
+## Third line of evidence: it rises with the engine idling, not moving
+
+**Session 9 (2026-08-31)** settles what the linearity meant. The car sat
+stationary for 41 minutes, idling from cold, and never moved:
+
+| | |
+|---|---|
+| `n47d_soot_meas` | 9.35 → 9.52 g (**+0.17 g**) |
+| elapsed | 40.9 min |
+| **rate** | **0.249 g/hour, at zero distance** |
+| `n47d_dist_since_regen` | 45.24 → 45.24 km (**Δ exactly 0.00**) |
+| `n47d_regen_count` | 93, unchanged |
+| rpm | mean 741, max 1295 — never left idle |
+
+**Distance did not move and soot still rose.** That kills the reading I
+had drawn from the 0.032 g/km linearity: distance was *correlating* with
+the real driver, not causing anything. Running time was riding along
+underneath it the whole time.
+
+The two rates agree, which is the confirmation rather than a coincidence:
+0.249 g/h against ~0.028 g/km from drives 7–8 is roughly the same
+accumulation at a ~30 km/h average — exactly what you would expect if
+time is the driver and distance merely tracked it.
+
+So there are now **three independent behaviours** pointing the same way:
+
+1. it never decreases, including across a confirmed regeneration;
+2. it is near-perfectly linear within a regen cycle;
+3. it accumulates at a steady per-hour rate with the car stationary.
+
+Together those describe a **cumulative estimate of soot produced** —
+integrated from fuelling and running time — not a measurement of what is
+in a filter. Which is what you would build if you had no filter to
+measure, and is consistent with everything else on this car.
 
 ## The finding that survives
 

@@ -120,6 +120,38 @@ def _nearest(series: List[Tuple[float, float]], t: float) -> Optional[float]:
     return best
 
 
+def paired(a: List[Tuple[float, float]], b: List[Tuple[float, float]],
+           tol: float = 5.0) -> List[Tuple[float, float, float]]:
+    """
+    (timestamp, a, b) for samples taken close enough together to compare.
+
+    `_nearest` has no tolerance: it returns the closest sample however far
+    away it is. For a one-instant comparison during a warm-up that is a
+    real problem - coolant is polled every 10 s and the DDE oil read comes
+    round every ~11 s, so an unbounded pairing can be 5 s apart while the
+    quantity being measured moves by about as much as the difference being
+    claimed. A single-crossing delta is then noise reported as a finding.
+
+    Pairing with a tolerance, and averaging over the whole warm-up, is
+    what actually answers "does oil lag coolant".
+    """
+    out: List[Tuple[float, float, float]] = []
+
+    for ts, av in a:
+        best, bd = None, tol
+
+        for bts, bv in b:
+            d = abs(bts - ts)
+
+            if d <= bd:
+                bd, best = d, bv
+
+        if best is not None:
+            out.append((ts, av, best))
+
+    return out
+
+
 def _stats(values: List[float]) -> Dict:
     if not values:
         return {}
@@ -191,14 +223,28 @@ def warmup(run: Dict) -> Dict:
         warmed_t = next((ts for ts, v in cool if v >= WARM_C), None)
 
         if warmed_t is not None:
-            oil_at = _nearest(oil, warmed_t)
             speed = run["series"].get("speed") or []
             moved = max((v for _, v in speed), default=None)
 
+            #
+            # Averaged over MATCHED PAIRS across the warm-up, not read off
+            # one sample at the crossing. A single instant is within the
+            # sampling error: on session 9 the same session gave -0.2,
+            # +0.27 or +0.50 C depending purely on how the two series were
+            # lined up. The mean over the ramp is the number that means
+            # something.
+            #
+            ramp = [(ts, v) for ts, v in cool if ts <= warmed_t]
+            pairs = paired(ramp, oil)
+            deltas = [ov - cv for _, cv, ov in pairs]
+
             out["oil_vs_coolant_at_coolant80"] = {
                 "coolant": WARM_C,
-                "oil": round(oil_at, 1),
-                "delta": round(oil_at - WARM_C, 2),
+                "oil": round(_nearest(oil, warmed_t), 1),
+                "delta": round(sum(deltas) / len(deltas), 2) if deltas else None,
+                "pairs": len(deltas),
+                "delta_min": round(min(deltas), 2) if deltas else None,
+                "delta_max": round(max(deltas), 2) if deltas else None,
                 #: None when speed was not captured - unknown, not "no".
                 "moved": None if not speed else bool(moved and moved > 5),
                 "max_speed": None if not speed else round(moved, 1),
@@ -357,12 +403,12 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
             line += (" Stationary throughout, so the load-driven oil lag "
                      "could not be observed either way — this is not "
                      "evidence of a healthy warm-up, only of a warm-up.")
-        elif ovc and ovc["delta"] <= -1.0:
-            line += (f" Oil lagged coolant by {abs(ovc['delta']):.1f} °C at "
-                     "the 80 °C crossing — the expected signature.")
-        elif ovc:
-            line += (f" Oil was {ovc['delta']:+.1f} °C against coolant at the "
-                     "80 °C crossing, so no lag was seen.")
+        elif ovc and ovc.get("delta") is not None and ovc["delta"] <= -1.0:
+            line += (f" Oil lagged coolant by {abs(ovc['delta']):.1f} °C on "
+                     "average through the ramp — the expected signature.")
+        elif ovc and ovc.get("delta") is not None:
+            line += (f" Oil ran {ovc['delta']:+.1f} °C against coolant "
+                     "through the ramp, so no lag was seen.")
 
         out.append(line)
 
@@ -595,11 +641,13 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
 
         ovc = wu.get("oil_vs_coolant_at_coolant80")
 
-        if ovc:
+        if ovc and ovc.get("delta") is not None:
             delta = ovc["delta"]
             L.append("")
-            L.append(f"- When coolant reached 80 °C, oil was "
-                     f"**{ovc['oil']} °C** ({delta:+.2f} °C vs coolant).")
+            L.append(f"- Across the warm-up, oil ran **{delta:+.2f} °C** "
+                     f"against coolant (mean of {ovc['pairs']} matched "
+                     f"pairs, range {ovc['delta_min']:+.2f} to "
+                     f"{ovc['delta_max']:+.2f}).")
 
             #
             # State the observation, then interpret it only where the

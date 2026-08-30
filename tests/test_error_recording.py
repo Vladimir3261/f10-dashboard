@@ -95,6 +95,175 @@ class Recording(unittest.TestCase):
         self.assertLessEqual(len(self._rows()[0][2]), 500)
 
 
+class TheWiring(unittest.TestCase):
+    """
+    Executor fault -> on_error -> Recorder.error -> SQLite, end to end.
+
+    The gap f10pi found while verifying session 9: the tests below cover
+    recorder -> SQLite -> agent -> ingest, and nothing covered the hop
+    that was actually MISSING in the first place. `on_error` existed on
+    the executor and `live.py` simply never passed anything to it, so
+    every fault was discarded - and a test suite that starts at the
+    recorder cannot see that.
+
+    The errors table was also reported as "right shape, zero rows,
+    untested rather than proven" after a 100%-healthy drive. A fault
+    injected at the transport proves it offline, without waiting for the
+    car to misbehave.
+    """
+
+    def setUp(self):
+        self.db = os.path.join(tempfile.mkdtemp(), "rec.db")
+        self.rec = live.Recorder(self.db)
+        self.rec.open()
+        self.rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+        time.sleep(0.05)
+
+    def tearDown(self):
+        try:
+            self.rec.close()
+        except Exception:
+            pass
+
+    def _profile(self, target="0x18"):
+        from bmwdiag.mapping import load_text, MappingRegistry
+        from bmwdiag.mapping.registry import AllCapabilities
+
+        mapping = load_text(
+            "schema_version: 1\n"
+            "mapping: {id: t, version: 1, production: false}\n"
+            f"ecu: {{target: {target}}}\n"
+            "requests:\n"
+            "  probe:\n"
+            "    protocol: uds\n"
+            "    service: 0x22\n"
+            "    did: 0xDA2E\n"
+            "    response: {data_length: 2}\n"
+            "    signals:\n"
+            "      g: {label: G, unit: '', decode: {type: uint8}}\n",
+            "test",
+        )
+
+        return MappingRegistry([mapping]).resolve(AllCapabilities())
+
+    def _rows(self):
+        con = sqlite3.connect(self.db)
+        try:
+            return con.execute(
+                "SELECT request_id, kind, message FROM errors ORDER BY rowid"
+            ).fetchall()
+        finally:
+            con.close()
+
+    def test_a_transport_fault_reaches_the_database(self):
+        """This is the hop that was missing, and it is the whole point."""
+        class Refusing:
+            def request(self, payload, *, dst, timeout=None):
+                raise HsfzNack("gateway will not route to 0x18")
+
+        profile = self._profile()
+        executor = live.MappingExecutor(
+            profile,
+            transport=Refusing(),
+            on_error=lambda rid, exc: self.rec.error(
+                rid, live.fault_kind(exc), str(exc)
+            ),
+        )
+
+        executor.execute(profile.requests)
+        time.sleep(0.3)
+        self.rec.close()
+
+        rows = self._rows()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "probe")
+        self.assertEqual(rows[0][1], "transport_nack")
+        self.assertIn("will not route", rows[0][2])
+
+    def test_a_timeout_is_recorded_under_its_own_kind(self):
+        """
+        Kinds must stay distinguishable: an ECU that did not answer and a
+        gateway that refused to route are different diagnoses, and the
+        whole reason for a `kind` column is to GROUP BY it later.
+        """
+        class Silent:
+            def request(self, payload, *, dst, timeout=None):
+                raise TimeoutError("no answer in 0.4s")
+
+        profile = self._profile()
+        executor = live.MappingExecutor(
+            profile,
+            transport=Silent(),
+            on_error=lambda rid, exc: self.rec.error(
+                rid, live.fault_kind(exc), str(exc)
+            ),
+        )
+
+        executor.execute(profile.requests)
+        time.sleep(0.3)
+        self.rec.close()
+
+        self.assertEqual(self._rows()[0][1], "transport_timeout")
+
+    def test_a_healthy_exchange_records_nothing(self):
+        """
+        Zero rows must mean "nothing failed", not "nothing is wired". The
+        two were indistinguishable before, which is exactly why a
+        100%-healthy drive left this untested.
+        """
+        class Answering:
+            def request(self, payload, *, dst, timeout=None):
+                return b"\x62\xda\x2e\x00\x03"
+
+        profile = self._profile()
+        executor = live.MappingExecutor(
+            profile,
+            transport=Answering(),
+            on_error=lambda rid, exc: self.rec.error(
+                rid, live.fault_kind(exc), str(exc)
+            ),
+        )
+
+        executor.execute(profile.requests)
+        time.sleep(0.3)
+        self.rec.close()
+
+        self.assertEqual(self._rows(), [])
+
+    def test_live_py_actually_wires_it(self):
+        """
+        The executor is only asked for faults if someone passes on_error.
+        It was constructed without one for weeks. Asserted structurally,
+        the same way the metadata ordering is: reaching this line at
+        runtime needs a gateway and an ECU scan.
+        """
+        import ast
+
+        tree = ast.parse(open(
+            os.path.join(support.ROOT, "live.py"), encoding="utf-8"
+        ).read())
+        loop = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "poll_loop"
+        )
+        built = [
+            call for call in ast.walk(loop)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "MappingExecutor"
+        ]
+
+        self.assertTrue(built, "poll_loop builds no MappingExecutor")
+
+        for call in built:
+            self.assertIn(
+                "on_error", [kw.arg for kw in call.keywords],
+                "the executor is built without on_error, so every fault "
+                "is discarded",
+            )
+
+
 class Shipping(unittest.TestCase):
     def _db_with_errors(self, path, include_table=True):
         con = sqlite3.connect(path)
