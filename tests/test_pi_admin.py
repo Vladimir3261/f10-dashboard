@@ -458,6 +458,83 @@ class BindRefusesWildcard(unittest.TestCase):
         self.assertNotIn(example["bind"], ("0.0.0.0", "::"))
 
 
+class ActionsReportBack(AdminCase):
+    """
+    Every action has to say what it did.
+
+    The first version put the result in a div at the bottom of the page,
+    below the Power card - so on a phone every result landed off-screen
+    and an action that worked perfectly looked like it did nothing.
+    """
+
+    replies = {
+        "remote get-url": (0, "git@example.invalid:owner/repo.git"),
+        "rev-parse --short": (0, "abc1234"),
+        "log -1": (0, "Some commit subject"),
+        "rev-list --count": (0, "3"),
+        "merge --ff-only": (0, "Already up to date."),
+    }
+
+    def test_an_unchanged_pull_still_says_where_it_is(self):
+        """
+        "Already up to date" on its own is useless - up to date AT WHAT?
+        The revision and subject are what make it a real answer.
+        """
+        body = json.loads(self.post("pull", {"confirm": True}).read())
+
+        self.assertFalse(body["changed"])
+        self.assertEqual(body["after"], "abc1234")
+        self.assertEqual(body["subject"], "Some commit subject")
+        self.assertEqual(body["commits"], 0)
+
+    def test_every_action_returns_ok_and_its_own_name(self):
+        """So the page can always render something specific."""
+        for action, body in (
+            ("logs", {"unit": "f10-dashboard"}),
+            ("restart", {"unit": "f10-dashboard", "confirm": True}),
+            ("service", {"unit": "f10-sync", "verb": "stop", "confirm": True}),
+            ("pull", {"confirm": True}),
+            ("reboot", {"confirm": True}),
+            ("shutdown", {"confirm": True}),
+        ):
+            with self.subTest(action=action):
+                result = json.loads(self.post(action, body).read())
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["action"], action)
+
+    def test_the_page_pins_the_message_to_the_viewport(self):
+        """
+        Regression on the original bug: the toast must not scroll away
+        with the page.
+        """
+        page = self.get("/").read().decode()
+
+        self.assertIn("#msg { position:fixed", page)
+
+
+class ChangedPull(AdminCase):
+    replies = {
+        "remote get-url": (0, "git@example.invalid:owner/repo.git"),
+        "rev-parse --short": (0, "abc1234"),
+        "rev-list --count": (0, "3"),
+        "log -1": (0, "New head subject"),
+        "merge --ff-only": (0, "Fast-forward"),
+    }
+
+    def test_a_pull_that_moved_reports_how_far(self):
+        """
+        `before` and `after` come from the same faked command here, so
+        this asserts the shape rather than the delta; the count query is
+        what tells the user how much arrived.
+        """
+        body = json.loads(self.post("pull", {"confirm": True}).read())
+
+        self.assertIn("commits", body)
+        self.assertIn("subject", body)
+        self.assertIn("note", body)
+
+
 class DeploymentFiles(unittest.TestCase):
     ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")
 
