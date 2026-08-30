@@ -3,7 +3,7 @@
   "mappings": [
     {
       "id": "candidate-f10-egs-transmission",
-      "version": 4,
+      "version": 5,
       "production": false,
       "path": "mappings/candidates/bmw/egs/f10_transmission.yaml"
     },
@@ -21,25 +21,25 @@
     },
     {
       "id": "candidate-n47-d72-dpf-egr",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml"
     },
     {
       "id": "candidate-n47-d72-dynamic",
-      "version": 2,
+      "version": 3,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml"
     },
     {
       "id": "candidate-n47-d72-flow",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"
     },
     {
       "id": "candidate-n47-d72-gearbox",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_gearbox.yaml"
     },
@@ -57,13 +57,13 @@
     },
     {
       "id": "example-synthetic-uds",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/examples/uds_example.yaml"
     },
     {
       "id": "sae-obd-engine",
-      "version": 2,
+      "version": 3,
       "production": true,
       "path": "mappings/obd/engine.yaml"
     }

@@ -59,7 +59,6 @@ class Args:
 
     tank = 70.0
     rate = 10.0
-    slow_every = 10
     mappings = support.MAPPINGS
 
 
@@ -364,16 +363,14 @@ class TestRecorderCompatibility(LiveWiringCase):
 
 
 class TestPollingClassWiring(LiveWiringCase):
-    def test_slow_every_reaches_the_plan(self):
+    def test_the_mapping_declared_classes_reach_the_plan(self):
+        """No CLI rate override exists: the mapping file is the source."""
         registry = live.load_registry(Args.mappings)
+        classes = live.polling_classes(registry, Args())
 
-        class Slower(Args):
-            slow_every = 4
-
-        classes = live.polling_classes(registry, Slower())
-
-        self.assertEqual(classes["slow"].value, 4.0)
-        self.assertEqual(classes["fast"].value, 1.0)
+        self.assertEqual(classes["motion"].period, 0.1)
+        self.assertEqual(classes["context"].period, 10.0)
+        self.assertEqual(classes["rare"].period, 60.0)
 
     def test_ecu_scoring_uses_the_mapped_pids(self):
         registry = live.load_registry(Args.mappings)

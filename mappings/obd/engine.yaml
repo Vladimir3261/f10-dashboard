@@ -2,7 +2,7 @@ schema_version: 1
 
 mapping:
   id: sae-obd-engine
-  version: "2"
+  version: "3"
   description: >
     Standard SAE OBD-II Mode 01 current-data telemetry for the engine ECU.
     Every request and formula here is the one this application has been
@@ -72,10 +72,10 @@ defaults:
 # exactly what is declared here. See bmwdiag/mapping/modes.py.
 # ---------------------------------------------------------------------
 polling_classes:
-  motion:  {hz: 10, priority: 0}
-  context: {seconds: 10, priority: 1}
-  slow:    {seconds: 10, priority: 2}
-  rare:    {seconds: 60, priority: 3}
+  motion:  {seconds: 0.1, priority: 0}
+  context: {seconds: 10,  priority: 1}
+  slow:    {seconds: 10,  priority: 2}
+  rare:    {seconds: 60,  priority: 3}
 
 requests:
   # -- motion: 10 Hz ---------------------------------------------

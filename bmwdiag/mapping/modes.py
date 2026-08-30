@@ -324,9 +324,8 @@ def apply_mode(
     """
     Rescale polling classes for a mode. Pure - returns new objects.
 
-    Cycle-based classes scale their cycle count (and never drop below 1
-    cycle, which is as fast as the loop can go); wall-clock classes scale
-    their period, which for an `hz` class means dividing the rate.
+    One unit means one operation: multiply the period. A multiplier above
+    1 polls less often, below 1 more often.
     """
     out: Dict[str, PollingClassDef] = {}
 
@@ -343,18 +342,9 @@ def apply_mode(
                 f"multiplier {factor!r}"
             )
 
-        if cls.kind == "hz":
-            #: period *= factor  =>  rate /= factor
-            value = cls.value / factor
-        elif cls.kind == "seconds":
-            value = cls.value * factor
-        else:                                   # cycles
-            value = max(1.0, round(cls.value * factor))
-
         out[name] = PollingClassDef(
             name=cls.name,
-            kind=cls.kind,
-            value=value,
+            period=cls.period * factor,
             priority=cls.priority,
             stagger=cls.stagger,
         )

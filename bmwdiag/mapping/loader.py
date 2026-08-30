@@ -959,30 +959,40 @@ def _polling_classes(raw: Any, source: str, path: str) -> Tuple[PollingClassDef,
     for index, (name, spec) in enumerate(data.items()):
         name = str(name)
         spec = _as_dict(spec, source, f"{path}.{name}")
-        kinds = [k for k in ("cycles", "every", "hz", "seconds") if k in spec]
 
-        if len(kinds) != 1:
+        #
+        # One unit, seconds. `hz`, `every` and `cycles` were accepted
+        # until 2026-08-30; they are refused by name now rather than
+        # ignored, because a file still carrying `hz: 10` would otherwise
+        # load with a default period and poll at the wrong rate in
+        # silence.
+        #
+        for retired in ("hz", "every", "cycles"):
+            if retired in spec:
+                raise InvalidFieldError(
+                    f"polling class {name!r} uses {retired!r}, which was "
+                    f"replaced by `seconds` (one unit, wall clock). "
+                    f"Write the period in seconds instead.",
+                    source, f"{path}.{name}.{retired}",
+                )
+
+        if "seconds" not in spec:
             raise InvalidFieldError(
-                f"polling class {name!r} needs exactly one of "
-                "cycles/every/hz/seconds",
+                f"polling class {name!r} needs `seconds`",
                 source, f"{path}.{name}",
             )
 
-        chosen = kinds[0]
-        value = _as_float(spec[chosen], source, f"{path}.{name}.{chosen}")
+        value = _as_float(spec["seconds"], source, f"{path}.{name}.seconds")
 
         if value <= 0:
             raise InvalidFieldError(
-                f"polling class {name!r} rate must be positive, got {value}",
-                source, f"{path}.{name}.{chosen}",
+                f"polling class {name!r} period must be positive, got {value}",
+                source, f"{path}.{name}.seconds",
             )
-
-        kind = "cycles" if chosen in ("cycles", "every") else chosen
 
         out.append(PollingClassDef(
             name=name,
-            kind=kind,
-            value=value,
+            period=value,
             priority=_as_int(spec.get("priority", index), source,
                              f"{path}.{name}.priority"),
             stagger=bool(spec.get("stagger", False)),

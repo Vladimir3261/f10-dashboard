@@ -4,7 +4,7 @@ Standalone mapping CLI, for development. Never needs a vehicle.
     python3 -m bmwdiag.mapping validate mappings/
     python3 -m bmwdiag.mapping list mappings/
     python3 -m bmwdiag.mapping show mappings/obd/engine.yaml
-    python3 -m bmwdiag.mapping plan mappings/obd --slow-every 10
+    python3 -m bmwdiag.mapping plan mappings/obd
     python3 -m bmwdiag.mapping decode mappings/obd/engine.yaml rpm "41 0C 0C 3C"
     python3 -m bmwdiag.mapping request mappings/obd/engine.yaml obd.mode01.0C
 
@@ -298,14 +298,14 @@ def cmd_plan(args) -> int:
     profile = registry.resolve(AllCapabilities(), config={"tank": args.tank})
     classes = resolve_classes(
         registry.polling_classes(),
-        {"slow": PollingClassDef("slow", "cycles", float(args.slow_every), 1)},
     )
     plan = PollingPlan(profile.requests, classes)
 
     print("polling classes:")
 
     for name, cls in sorted(classes.items(), key=lambda kv: kv[1].priority):
-        print(f"  {name:<12} {cls.kind}={cls.value:g}  priority {cls.priority}")
+        print(f"  {name:<12} every {cls.period:g}s  priority {cls.priority}"
+              + ("  (staggered)" if cls.stagger else ""))
 
     print("\nrequests per class:", plan.counts())
     print(f"\n{len(profile.requests)} requests carry "
@@ -393,7 +393,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("plan", help="show the polling plan")
     plan.add_argument("paths", nargs="+")
-    plan.add_argument("--slow-every", type=int, default=10)
     plan.add_argument("--tank", type=float, default=70.0)
     plan.add_argument("--cycles", type=int, default=4)
     plan.set_defaults(func=cmd_plan)

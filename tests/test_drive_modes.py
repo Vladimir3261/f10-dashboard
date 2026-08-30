@@ -246,45 +246,36 @@ class TableIsConfig(unittest.TestCase):
 
 
 class Scaling(unittest.TestCase):
-    def test_a_multiplier_slows_an_hz_class(self):
-        classes = {"egs": PollingClassDef("egs", "hz", 2.0, 4)}
+    def test_a_multiplier_above_one_polls_less_often(self):
+        classes = {"egs": PollingClassDef("egs", 0.5, 4)}
         mode = DriveMode("x", "", multipliers={"egs": 4.0})
 
-        self.assertEqual(apply_mode(classes, mode)["egs"].value, 0.5)
+        self.assertEqual(apply_mode(classes, mode)["egs"].period, 2.0)
 
     def test_a_multiplier_below_one_speeds_a_class_up(self):
-        classes = {"context": PollingClassDef("context", "seconds", 10.0, 1)}
+        classes = {"context": PollingClassDef("context", 10.0, 1)}
         mode = DriveMode("x", "", multipliers={"context": 0.01})
 
-        self.assertEqual(apply_mode(classes, mode)["context"].value, 0.1)
-
-    def test_a_cycles_class_never_scales_below_one_cycle(self):
-        """Half a loop cycle does not exist; clamp rather than round to 0."""
-        classes = {"dde_dyn": PollingClassDef("dde_dyn", "cycles", 5.0, 2)}
-        mode = DriveMode("x", "", multipliers={"dde_dyn": 0.01})
-
-        self.assertEqual(apply_mode(classes, mode)["dde_dyn"].value, 1.0)
+        self.assertEqual(apply_mode(classes, mode)["context"].period, 0.1)
 
     def test_scaling_preserves_priority_and_stagger(self):
-        classes = {
-            "dde_dyn": PollingClassDef("dde_dyn", "cycles", 5.0, 2, stagger=True)
-        }
+        classes = {"dde_dyn": PollingClassDef("dde_dyn", 0.5, 2, stagger=True)}
         scaled = apply_mode(
             classes, DriveMode("x", "", multipliers={"dde_dyn": 2.0})
         )["dde_dyn"]
 
-        self.assertEqual(scaled.value, 10.0)
+        self.assertEqual(scaled.period, 1.0)
         self.assertEqual(scaled.priority, 2)
         self.assertTrue(scaled.stagger)
 
     def test_an_unnamed_class_is_left_alone(self):
-        classes = {"slow": PollingClassDef("slow", "seconds", 10.0, 2)}
+        classes = {"slow": PollingClassDef("slow", 10.0, 2)}
         scaled = apply_mode(classes, DriveMode("x", "", multipliers={}))
 
-        self.assertEqual(scaled["slow"].value, 10.0)
+        self.assertEqual(scaled["slow"].period, 10.0)
 
     def test_a_non_positive_multiplier_is_refused(self):
-        classes = {"slow": PollingClassDef("slow", "seconds", 10.0, 2)}
+        classes = {"slow": PollingClassDef("slow", 10.0, 2)}
 
         for bad in (0.0, -1.0):
             with self.subTest(bad=bad):
@@ -299,8 +290,7 @@ class Switching(unittest.TestCase):
 
         for name, cls in declared.items():
             with self.subTest(name=name):
-                self.assertEqual(normal[name].value, cls.value)
-                self.assertEqual(normal[name].kind, cls.kind)
+                self.assertEqual(normal[name].period, cls.period)
 
     def test_switching_back_returns_to_the_declared_rates(self):
         """
@@ -309,13 +299,13 @@ class Switching(unittest.TestCase):
         is not normal, and no recorded run means what it says.
         """
         plan = obd_plan()
-        before = {n: c.value for n, c in plan.classes.items()}
+        before = {n: c.period for n, c in plan.classes.items()}
 
         plan.set_mode(get_mode("debug"))
         plan.set_mode(get_mode("long"))
         plan.set_mode(get_mode("normal"))
 
-        self.assertEqual({n: c.value for n, c in plan.classes.items()}, before)
+        self.assertEqual({n: c.period for n, c in plan.classes.items()}, before)
 
     def test_switching_does_not_reorder_requests(self):
         """Batching depends on request order; a mode must not disturb it."""

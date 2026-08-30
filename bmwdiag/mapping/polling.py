@@ -5,13 +5,10 @@ The plan schedules REQUESTS, never signal names. Several signals decoded
 from one reply therefore cost one exchange, and adding a signal to an
 existing request adds no traffic at all.
 
-Two scheduling kinds coexist:
-
-    cycles   every Nth poll-loop iteration - the legacy fast/slow model,
-             kept because --rate/--slow-every are defined in those terms
-    hz/seconds
-             wall-clock periods, so a future mapping can ask for 5 Hz or
-             0.2 Hz without the loop cadence having to change
+Scheduling is wall-clock, in seconds, and that is the only unit. A class
+declares `{seconds: N}`; a request is due when N seconds have passed
+since it last went out. The poll loop's own rate sets the granularity -
+asking for a period shorter than one loop cycle just means "every cycle".
 
 A drive mode sits on top as a scaling of those classes (see modes.py).
 It is applied here rather than beside here, so there remains exactly one
@@ -39,11 +36,12 @@ __all__ = ["DEFAULT_POLLING_CLASSES", "resolve_classes", "PollingPlan"]
 #: loop rate itself silently runs at half that rate.
 SCHEDULE_SLACK = 0.001
 
-#: The two classes the current application defines. `slow.value` is
-#: replaced at runtime by --slow-every.
+#: Fallback classes for a mapping that declares none of its own. Every
+#: shipped mapping declares its own, so these are a safety net rather
+#: than a default anyone relies on.
 DEFAULT_POLLING_CLASSES: Tuple[PollingClassDef, ...] = (
-    PollingClassDef("fast", "cycles", 1.0, priority=0),
-    PollingClassDef("slow", "cycles", 10.0, priority=1),
+    PollingClassDef("fast", 0.1, priority=0),
+    PollingClassDef("slow", 10.0, priority=1),
 )
 
 
@@ -54,8 +52,7 @@ def resolve_classes(
     """
     Merge built-in classes, mapping-declared classes and runtime overrides.
 
-    Precedence is runtime > mapping file > built-in, so --slow-every keeps
-    the last word over whatever a mapping happens to declare.
+    Precedence is runtime > mapping file > built-in.
     """
     out: Dict[str, PollingClassDef] = {c.name: c for c in DEFAULT_POLLING_CLASSES}
 
@@ -72,10 +69,8 @@ class PollingPlan:
     """
     Decides which requests are due.
 
-    Cycle-based classes reproduce the previous behaviour exactly: `fast`
-    runs every cycle, `slow` runs when `cycle % slow_every == 0`. Requests
-    come back ordered by class priority then declaration order, which is
-    what keeps the OBD multi-PID batching byte-identical to before.
+    Requests come back ordered by class priority then declaration order,
+    which is what keeps the OBD multi-PID batching deterministic.
     """
 
     def __init__(
@@ -179,6 +174,20 @@ class PollingPlan:
         #: and the byte-pinned OBD behaviour are untouched.
         staggered: Dict[str, List[RequestDef]] = {}
 
+        #
+        # A staggered class is timed as a WHOLE, not per request: the
+        # period is the gap between firings of the CLASS, and exactly one
+        # member goes out per firing, so a member's own refresh interval
+        # is period x members. Its due-check therefore runs ONCE, here -
+        # asking per member would let the first member consume the slot
+        # and the rest would never be considered.
+        #
+        stagger_due = {
+            name: self._is_due(name, cls.period, now)
+            for name, cls in self.classes.items()
+            if cls.stagger and not (asleep and name not in self.mode.duty_exempt)
+        }
+
         for request in self.requests:
             cls = self.classes[request.polling_class]
 
@@ -187,50 +196,20 @@ class PollingPlan:
             if asleep and cls.name not in self.mode.duty_exempt:
                 continue
 
-            if cls.kind == "cycles":
-                every = max(1, int(cls.value))
-
-                if cycle % every != 0:
-                    continue
-
-                if cls.stagger:
+            if cls.stagger:
+                if stagger_due.get(cls.name):
                     staggered.setdefault(cls.name, []).append(request)
-                else:
-                    out.append(request)
 
                 continue
 
-            period = cls.period
-
-            if period is None:
-                out.append(request)
-                continue
-
-            if now is None:
-                out.append(request)
-                continue
-
-            last = self._last.get(request.id)
-
-            #
-            # Slack matters at the top of the range. A class asking for
-            # exactly the loop rate (motion is 10 Hz against a 10 Hz
-            # loop) can never satisfy a strict `elapsed >= period`: each
-            # cycle arrives a few microseconds short, so the request is
-            # deferred to the next one and the channel runs at HALF its
-            # declared rate. A millisecond of slack absorbs that without
-            # meaningfully advancing anything slower: it is 1% of the
-            # fastest period we use and 0.002% of the slowest.
-            #
-            if last is None or now - last >= period - SCHEDULE_SLACK:
-                self._last[request.id] = now
+            if self._is_due(request.id, cls.period, now):
                 out.append(request)
 
         #
         # One member per staggered class per firing, cycling through them
         # in declaration order. `self.requests` is already priority-sorted,
         # so members come out in a stable order and the cursor advances
-        # only on cycles the class actually fires.
+        # only on firings the class actually gets.
         #
         for name, members in staggered.items():
             cursor = self._rotation.get(name, 0)
@@ -238,3 +217,30 @@ class PollingPlan:
             self._rotation[name] = cursor + 1
 
         return out
+
+    def _is_due(self, key: str, period: float, now: Optional[float]) -> bool:
+        """
+        Has `period` elapsed since `key` last fired?
+
+        With no clock, everything is due - callers that pass no `now`
+        want the full set (startup, introspection, tests).
+
+        Slack matters at the top of the range. A class asking for exactly
+        the loop rate (motion is 0.1 s against a 10 Hz loop) can never
+        satisfy a strict `elapsed >= period`: each cycle arrives a few
+        microseconds short, so the request is deferred to the next one
+        and the channel runs at HALF its declared rate. A millisecond of
+        slack absorbs that without meaningfully advancing anything
+        slower - 1% of the fastest period we use, 0.002% of the slowest.
+        """
+        if now is None:
+            return True
+
+        last = self._last.get(key)
+
+        if last is None or now - last >= period - SCHEDULE_SLACK:
+            self._last[key] = now
+
+            return True
+
+        return False

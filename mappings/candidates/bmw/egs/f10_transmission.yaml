@@ -16,7 +16,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-egs-transmission
-  version: 4
+  version: 5
   production: false
   description: >
     CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)
@@ -75,7 +75,7 @@ defaults:
 # timing itself ever becomes the subject, `debug` mode puts it back to
 # 4 Hz without editing this file.
 polling_classes:
-  egs: {hz: 2, priority: 4}
+  egs: {seconds: 0.5, priority: 4}
 
 requests:
 

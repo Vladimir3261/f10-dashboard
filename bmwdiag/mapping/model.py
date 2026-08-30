@@ -340,32 +340,39 @@ class PollingClassDef:
     """
     How often requests in a class run.
 
-    `kind` is one of:
-        cycles   - every Nth poll-loop cycle (the legacy fast/slow model)
-        hz       - N times per second, wall clock
-        seconds  - once every N seconds, wall clock
+    ONE unit: `period`, in seconds of wall clock. There used to be three
+    interchangeable spellings - `hz`, `seconds` and `every` (poll-loop
+    cycles) - which was two too many. `hz` and `seconds` were the same
+    thing written differently and both collapsed to a period internally;
+    `every` was worse than redundant, because it silently rescaled every
+    class when --rate changed, so the same mapping file meant different
+    sample rates on different launches.
+
+    Seconds rather than Hz because the declared rates are mostly slow:
+    `{seconds: 60}` reads cleanly where `{hz: 0.0166...}` does not, and
+    for a staggered class "0.5 s per member" is honest where "2 Hz"
+    invites reading it as the per-channel rate, which it is not.
     """
 
     name: str
-    kind: str = "cycles"
-    value: float = 1.0
+    #: Seconds between firings. The fastest useful value is the poll
+    #: loop's own interval - asking for less just means "every cycle".
+    period: float = 1.0
     priority: int = 0
     #: When true, the class round-robins its members: at most one member
     #: is due per firing, cycling through them. This bounds the per-cycle
     #: cost of an expensive group (e.g. the multi-frame F303 dynamic
     #: reads) to a single member, instead of firing all of them at once
-    #: and stalling the fast channels. Opt-in; fast/slow stay eager.
+    #: and stalling the fast channels.
+    #:
+    #: NOTE the arithmetic: `period` is then the gap between FIRINGS OF
+    #: THE CLASS, so one member refreshes every period x members.
     stagger: bool = False
 
     @property
-    def period(self) -> Optional[float]:
-        if self.kind == "hz":
-            return 1.0 / self.value if self.value else None
-
-        if self.kind == "seconds":
-            return self.value
-
-        return None
+    def hz(self) -> float:
+        """Firings per second - for display, never for scheduling."""
+        return 1.0 / self.period if self.period else 0.0
 
 
 @dataclass(frozen=True)

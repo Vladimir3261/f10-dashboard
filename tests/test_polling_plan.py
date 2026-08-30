@@ -1,8 +1,8 @@
 """
 Polling plan.
 
-The plan schedules requests, never signal names, and reproduces the
-fast/slow cadence the --rate/--slow-every CLI is defined in terms of.
+The plan schedules requests, never signal names. Scheduling is
+wall-clock, in seconds, and that is the only unit the format has.
 """
 
 import unittest
@@ -51,18 +51,16 @@ requests:
 """
 
 
-def obd_profile(slow_every=10):
+def obd_profile():
     registry = MappingRegistry([load_file(support.OBD_MAPPING)])
     profile = registry.resolve(
         AllCapabilities(), config={"tank": 70.0},
         targets={"discovered_engine": 0x12},
     )
-    classes = resolve_classes(
-        registry.polling_classes(),
-        {"slow": PollingClassDef("slow", "cycles", float(slow_every), 1)},
-    )
 
-    return profile, PollingPlan(profile.requests, classes)
+    return profile, PollingPlan(
+        profile.requests, resolve_classes(registry.polling_classes())
+    )
 
 
 class TestGrouping(unittest.TestCase):
@@ -127,9 +125,8 @@ class TestObdPollingTiers(unittest.TestCase):
         """
         A plan on the rates the mapping declares.
 
-        `obd_profile()` forces `slow` back to a cycle-based class the way
-        `--slow-every` used to; since v2 that flag defaults to unset, so
-        these tests must not inherit it.
+        Kept separate from `obd_profile()` so these tests read as being
+        about the declared tiers specifically.
         """
         registry = MappingRegistry([load_file(support.OBD_MAPPING)])
         profile = registry.resolve(
@@ -199,28 +196,27 @@ class TestObdPollingTiers(unittest.TestCase):
         )
         self.assertEqual(due[0].id, "obd.mode01.0C")
 
-    def test_cli_slow_every_still_overrides_the_mapping_file(self):
+    def test_the_mapping_file_declares_the_rates(self):
         """
-        `--slow-every` is no longer the default path, but it must keep
-        working - it is how an older run's cadence gets reproduced.
+        There is no CLI rate override any more. A rate is a property of
+        what the channel measures, so it lives in the mapping; wanting
+        everything faster for one drive is what a mode is for - and
+        unlike a flag, a mode is recorded with the data.
         """
         registry = MappingRegistry([load_file(support.OBD_MAPPING)])
         declared = {c.name: c for c in registry.polling_classes()}
 
-        self.assertEqual(declared["slow"].kind, "seconds")
-        self.assertEqual(declared["slow"].value, 10.0)
-
-        classes = resolve_classes(
-            registry.polling_classes(),
-            {"slow": PollingClassDef("slow", "cycles", 3.0, 1)},
-        )
-
-        self.assertEqual(classes["slow"].kind, "cycles")
-        self.assertEqual(classes["slow"].value, 3.0)
+        self.assertEqual(declared["motion"].period, 0.1)
+        self.assertEqual(declared["slow"].period, 10.0)
+        self.assertEqual(declared["rare"].period, 60.0)
 
 
-class TestRateBasedClasses(unittest.TestCase):
-    """Future mappings must be able to ask for 5 Hz or 0.2 Hz."""
+class TestWallClockPeriods(unittest.TestCase):
+    """
+    One unit: seconds. `hz`, `every` and `cycles` were retired on
+    2026-08-30 - the first two were the same thing spelled differently,
+    and `cycles` silently rescaled every class when --rate changed.
+    """
 
     def plan(self, class_def):
         text = GROUPED.replace("{class: fast}", "{class: paced}").replace(
@@ -231,34 +227,50 @@ class TestRateBasedClasses(unittest.TestCase):
 
         return PollingPlan(mapping.requests, classes)
 
-    def test_hz_class_respects_wall_clock(self):
-        plan = self.plan(PollingClassDef("paced", "hz", 5.0, 0))
+    def test_a_fast_period_respects_wall_clock(self):
+        plan = self.plan(PollingClassDef("paced", 0.2, 0))
 
         self.assertEqual(len(plan.due(0, now=1000.0)), 2)
         self.assertEqual(len(plan.due(1, now=1000.1)), 0)
         self.assertEqual(len(plan.due(2, now=1000.2)), 2)
 
-    def test_slow_hz_class(self):
-        plan = self.plan(PollingClassDef("paced", "hz", 0.2, 0))
+    def test_a_slow_period_respects_wall_clock(self):
+        plan = self.plan(PollingClassDef("paced", 5.0, 0))
 
         self.assertEqual(len(plan.due(0, now=0.0)), 2)
         self.assertEqual(len(plan.due(1, now=4.9)), 0)
         self.assertEqual(len(plan.due(2, now=5.0)), 2)
 
-    def test_seconds_class(self):
-        plan = self.plan(PollingClassDef("paced", "seconds", 2.0, 0))
+    def test_hz_is_available_for_display_only(self):
+        self.assertEqual(PollingClassDef("paced", 0.1, 0).hz, 10.0)
+        self.assertEqual(PollingClassDef("paced", 60.0, 0).hz, 1 / 60)
 
-        self.assertEqual(len(plan.due(0, now=100.0)), 2)
-        self.assertEqual(len(plan.due(1, now=101.0)), 0)
-        self.assertEqual(len(plan.due(2, now=102.0)), 2)
+    def test_the_retired_units_are_refused_by_name(self):
+        """
+        A file still carrying `hz: 10` must not load with a default
+        period and poll at the wrong rate in silence.
+        """
+        from bmwdiag.mapping.errors import InvalidFieldError
 
-    def test_example_fixture_declares_rate_based_classes(self):
+        for retired in ("hz: 5.0", "every: 5", "cycles: 5"):
+            with self.subTest(retired=retired):
+                text = GROUPED.replace(
+                    "requests:",
+                    "polling_classes:\n  fast: {" + retired + "}\n\nrequests:",
+                    1,
+                )
+
+                with self.assertRaises(InvalidFieldError) as caught:
+                    load_text(text, "test")
+
+                self.assertIn(retired.split(":")[0], str(caught.exception))
+
+    def test_the_example_fixture_declares_periods(self):
         mapping = load_file(support.EXAMPLE_MAPPING)
         classes = {c.name: c for c in mapping.polling_classes}
 
-        self.assertEqual(classes["medium_hz"].kind, "hz")
-        self.assertEqual(classes["medium_hz"].value, 5.0)
-        self.assertEqual(classes["trickle"].kind, "seconds")
+        self.assertEqual(classes["medium_hz"].period, 0.2)
+        self.assertEqual(classes["trickle"].period, 5.0)
 
 
 class TestPlanValidation(unittest.TestCase):

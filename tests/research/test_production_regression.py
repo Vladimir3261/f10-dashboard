@@ -26,12 +26,17 @@ from bmwdiag.mapping import MappingRegistry, decode_signal, load_file
 #: v1 -> v2 (2026-08-30): polling rates only. The twelve PIDs on the old
 #: `fast` class were split into four wall-clock tiers (motion / context /
 #: slow / rare) after the channel census showed the fast tier was 83% of
-#: stored rows at 0.1-3.8% distinct values. No request, decode step,
-#: signal or unit changed, which the decode tests below and the
-#: exhaustive sweeps in tests/test_existing_obd_mappings.py still prove
-#: byte for byte.
+#: stored rows at 0.1-3.8% distinct values.
+#:
+#: v2 -> v3 (2026-08-30): units only. `hz`, `every` and `cycles` were
+#: retired in favour of a single unit, `seconds`, so `{hz: 10}` became
+#: `{seconds: 0.1}`. Identical rates, identical schedule.
+#:
+#: Neither bump changed a request, decode step, signal or unit, which the
+#: decode tests below and the exhaustive sweeps in
+#: tests/test_existing_obd_mappings.py still prove byte for byte.
 ENGINE_YAML_SHA256 = (
-    "2c03669a8c9d32205f1c9fde67a36d65dfb9f9f1fb8cf8fb8af3d0e294aa5318"
+    "e962d32c8d8705bb1d3838dc8d09854a9c31080ab07bf9362de5d537fba4dc78"
 )
 
 
