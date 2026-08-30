@@ -15,8 +15,16 @@ and experimentation over polish.
 The real long-term goal is not the live dashboard — it is a **historical
 behavioural model of this specific vehicle**: baselines conditioned on
 operating state (ambient, load, RPM, speed, trip phase), and detection of
-gradual change ("DPF ΔP has crept from 24–27 to 35 mbar at comparable
-exhaust flow over 3 months") rather than raw thresholds.
+gradual change ("boost is now tracking 0.18 bar under setpoint at
+comparable load and RPM, up from 0.05 three months ago") rather than raw
+thresholds.
+
+**This car has no particulate filter — it was removed.** So the classic
+DPF worked example is void here: `n47d_dpf_dp` and the two soot channels
+report an empty pipe and an ECU model respectively, and no DPF health
+conclusion can be drawn. Regeneration *count* is still meaningful — the
+ECU commands regens against its model, at a real fuel and oil-dilution
+cost. See `docs/DPF_SOOT.md`.
 
 ## Vehicle
 
@@ -123,17 +131,30 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
 - **`./run_car.sh`** launches `live.py` with every verified channel — use
   it instead of a bare `live.py` (a bare launch has no gear/DPF/etc and
   the dashboard falls back to "N").
-- **Dashboard has 3 modes**: Drive (M-Performance cluster — shift-light
+- **Dashboard has 3 views**: Drive (M-Performance cluster — shift-light
   rev bar, hero tach+speedo, big centre GEAR, M-tricolor, tiles), Detail
   (per-channel history graphs), All-data (dense table w/ min/max/age).
+- **Poll rates follow the channel, not the loop** (OBD mapping v2,
+  2026-08-30): four wall-clock tiers — `motion` 10 Hz (rpm/speed/map/
+  pedal), `context` and `slow` 1/10 s, `rare` 1/60 s — plus `dde_dyn`
+  (round-robin, ~1/11 s each) and `egs` 2 Hz. 7,740 → 2,735 requests/min.
+- **Drive modes** scale those classes at runtime: `off` (connected but
+  silent), `sampling` (120 s on / 600 s off, slow tiers exempt), `long`,
+  `normal` (= the declared rates), `debug` (the pre-v2 behaviour).
+  Switch from the dashboard's `mode` chip or `--mode`. **A mode change
+  starts a new run** — one run has exactly one sampling configuration,
+  recorded in `sessions.mode`, so no analysis can silently mix rates.
+  See `docs/POLLING_AND_SAFETY.md`.
 - **ClickHouse lake + Grafana are DEPLOYED on a VPS** (`infra/`, docker
   compose): the sync agent ships every drive up over mobile (~1.4
   bytes/sample), server-side normalization, and a provisioned
-  `f10-health` Grafana dashboard (DPF ΔP-vs-flow, soot rate, boost
-  tracking, decode cross-check). Secrets live in the VPS `.env`
-  (gitignored); the VPS IP + Grafana password are in the owner's notes,
-  not git. `analysis/clickhouse/insights.sql` is the query battery.
-- 294 tests, no car / no network / no BMW data required.
+  `f10-health` Grafana dashboard (boost tracking, decode cross-check,
+  and DPF panels that are now decorative — see the no-filter note above).
+  Per-request faults land in `telemetry.channel_errors`. Secrets live in
+  the VPS `.env` (gitignored); the VPS IP + Grafana password are in the
+  owner's notes, not git. `analysis/clickhouse/insights.sql` is the query
+  battery.
+- 400 tests, no car / no network / no BMW data required.
 
 ## Repo map
 
@@ -177,18 +198,30 @@ Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and
   `local/`. Never commit the raw copy or a VIN.
 - **Tests must pass with no car, no network, no BMW data.**
   `python3 -m unittest discover`. The production mapping is byte-pinned —
-  a test fails if it changes.
+  a test fails if it changes. The pin is a tripwire, not a freeze:
+  re-base it only together with a `mapping.version` bump and a note in
+  the test saying what changed and why.
+- **Bump `mapping.version` for content, not comments.** The version is
+  stamped on every sample; bumping it for a prose edit would falsely
+  signal a data change and split a dataset that never changed.
 - **Report honestly.** Distinguish observed fact / inference / hypothesis
   / unknown. A single warm reading is not a validated scale; say what was
-  cross-checked and against what.
+  cross-checked and against what. **Vehicle configuration is part of a
+  channel's provenance** — the soot channels cost weeks because nobody
+  had written down that the filter was removed.
 - Commit messages end with the `Co-Authored-By` trailer; branch off
   master before committing if asked to commit.
 
 ## Running it in the car
 
 - Launch with **`./run_car.sh`** (loads every verified channel; a bare
-  `live.py` has no gear/DPF and the dashboard shows "N"). Dashboard on
+  `live.py` has no gear and the dashboard shows "N"). Dashboard on
   `:8080`; open the Drive view for the M-cluster.
+- **Pick a drive mode** for the trip: `normal` by default,
+  `./run_car.sh --mode long` for a motorway run, `--mode sampling` for a
+  multi-hour one, `--mode debug` when chasing a specific problem. Also
+  switchable mid-drive from the `mode` chip — that ends the current run
+  and starts a new one, which is intended.
 - The link is **ENET/HSFZ over Ethernet** — the host needs a
   `169.254.x.x` link-local address on the cable, and discovery UDP-
   broadcasts to find the gateway. On a laptop this is automatic; on a

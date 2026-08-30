@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     -- session. The per-sample mapping_ver on telemetry.samples carries the
     -- per-channel version; this is the whole-session summary.
     mappings     String DEFAULT '',
+    -- Drive mode: how hard the car was being polled for this session.
+    -- A session has exactly ONE, because switching mode ends the run and
+    -- starts a new one. That matters for every longitudinal comparison
+    -- here: a baseline built from `debug` data and one from `long` are
+    -- not comparable, and without this column nothing would say so.
+    -- Empty for sessions recorded before modes existed (2026-08-30).
+    mode         LowCardinality(String) DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)

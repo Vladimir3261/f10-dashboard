@@ -1,13 +1,21 @@
 # The DPF soot channels — what they are not
 
-`n47d_soot_meas` and `n47d_soot_model` decode to plausible grams and were
-marked `verified` on a warm-idle cross-check. Their first real test failed.
-They are back to `candidate`, and **no DPF health conclusion should rest on
-them** until their meaning is settled.
+> **Resolved, 2026-08-30.** **This vehicle has no particulate filter — it
+> was removed.** Every anomaly below follows from that, and the DPF
+> channels can only ever report the ECU's internal model, never physical
+> filter state. `n47d_soot_meas` and `n47d_soot_model` stay `candidate`
+> permanently; **no DPF health conclusion can be drawn from this car**,
+> and DPF analytics are out of scope for it. The investigation is kept
+> because the *method* generalises and because the surviving finding
+> below — that the ECU still runs regenerations against its model — is
+> worth knowing.
 
-This matters more than an ordinary wrong channel: a mis-read soot signal does
-not fail loudly, it produces confident wrong answers about the filter — which
-is exactly the thing this project exists to watch.
+## The short version
+
+`n47d_soot_meas` and `n47d_soot_model` decode to plausible grams and were
+marked `verified` on a warm-idle cross-check. Their first real test
+failed: the value did not drop across a completed regeneration. The
+reason is now known — there is no filter for it to describe.
 
 ## What was observed
 
@@ -17,7 +25,7 @@ counters agree, so the event itself is not in doubt:
 - `n47d_regen_count` 92 → 93
 - `n47d_dist_since_regen` reset to 0
 
-Across that boundary, from the lake (`vehicle_id` excluding demo data):
+Across that boundary, from the lake:
 
 | day | regen | dist since regen | `soot_meas` |
 |---|---|---|---|
@@ -28,65 +36,71 @@ Across that boundary, from the lake (`vehicle_id` excluding demo data):
 
 Two facts, both machine-checked rather than eyeballed:
 
-1. **It never decreases.** Over 1404 points spanning 2026-08-26 to 08-29 the
-   value decreased exactly **0** times (range 0.12 → 9.35 g).
+1. **It never decreases.** Over 1404 points spanning 2026-08-26 to 08-29
+   the value decreased exactly **0** times (range 0.12 → 9.35 g).
 2. **Within a regen cycle it is a straight line in distance.** Slope ≈
    **0.032 g/km**, consistent to about 2% over 164 km, intercept ≈ 0.
 
-## What that rules out
+## How the missing filter explains all of it
 
-**It is not "current soot load in the filter."** A completed regeneration
-burns soot out, so a current-load channel must drop across one. This did not
-drop — it kept climbing.
+Each observation that looked anomalous is exactly what a
+model-without-feedback does:
 
-The linearity is the second problem. Real soot accumulation depends on engine
-load, exhaust temperature and flow; a channel that is a near-perfect function
-of distance alone is not measuring the filter, it is modelling it — or
-counting something else entirely.
+- **No drop across a regeneration** — there is no soot to burn out. The
+  channel integrates forward with nothing physical to correct it or zero
+  it against.
+- **Near-perfect linearity in distance** — with no measurable ΔP to
+  drive it, the estimate can only be a distance/fuel-based model. The
+  data said "this is a model, not a measurement" before we knew why.
+- **`soot_meas` ≈ `soot_model` to ~0.01 g despite scales differing by
+  1.53×** — with no real measurement available, "measured" almost
+  certainly falls back to the modelled value. They agree because they
+  are the same estimate, so their agreement was never the independent
+  corroboration the original verification took it for.
 
-## What is still open
+## The finding that survives
 
-- **Cumulative since an adaptation reset.** Fits the monotonicity. Would need
-  to know what resets it; the value was ~0.09 g at the 2026-08-25 validation
-  and 0.12 g when logging began, so *something* zeroed it shortly before.
-- **An ash estimate.** Ash genuinely does not burn off at regeneration, which
-  fits perfectly — but ash accumulates over tens of thousands of km, not at
-  0.032 g/km.
-- **A distance-driven soot model** the ECU uses as an input rather than a
-  measurement.
+**The ECU still commands regenerations against its model.**
+`n47d_regen_count` incremented 92 → 93 on a car with nothing to
+regenerate. Those cycles are real: post-injection, raised exhaust
+temperature, extra fuel, and the classic oil-dilution path — all with no
+filter to clean. That is a genuine, actionable fact about this vehicle,
+and it is the only DPF-related thing this channel set can tell us.
 
-A second oddity is unexplained: `soot_meas` and `soot_model` track each other
-to within ~0.01 g **despite scales that differ by a factor of 1.53**
-(0.015259 vs 0.01). Either both read the same underlying quantity and one
-scale is wrong, or the raw registers differ by exactly the inverse ratio.
-The original verification read their agreement as two independent estimates
-corroborating each other; if they are the same register, that agreement was
-never evidence of anything.
+`n47d_dist_since_regen` and `n47d_regen_count` remain useful for
+*that* — observing the ECU's regeneration behaviour. `n47d_soot_meas`,
+`n47d_soot_model` and `n47d_dpf_dp` describe hardware that is not there.
 
 ## Why the original verification missed it
 
-It was a **single warm-idle reading**. At idle, on a filter that had just
-regenerated, "current load ≈ 0.09 g" and "cumulative ≈ 0.09 g" look
-identical. No single-point reading could distinguish them. Only straddling a
-regeneration could — and the first time we did, it failed.
+It was a **single warm-idle reading**. At idle, "current load ≈ 0.09 g"
+and "cumulative ≈ 0.09 g" look identical. No single-point reading could
+distinguish them.
 
-The lesson is about method rather than this channel: a scale that reproduces
-one plausible number has not been validated, it has merely not yet been
-contradicted. A counter needs to be watched across the event it counts.
+The lesson is about method rather than this channel, and it generalises
+to every scale we validate:
 
-## What would settle it
+- A scale that reproduces one plausible number has not been validated,
+  it has merely not yet been contradicted. A counter needs to be watched
+  across the event it counts.
+- **Vehicle configuration is part of a channel's provenance.** A
+  verification note that records the reading but not the state of the
+  hardware it describes can be defeated by a fact nobody wrote down.
+  `local/VEHICLES.md` is where such facts belong for this car.
 
-In rough order of how decisive each would be:
+## What was NOT worth doing
 
-1. **A second regeneration**, captured with logging running throughout. If
-   the value again fails to drop, "current load" is dead beyond argument and
-   the cumulative hypothesis is the front-runner.
-2. **The SGBD definition** for IMRUP (0x44BE) and IMPAS (0x44C1) — the
-   authoritative answer, if the tables can be found. See
-   `docs/MAPPING_RESEARCH.md`.
-3. **Correlate against `n47d_dpf_dp`** (differential pressure) at comparable
-   exhaust flow. Real soot loading raises ΔP; a distance counter does not.
-   This is the one test available from data already in the lake.
+Correlating `n47d_soot_meas` against `n47d_dpf_dp` at comparable exhaust
+flow was the front-running next test, on the reasoning that real soot
+loading raises ΔP while a distance counter does not. **It is void here**:
+ΔP across a removed filter measures nothing. Recorded so the test is not
+proposed again.
 
-Until then the honest description is: *a monotonic quantity in grams, closely
-proportional to distance since regeneration, meaning unknown.*
+## Consequence for the roadmap
+
+"DPF ΔP vs exhaust flow" was the flagship worked example for the Stage-3
+condition-normalized baselines, and it is dead for this vehicle. The
+baseline machinery is unaffected — it needs a different first subject.
+Candidates, all verified channels with real physics behind them: boost
+actual-vs-setpoint tracking, rail pressure tracking, EGR deviation, and
+warm-up thermal behaviour. See `docs/ROADMAP.md`.

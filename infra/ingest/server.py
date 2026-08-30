@@ -172,6 +172,10 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_db": meta.get("db", ""),
             # "id@version,..." fingerprint of the mapping set for this run.
             "mappings": r.get("mappings") or "",
+            # Drive mode: how hard the car was being polled. A session has
+            # exactly one, because switching mode starts a new run. Empty
+            # for runs recorded before modes existed.
+            "mode": r.get("mode") or "",
         })
 
     return out

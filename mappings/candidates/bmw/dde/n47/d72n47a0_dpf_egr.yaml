@@ -81,7 +81,18 @@ polling_classes:
 
 requests:
 
-  # -- DPF differential pressure (IPDIP 0x44F8) - THE restriction signal
+  # -- DPF differential pressure (IPDIP 0x44F8) ------------------------
+  #
+  # Normally THE restriction signal, and the intended basis of the whole
+  # condition-normalized baseline work. NOT on this car: F10-520d-dev's
+  # particulate filter was REMOVED (established 2026-08-30). There is no
+  # filter to restrict, so this reads the pressure drop across an empty
+  # pipe and carries no health information.
+  #
+  # Kept and still polled: it is a real sensor reading, cheap (it shares
+  # the dde_dyn round-robin), and worth having on record. But do not
+  # build a baseline on it, and do not use it to corroborate the soot
+  # channels - see docs/DPF_SOOT.md for why that test is void.
   n47.d72.dyn.44F8:
     setup: ["2C 03 F3 03", "2C 01 F3 03 44 F8 01 02"]
     polling: {class: dde_dyn}
