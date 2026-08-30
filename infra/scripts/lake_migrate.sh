@@ -76,13 +76,30 @@ echo "applying ${#files[@]} migration(s) from clickhouse/migrations/"
 [[ $DRY_RUN -eq 1 ]] && echo "(dry run - nothing will be executed)"
 echo
 
-# Read credentials once, on the server, rather than per file.
-remote_ch() {
+# Credentials are read on the server, from its own .env, and never printed.
+#
+# `stdin` form: the migration file is piped in and clickhouse-client reads
+# it with --multiquery. Nothing lands on the server, so there is no stale
+# copy to apply by accident later.
+remote_ch_stdin() {
   ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && \
     CH_USER=\$(sed -n 's/^CH_USER=//p' .env | head -1) && \
     CH_PASS=\$(sed -n 's/^CH_PASS=//p' .env | head -1) && \
     docker compose exec -T clickhouse clickhouse-client \
-      --user \"\$CH_USER\" --password \"\$CH_PASS\" $*"
+      --user \"\$CH_USER\" --password \"\$CH_PASS\" --multiquery"
+}
+
+# `query` form: the SQL is single-quoted for the REMOTE shell. Passing it
+# as an unquoted \$* word-splits it there, which silently turned the
+# schema read-back into garbage and printed "could not read the schema
+# back" - hiding exactly the verification this script exists to give.
+remote_ch_query() {
+  local sql=$1
+  ssh "${SSH_OPTS[@]}" "$HOST" "cd '$DIR' && \
+    CH_USER=\$(sed -n 's/^CH_USER=//p' .env | head -1) && \
+    CH_PASS=\$(sed -n 's/^CH_PASS=//p' .env | head -1) && \
+    docker compose exec -T clickhouse clickhouse-client \
+      --user \"\$CH_USER\" --password \"\$CH_PASS\" --query '$sql'"
 }
 
 failed=0
@@ -97,7 +114,7 @@ for f in "${files[@]}"; do
 
   # Piped in over stdin: the file never lands on the server, so there is
   # nothing to clean up and no stale copy to apply by accident later.
-  if remote_ch --multiquery < "$f" >/dev/null 2>"$SSH_CTL/err"; then
+  if remote_ch_stdin < "$f" >/dev/null 2>"$SSH_CTL/err"; then
     printf '  %-45s ok\n' "$name"
   else
     printf '  %-45s FAILED\n' "$name"
@@ -110,12 +127,24 @@ done
 
 echo
 echo "-- sessions columns now --"
-remote_ch --query "SELECT name FROM system.columns
-  WHERE database='telemetry' AND table='sessions' ORDER BY position FORMAT TSV" \
-  2>/dev/null | sed 's/^/  /' || echo "  (could not read the schema back)"
+#: `DESCRIBE` needs no string literals, so nothing has to survive two
+#: layers of shell quoting to get here.
+remote_ch_query "DESCRIBE TABLE telemetry.sessions FORMAT TSV" 2>/dev/null \
+  | grep -v 'level=warning' | awk -F"\t" 'NF{printf "  %-14s %s\n", $1, $2}' \
+  || echo "  (could not read the schema back)"
 
+#
+# The failure summary goes LAST, after the column read-back, because a
+# human scanning output will notice a loud line at the bottom and will
+# not notice a column quietly missing from a list. Verifying a presence
+# is easy; verifying an absence is not.
+#
 if [[ $failed -ne 0 ]]; then
   echo
-  echo "at least one migration failed - the schema above may be incomplete" >&2
+  echo "!! at least one migration FAILED - the schema above is incomplete." >&2
+  echo "   Fix the migration and re-run; they are all idempotent." >&2
   exit 1
 fi
+
+echo
+echo "all migrations applied."
