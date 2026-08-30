@@ -179,7 +179,7 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   a bounded chance, every run records `clock_synced`, and a mid-run step
   ends the run so none spans a discontinuity. **Anything time-derived
   must filter `sessions.clock_synced = 1`.**
-- 535 tests, no car / no network / no BMW data required.
+- 542 tests, no car / no network / no BMW data required.
 
 ## Repo map
 

@@ -11,7 +11,7 @@ in-car drive (see `docs/PI_COMMISSIONING.md`):
 
 | item | state |
 |---|---|
-| Pi runs the stdlib-only runtime; 294 tests pass on the Pi | ✅ verified |
+| Pi runs the stdlib-only runtime; the full suite passes on the Pi | ✅ verified |
 | `eth0` link-local + gateway discovery on the car | ✅ verified (needed `ipv4.method link-local`) |
 | Wi-Fi (phone hotspot) uplink | ✅ verified |
 | `wg0` tunnel to server; SSH + ingest over it | ✅ verified |

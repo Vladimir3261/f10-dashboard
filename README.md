@@ -4,27 +4,46 @@ Real-time engine telemetry for a BMW F10 over ENET, with a live web
 dashboard and a SQLite time-series log.
 
 The application speaks HSFZ — BMW's diagnostic-over-IP framing — to the
-central gateway on TCP 6801, routes standard OBD-2 service 01 requests to
-the engine ECU, and serves a dashboard over server-sent events.
+central gateway on TCP 6801, routes requests to the ECU that answers for
+them, and serves a dashboard over server-sent events.
 
-**Read-only.** Only service `0x01` (current data) requests are sent, plus
-HSFZ alive-check replies. Nothing is ever written to the vehicle.
+**Observational only.** The services that can be sent are a closed set:
+OBD `0x01`/`0x09`, UDS `0x22` (read by identifier), the `0x2C`
+define/clear/read subfunctions, `0x19` and `0x3E`. No write, no actuator,
+no coding — enforced at a single choke point.
+
+One honest caveat rather than a comfortable claim: `0x2C` is *not* purely
+a read. "Dynamically define data identifier" reconfigures what `F303`
+points at, which is ECU state. It is session-scoped and re-armed on every
+read, so it should not persist — but "strictly read-only" would be
+imprecise. See [docs/POLLING_AND_SAFETY.md](docs/POLLING_AND_SAFETY.md).
 
 ```
-python3 live.py                 # discover the car, serve on :8080
+./run_car.sh                    # the normal launch: every verified channel
+./run_car.sh --mode long        # start in a quieter drive mode
+
+python3 live.py                 # bare: standard OBD only, no gear/temps
 python3 live.py --ip 169.254.x.x
 python3 live.py --demo          # no car needed, simulated data
-
-# also poll the verified F-series N47 proprietary channels (oil/coolant/
-# engine temp, DPF soot, rail/boost pressure, MAF, ...). They activate
-# only on an ECU that answers their variant probe:
-python3 live.py --extra-mappings mappings/candidates/bmw/dde/n47
 ```
+
+Use `./run_car.sh` in the car. A bare `live.py` loads only the standard
+SAE mapping, so the dashboard has no gear and shows "N" — the proprietary
+channels are an explicit per-run opt-in via `--extra-mappings`, which is
+what keeps the repository's production mapping set free of BMW-derived
+data.
 
 The dashboard has three views, switchable in the header:
 **Drive** (big gauges + live strips for the fun realtime metrics),
 **Detail** (per-channel history graphs), and **All data** (a dense table
 of every channel with running min/max and age).
+
+On the in-car Raspberry Pi there is a second, phone-sized page — the
+**admin panel** on `:8088` — for what would otherwise be SSH from the
+driver's seat: health, recording truth, service control, logs, `git pull`,
+clean shutdown, and a **Car link** tab showing the full
+car-communication picture for the session. See
+[hardware/raspberry-pi/admin/](hardware/raspberry-pi/admin/README.md).
 
 Requires **Python 3.9+** and nothing else. There are no third-party
 dependencies, deliberately: this runs on a laptop in a car, where
@@ -49,13 +68,20 @@ bmwdiag/             the diagnostic mapping subsystem
 mappings/            versioned mapping data
   obd/engine.yaml    standard SAE Mode 01 channels (production)
   candidates/        source-backed candidates, production: false,
-                     capability-gated - never polled until verified
-  verified/          empty until something is verified on the car
+                     capability-gated - ~23 now verified on the car and
+                     loaded via --extra-mappings; still here rather than
+                     moved, deliberately
+  verified/          the lifecycle target dir; unused so far
   examples/          synthetic fixtures, excluded from the runtime
+  VERSIONS.lock      version ledger, test-enforced
+config/modes.yaml    drive modes - how hard to poll, scaled per class
+hardware/            Raspberry Pi provisioning + the on-Pi admin panel
+infra/               ClickHouse lake, ingest, sync agent (deploy on a VPS)
+analysis/            read-only session analytics
 research/            the N47 evidence/import pipeline (offline only):
                      pinned source manifest, importers, normalized
                      records, conflict detection, reports
-tests/               259 tests; no car and no network required
+tests/               542 tests; no car and no network required
 tools/               read-only research and analysis tools
 docs/                architecture and research-process documentation
 local/               gitignored; scratch, captures, notes, exports,
@@ -72,7 +98,7 @@ requests:
   obd.mode01.0C:
     protocol: obd
     pid: 0x0C
-    polling: {class: fast}
+    polling: {class: motion}      # 10 Hz - declared in seconds
     response: {data_length: 2}
     signals:
       rpm:
@@ -86,13 +112,29 @@ Adding a channel is a mapping edit, not a code change. Mapping files are
 data — there is no expression language and no `eval` anywhere in the
 format or the code that reads it.
 
+**How often** is declared the same way, in one unit — seconds of wall
+clock — as a named class each request belongs to:
+
+```yaml
+polling_classes:
+  motion:  {seconds: 0.1, priority: 0}   # rpm, speed, map, pedal
+  context: {seconds: 10,  priority: 1}   # load, maf, rail, lambda
+  rare:    {seconds: 60,  priority: 3}   # ambient, baro, counters
+```
+
+A **drive mode** (`config/modes.yaml`) then scales every class at
+runtime — `off`, `sampling`, `long`, `normal`, `debug` — switchable from
+the dashboard. A mode change starts a new run, so one run always has
+exactly one sampling configuration. See
+[docs/POLLING_AND_SAFETY.md](docs/POLLING_AND_SAFETY.md).
+
 A development CLI works without a vehicle:
 
 ```
 python3 -m bmwdiag.mapping validate mappings/
 python3 -m bmwdiag.mapping list     mappings/
 python3 -m bmwdiag.mapping show     mappings/obd/engine.yaml
-python3 -m bmwdiag.mapping plan     mappings/obd --slow-every 10
+python3 -m bmwdiag.mapping plan     mappings/obd
 python3 -m bmwdiag.mapping decode   mappings/obd/engine.yaml rpm "41 0C 0C 3C"
 ```
 
