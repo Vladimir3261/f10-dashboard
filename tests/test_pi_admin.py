@@ -828,6 +828,12 @@ class BootScopedLogs(AdminCase):
 
 
 class SyncControl(AdminCase):
+    #: Port 9 (discard) is refused instantly and nothing ever listens
+    #: there. The default is the agent's real port, so on a commissioned
+    #: Pi this test reached a live agent and actually paused syncing -
+    #: a test with a side effect on the machine it runs on.
+    config = {"sync_control_url": "http://127.0.0.1:9"}
+
     def test_only_pause_and_resume_are_accepted(self):
         for verb in ("stop", "flush", "", None):
             with self.subTest(verb=verb):
@@ -1008,9 +1014,25 @@ class DeploymentFiles(unittest.TestCase):
         self.assertIn("hardware/raspberry-pi/admin/config.json", ignored)
 
     def test_no_real_config_is_committed(self):
-        self.assertFalse(
-            os.path.exists(os.path.join(self.ADMIN, "config.json")),
-            "config.json holds a password and must not be in the repo",
+        """
+        The claim is about the git INDEX, not the filesystem.
+
+        A commissioned Pi legitimately has a real config.json sitting in
+        the working tree - that is the whole point of the installer - and
+        checking os.path.exists made this fail on exactly the machine
+        most worth running the suite on. Ask git instead.
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch",
+             "hardware/raspberry-pi/admin/config.json"],
+            cwd=support.ROOT, capture_output=True, text=True,
+        )
+
+        self.assertNotEqual(
+            result.returncode, 0,
+            "config.json holds a password and must not be tracked",
         )
 
     def test_sudoers_has_no_wildcards(self):
