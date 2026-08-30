@@ -69,7 +69,7 @@ requests:
   obd.mode01.0C:
     protocol: obd
     pid: 0x0C
-    polling: {class: fast}
+    polling: {class: motion}
     response: {data_length: 2}
     signals:
       rpm:

@@ -108,21 +108,23 @@ soot steps down *at any point* the "cumulative" hypothesis dies.
 
 ## Planned experiments, in priority order
 
-### 0. PRECONDITION — stop the session fragmenting
+### 0. ~~PRECONDITION — stop the session fragmenting~~ DONE 2026-08-30
 
-Every drive on 2026-08-29 split into 3–18 runs. `session_report` analyses
-one run at a time, so a fragmented drive cannot be summarised without
-stitching, and any condition-normalised baseline is built on partial
-segments. **Fix this before the next analysis-grade drive.**
+Every drive on 2026-08-29 split into 3–18 runs, because in
+`bmwdiag/mapping/execute.py` the transport call sat outside the
+try/except guarding decoding: a timeout or an `HsfzNack` against the
+*secondary* EGS at `0x18` tore down a healthy `0x12` link.
 
-Cause is traced: in `bmwdiag/mapping/execute.py`, `_run_generic`, the
-transport call sits outside the try/except that guards decoding, so a
-timeout or an `HsfzNack` against the *secondary* EGS at `0x18` tears down
-a healthy `0x12` link and starts a new run. The fix is an
-unroutable-target / transient-request exception at the
-`bmwdiag/protocol/` seam that `_run_generic` can catch per request —
-`bmwdiag` is dependency-free, so it cannot catch `live.py`'s `HsfzNack`
-directly. Mirror `ObdSession`'s existing 3-strikes retirement idiom.
+Fixed in `69d879f`. Note the approach differs from what was planned
+here: rather than adding typed exceptions at the `bmwdiag/protocol/`
+seam, faults are classified **structurally** (`_is_request_fault`), so
+`bmwdiag` still imports nothing about the transport. A consecutive-fault
+budget distinguishes one unreachable ECU from a dead link, and every
+fault is recorded to `telemetry.channel_errors`.
+
+A follow-up on branch `fix/transport-failure-scope` rests a request that
+keeps failing and stops a nack counting against the link budget —
+reviewed, awaiting merge.
 
 ### 1. A genuine cold start (still never captured)
 
@@ -143,21 +145,26 @@ lagging coolant throughout. A clean ramp tracking OBD PID 0x05 the whole
 way is the strongest temperature validation available, and it is the
 last unproven part of the temperature scales.
 
-### 2. DPF ΔP vs exhaust flow — the first real baseline
+### 2. ~~DPF ΔP vs exhaust flow~~ VOID — this car has no filter
 
-The project's headline goal is condition-normalised baselines, and DPF
-restriction is the best-defined one. Drive 7 saw ΔP span 0.96–86.0 hPa,
-but scattered across whatever load happened to occur.
+**Do not run this experiment.** It was the planned first baseline, and it
+is dead: **the particulate filter was removed from this vehicle**
+(established 2026-08-30). `n47d_dpf_dp` measures the pressure drop across
+an empty pipe, and the two soot channels report an ECU model with no
+physical feedback. See [`docs/DPF_SOOT.md`](../../docs/DPF_SOOT.md).
 
-What is needed instead is **steady-state load points held long enough to
-average**: roughly 60–90 s each at a constant speed/gear, at 3–4
-different loads (e.g. 50, 80, 100, 120 km/h in top gear on a level road),
-so ΔP can be plotted against MAF rather than against time. Repeat the
-same points on later drives and the curve becomes a trend.
+Recorded here explicitly because this page proposed it four sessions
+running, and the next reader would otherwise plan a drive around it.
 
-This is what turns "DPF ΔP has crept from 24–27 to 35 mbar" from an
-anecdote into a measurement. Note the regen just reset the filter's
-state, so **now is an ideal moment to start the clean-filter baseline.**
+**The steady-state method is still right — point it at a live channel.**
+Hold 60–90 s each at 3–4 constant speed/gear load points on a level road,
+so the y-axis can be plotted against MAF rather than against time, and
+repeat the same points on later drives.
+
+The replacement baseline is **boost actual vs setpoint**
+(`n47d_boost_act` / `n47d_boost_set`): two verified channels, real
+physics, and a deviation that is directly interpretable as turbo/VNT
+health. Rail actual-vs-setpoint and EGR deviation are the next two.
 
 ### 3. Channels that look wrong or unexercised
 
@@ -181,13 +188,12 @@ is partly done and its follow-up is the soot analysis above.
 
 ## Not blocked on the car
 
-- Runtime polish: the F303 channels are all `slow` class; a full slow
-  cycle now sends ~13 x (2 setup + 1 poll) frames. If that stutters the
-  fast OBD channels, stagger the F303 reads across cycles or add a
-  slower polling class for them. Watch the dashboard Hz with
-  `--extra-mappings` enabled and tune if needed.
-- Consider a dedicated `dpf`/`trans` polling class in the mapping so the
-  heavy proprietary reads don't compete with fast OBD.
+- **~~Runtime polish: stagger the F303 reads.~~ DONE.** They have their
+  own staggered `dde_dyn` class — one member per firing, so a member
+  refreshes every ~11 s and the fast channels are never blocked for more
+  than one exchange. The EGS has its own class too. Rates are wall-clock
+  per channel and scaled by drive mode; see
+  [`docs/POLLING_AND_SAFETY.md`](../../docs/POLLING_AND_SAFETY.md).
 - **~~TECH DEBT: the host clock.~~ FIXED 2026-08-30.** The Pi has no RTC
   and corrected itself forward 76.5 minutes mid-recording on 2026-08-29,
   corrupting run 1's timeline and shipping it to the lake that way. Now:
@@ -196,7 +202,6 @@ is partly done and its follow-up is the soot analysis above.
   so none spans a discontinuity. Filter on `sessions.clock_synced = 1`.
   Runs recorded before the flag existed stay unknown (NULL) and must
   still be treated as suspect. See `docs/ROADMAP.md`.
-- **The fragmentation fix is written but unapplied.** It sits in
-  `git stash` ("wip: 0x18 fragmentation fix (incomplete)") — mid-refactor
-  and unverified, so it was stashed rather than committed. Item 0 of the
-  plan above stays open until it is finished and tested.
+- **~~The fragmentation fix is written but unapplied.~~** Landed as
+  `69d879f`; the stash it referred to was dropped after review. See
+  item 0 above.

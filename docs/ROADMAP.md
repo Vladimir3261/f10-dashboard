@@ -60,32 +60,50 @@ dashboard," it is over-built for what it delivers.
    operating point means a wide, lossy, expensive time-join. There is no
    trip concept, no materialized operating-point, no per-sample context.
    **Everything in the analytics vision is blocked on this.**
-2. **No data-quality flags in storage.** A saturated MAP (255 kPa), a
-   sentinel temperature (−40 °C / lambda 2.0), a stale carried-forward
-   value, and a real reading are indistinguishable once stored — invalid
-   values are simply *dropped* by the decoder, conflating "not polled"
-   with "sensor unavailable." Analytics needs to *know* a point was
-   saturated, not silently lose it.
-3. **No mapping/software version per run.** `runs` has no
-   `mapping_version` / `git_sha`. If a scale is corrected later you can't
-   tell which historical rows used the old scale — a silent break in any
-   long trend that crosses the change.
+2. **No data-quality flags in storage. (Still open — now the top item.)**
+   A saturated MAP (255 kPa), a sentinel value (lambda 2.0), and a real
+   reading are indistinguishable once stored. `decoder.py` returns `None`
+   for anything outside `valid_min`/`valid_max` or listed in `invalid`,
+   so the value is *dropped* — which makes "the sensor said
+   not-available" identical to "we never polled it". The `quality` enum
+   exists in ClickHouse and **nothing has ever written it**.
+
+   Two cases are already identified and waiting: `lambda` sits at exactly
+   2.0 — the no-value sentinel — for 5,773 of 7,797 samples and is stored
+   as if it were a reading, so any average over it is wrong today; and
+   the OBD MAP saturation was found by hand, which is exactly what this
+   layer exists to flag. A third was exposed by the diagnostics view: a
+   request can succeed while the decoder discards the value, so a channel
+   can report 100% success and store nothing.
+3. ~~**No mapping/software version per run.**~~ **FIXED.** Every sample
+   carries `mapping_ver`, every run carries the `id@version` fingerprint
+   of the whole set — mode table included — and `mappings/VERSIONS.lock`
+   is test-enforced. See [`DATA_VERSIONING.md`](DATA_VERSIONING.md).
 4. **"Run" ≠ "trip."** A run is one HSFZ connection; ignition-off splits
-   it (see the reconnect finding). Trips — the natural unit for
-   warm-up/heat-soak/comparison — don't exist.
-5. **F303 polling cost and fast/slow coupling.** Each proprietary channel
-   costs 3 frames (~90 ms); 13 of them on one slow cycle ≈ 1.2 s that
-   *blocks the fast OBD channels* in the single-threaded loop. The
-   re-arm-per-switch is correct but there's no medium class, no
-   staggering, no separation of the heavy reads from the fast ones. This
-   will bite as channels are added.
-6. **Collector self-observability is minimal.** `on_error` exists on the
-   executor but `live.py` doesn't wire it; NRCs and decode failures are
-   not logged to the DB; there's no per-channel success rate. You can't
-   later ask "when did channel X start failing."
-7. **telemetry.db is a single gitignored file with no backup/export
-   cadence.** One corruption loses the entire history the whole project
-   is about.
+   it. Trips — the natural unit for warm-up/heat-soak/comparison — don't
+   exist. *Partly narrowed since:* a run now also ends deliberately on a
+   drive-mode change and on a clock step, so a run is at least
+   internally consistent; and the reconnect storm that fragmented drives
+   into 3–18 runs is fixed. But the trip concept is still missing, and
+   many `sessions.ended` are never set when the process is killed.
+5. ~~**F303 polling cost and fast/slow coupling.**~~ **FIXED.** The
+   proprietary reads have their own staggered `dde_dyn` class — one
+   member per firing, so the fast channels are never blocked for more
+   than one exchange, and a member refreshes every ~11 s. Rates are
+   wall-clock per channel, in one unit, scaled at runtime by drive mode.
+   See [`POLLING_AND_SAFETY.md`](POLLING_AND_SAFETY.md).
+6. ~~**Collector self-observability is minimal.**~~ **FIXED.**
+   `on_error` is wired; every per-request fault is classified by kind and
+   recorded to `telemetry.channel_errors`; the executor keeps per-request
+   sent/ok/failed counters; and `/api/diagnostics` reports the whole
+   picture, including what resolution dropped and why. "When did channel
+   X start failing" is now a query.
+7. ~~**telemetry.db is a single gitignored file with no backup.**~~
+   **Largely mitigated.** The ClickHouse lake holds every shipped sample,
+   and the admin panel will not delete a drive file that is not confirmed
+   in the lake. The residual risk is a card that dies before its last
+   drive syncs — real, but bounded to one drive rather than the entire
+   history.
 
 ### Over-engineered (relative to one car)
 
@@ -99,26 +117,41 @@ dashboard," it is over-built for what it delivers.
   machinery:shipped-channels ratio is high. Mine the existing records;
   don't build more importers speculatively.
 
-### Under-engineered (all high-value, all missing)
+### Under-engineered (updated 2026-08-31)
 
-- Analytics (nonexistent).
-- Data-quality tagging (nonexistent).
-- Trip segmentation + operating context (nonexistent).
-- Collector observability into the DB (nonexistent).
-- Backup/export (nonexistent).
+- **Analytics** — still nonexistent, and still the whole point.
+- **Data-quality tagging** — still nonexistent. Now the top item.
+- **Trip segmentation + operating context** — still nonexistent.
+- ~~Collector observability into the DB~~ — done: faults, per-request
+  success rates, and a resolution report.
+- ~~Backup/export~~ — the lake is the backup; see weakness 7.
 
-### Missing telemetry domains (high value, not yet built)
+### Missing telemetry domains (updated 2026-08-31)
 
-Even within the DDE, the d72 table has channels not yet built that map
-directly onto N47 failure modes: **DPF differential pressure** (IPDIP),
-**exhaust temps before/after DPF**, **regeneration state / request /
-distance / count**, **EGR actual+requested**, **injector correction/
-quantities**, **swirl/intake actuator positions**. Beyond the DDE: **EGS**
-(gearbox — egs.py exists, no validated mappings), **fuel/body tank
-sensors** (`local/captures/kombi_dids.json` captured, unmined),
-**electrical/IBS** beyond OBD voltage.
+Much of the original list is now built and verified: DPF ΔP, exhaust
+temps, regen distance/count/op-mode, EGR deviation, and the gearbox
+channels all ship via `--extra-mappings`, and the **engaged gear** was
+found on the EGS. The DPF ones are decorative on this car — no filter.
+
+Still not built, in rough order of value here:
+
+- **Injector correction quantities** — the best remaining N47 signal, and
+  directly interpretable.
+- **Swirl/intake actuator positions** — a known N47 failure mode.
+- **Fuel/body tank sensors** — `local/captures/kombi_dids.json` was
+  captured and is still unmined.
+- **Electrical/IBS** beyond OBD voltage.
+- **The 6 unmapped OBD PIDs.** The ECU advertises 30; the mapping covers
+  24. Standard SAE definitions, so no research or provenance needed.
+- **Fault codes and freeze frame.** We read no DTCs at all (`0x03` /
+  UDS `0x19`), and no freeze frame (`0x02`) — the sensor snapshot the ECU
+  stored at the moment a fault set. Both are in the read-only allowlist
+  already. A notable hole for a diagnostics project.
 
 ### Missing tests / observability
+
+*(Partly closed: there are now 542 tests, including the fault, mode,
+clock and diagnostics paths. What remains:)*
 
 - No end-to-end test that the recorder persists proprietary channels
   (the `pid=NULL` path) under `--extra-mappings`.
@@ -126,7 +159,7 @@ sensors** (`local/captures/kombi_dids.json` captured, unmined),
 - No data-quality tests (no layer to test).
 - No test/measurement of F303 polling cost vs the fast-channel Hz.
 
-## 2.5 Where we actually are (2026-08-29)
+## 2.5 Where we actually are (2026-08-31)
 
 The infrastructure detour is finished and is no longer a roadmap item: the
 server is Terraform + Ansible, the lake is deployed and accumulating, the Pi
@@ -134,15 +167,32 @@ provisions from one script, and telemetry has been flowing unattended.
 **~1.56M samples across 5 days and 7 drives** is now enough to do real
 analysis on.
 
+The 2026-08-30/31 sessions closed most of what stood in front of the
+analytics: the fragmentation bug, the clock defect, the polling cost, the
+DPF question, and the total absence of collector observability. What is
+left in front of Stage 3 is Stage 1.
+
 Stage status against the plan below:
 
 | stage | state |
 |---|---|
-| 0 — data model | **mostly done.** Mapping versions are stamped end to end (`params.mapping_ver`, `run_mappings`, `samples.mapping_ver`). Trip segmentation still weak: many `sessions` rows never get `ended` |
-| 1 — data quality | **not started.** The `quality` column exists and defaults to `ok`; nothing ever writes it. The OBD MAP saturation was found by hand, which is exactly the case it should have flagged |
-| 2 — DDE telemetry | **done enough.** ~23 verified proprietary channels incl. DPF/EGR |
-| 3 — analytics | **unblocked, not started.** This is the next real work |
+| 0 — data model | **mostly done.** Versions stamped end to end and test-enforced. Trip segmentation still weak: a run is a connection, not a trip, and many `sessions` rows never get `ended` |
+| 1 — data quality | **not started, and now the only thing in front of analytics.** The `quality` enum exists in the lake; nothing writes it. The decoder *drops* sentinel and out-of-range values, so "sensor unavailable" and "not polled" are identical in storage |
+| 2 — DDE telemetry | **done enough.** ~23 verified proprietary channels. The DPF ones are decorative on this car — no filter |
+| 3 — analytics | **unblocked, not started.** Needs a new flagship: DPF ΔP is void, boost actual-vs-setpoint is the proposed replacement |
 | 5 — drift/anomaly | the goal; needs 1 and 3 |
+
+### Fixed on 2026-08-30/31
+
+| was | now |
+|---|---|
+| drives fragmented into 3–18 runs | per-request faults skipped, link faults reconnect (`69d879f`) |
+| host clock rewrote timelines mid-drive | wait for NTP, label every run `clock_synced`, end a run on a step |
+| 7,740 requests/min, 83% of storage at 0.1–3.8% distinct | 2,735/min on physics-based wall-clock tiers, scaled by drive mode |
+| three interchangeable rate units | one: `seconds` |
+| no per-channel error rate; `on_error` unwired | `telemetry.channel_errors` + per-request success rates |
+| "why is this channel missing?" needed SSH and guesswork | `/api/diagnostics` names every dropped mapping, request and derived channel, with the reason |
+| no way to control the Pi without SSH | the admin panel on `:8088` |
 
 ### Findings that reordered the priorities
 

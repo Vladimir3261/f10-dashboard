@@ -3,14 +3,17 @@
 What we poll, how often, why, and what is still unproven about the
 safety of doing it. Started as raw notes on 2026-08-30; the polling and
 mode sections are now decisions that have shipped, and the safety
-section is still open.
+section is narrower than it was — the drain question went away with the
+powerbank, and what is left is small.
 
 ---
 
 ## 1. Can we interrupt car operations, or do long-term harm?
 
-**Still open.** The honest answer remains *"probably not, and we have
-reasons to think so, but we have not proven it."*
+**Mostly settled, and the biggest part of it by deployment rather than by
+measurement.** The honest answer is *"probably not, we have reasons to
+think so, and the one path that could have done real harm no longer
+exists."*
 
 ### What is already true (checked)
 
@@ -33,11 +36,16 @@ reasons to think so, but we have not proven it."*
   session-scoped and every F303 read re-arms it, so it should not
   persist — but calling the runtime strictly read-only is imprecise.
   Worth stating accurately rather than comfortably.
-- **Battery drain when parked.** The real long-term risk, and untested.
-  If the Pi keeps the ENET link up and keeps polling with the ignition
-  off, does the ZGW stay awake? Does that hold other modules awake? A
-  car that will not sleep flattens its battery over days.
-  **This is the single most important thing left to measure.**
+- **~~Battery drain when parked.~~ MOOT for this deployment
+  (2026-08-30).** This was the item everything else waited on. It no
+  longer applies: the Pi runs from its own **powerbank**, not the car,
+  and is powered down by hand before the car is locked. Nothing polls a
+  parked car, so there is no drain path to measure.
+
+  Two things follow. The overnight `voltage` test is cancelled rather
+  than deferred — it would measure nothing. And the question would come
+  straight back if the Pi were ever wired to vehicle power, so this
+  paragraph is a condition, not a closure.
 - **Gateway/bus load.** Now much lower (see §2), but the drive-7
   timeouts are still unexplained. Per-request faults are recorded to
   `telemetry.channel_errors`, so the next drives answer this with data
@@ -45,17 +53,19 @@ reasons to think so, but we have not proven it."*
 - **Wear.** No evidence either way that sustained diagnostic polling has
   any long-term effect. Probably none. Not established.
 
-### How to settle it
+### How to settle what remains
 
-1. **Park connected overnight in `off` mode**, watching `voltage` and
-   whether the link stays up. `off` exists for exactly this: connected
-   but silent, which isolates "does the cable keep the car awake?" from
-   "does the polling keep the car awake?". Then repeat in `normal` to
-   separate the two.
-2. Compare fault rates across modes now that per-request faults are
-   recorded — a sleeping EGS and a loaded gateway look different.
-3. Read what the DDE reports about its own sleep state, if such a
+The drain question is gone with the powerbank. What is left is smaller:
+
+1. Compare fault rates across modes, now that per-request faults are
+   recorded — a sleeping EGS and a loaded gateway look different, and
+   the Car link tab shows both.
+2. Read what the DDE reports about its own sleep state, if such a
    channel exists in the SGBD tables.
+
+`off` mode keeps its value even so: it is how you leave the runtime up
+and the link connected while sending nothing, which is the right state
+for a parked car if the Pi is ever left running.
 
 ---
 
@@ -80,18 +90,22 @@ common cadence to be correlated: ClickHouse joins on nearest timestamp
 
 ### The tiers
 
-| class | rate | channels | why |
+| class | period | channels | why |
 |---|---|---|---|
-| `motion` | 10 Hz | rpm, speed, map, pedal | genuinely fast; the basis of load context |
-| `context` | 1/10 s | load, throttle, relthr, torque, maf, rail, lambda | characterises a driving phase, not a single transient |
-| `slow` | 1/10 s | coolant, oil, iat, voltage, fuelrate, cattemp, egr, egrerr | thermal mass and electrics: minutes, not seconds |
-| `rare` | 1/60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
-| `dde_dyn` | ~1/11 s each | the 22 proprietary DDE reads | round-robin, one per 0.5 s |
-| `egs` | 2 Hz | engaged gear | was 4 Hz; the EGS is the ECU that sleeps |
+| `motion` | 0.1 s | rpm, speed, map, pedal | genuinely fast; the basis of load context |
+| `context` | 10 s | load, throttle, relthr, torque, maf, rail, lambda | characterises a driving phase, not a single transient |
+| `slow` | 10 s | coolant, oil, iat, voltage, fuelrate, cattemp, egr, egrerr | thermal mass and electrics: minutes, not seconds |
+| `rare` | 60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
+| `dde_dyn` | 0.5 s x 22 | the 22 proprietary DDE reads | round-robin: one per firing, so ~11 s per channel |
+| `egs` | 0.5 s | engaged gear | was 0.25 s; the EGS is the ECU that sleeps |
 
 `map` is the one channel kept fast for a display reason rather than a
 physical one: the derived `boost` (`map - baro`) is the Drive view's
-hero gauge, and at 0.1 Hz it reads as a broken instrument.
+hero gauge, and at one reading per 10 s it reads as a broken instrument.
+
+All periods are declared in **seconds** — the only unit the format has.
+`hz`, `every` and `cycles` were retired on 2026-08-30 and are refused at
+load time; see [`MAPPING_ARCHITECTURE.md`](MAPPING_ARCHITECTURE.md).
 
 ### The result
 
@@ -174,9 +188,12 @@ Switch from the dashboard's `mode` chip, or start in one with
 
 ## Order the remaining work probably wants doing in
 
-1. **The overnight battery test** (§1) — it gates how relaxed we can be
-   about everything else, and costs one night. `off` mode now makes it a
-   clean experiment.
-2. **Fault rates per mode** — free, since the next drives record them.
-3. **Stage-1 data quality** — populate the `quality` column
-   (saturated / sentinel / stale); nothing writes it today.
+1. **Stage-1 data quality** — populate the `quality` column
+   (saturated / sentinel / stale); nothing writes it today, and it is now
+   the only thing standing in front of the analytics layer.
+2. **Fault rates per mode** — free, since the drives record them now.
+3. **A genuine cold start** — the last unproven part of the temperature
+   scales, and still never captured.
+
+*(The overnight battery test used to head this list. It is cancelled —
+see §1: the Pi runs from a powerbank.)*
