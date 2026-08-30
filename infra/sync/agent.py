@@ -191,9 +191,14 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         # `debug` reproduces - but claiming that here would be inventing
         # a fact, so an unknown mode stays empty.
         mode = "mode" if _has_column(con, "runs", "mode") else "''"
+        # Whether the host clock was NTP-disciplined when the run opened.
+        # NULL on databases recorded before this was tracked - unknown
+        # stays unknown rather than being assumed good.
+        clk = ("clock_synced" if _has_column(con, "runs", "clock_synced")
+               else "NULL")
         rows = con.execute(
             f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, "
-            f"{mset}, {mode} FROM runs WHERE id >= ? ORDER BY id",
+            f"{mset}, {mode}, {clk} FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
     finally:
@@ -204,9 +209,10 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
          "session_id": global_session_id(db_path, rid),
          "started": started, "ended": ended, "ecu": ecu or "",
          "ecu_addr": ecu_addr, "gateway": gateway or "",
-         "mappings": mset_val or "", "mode": mode_val or ""}
+         "mappings": mset_val or "", "mode": mode_val or "",
+         "clock_synced": clk_val}
         for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val,
-        mode_val in rows
+        mode_val, clk_val in rows
     ]
 
 

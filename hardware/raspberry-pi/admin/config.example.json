@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Copy to config.json on the Pi and fill in. config.json is gitignored:",
+    "it holds the panel password and must never be committed.",
+    "",
+    "bind: the Pi's LAN address. NOT 0.0.0.0 - the server refuses that,",
+    "  because the Pi joins networks you do not control. Use the address",
+    "  the phone reaches it on (wlan0), or 0 on a wired-only setup.",
+    "",
+    "password: generate one, do not reuse anything. On the Pi:",
+    "  python3 -c 'import secrets; print(secrets.token_urlsafe(24))'",
+    "  Basic auth over plain HTTP puts this on the wire base64-encoded on",
+    "  every request, so treat it as a LAN-only secret with no other use.",
+    "",
+    "git_remote: the pin. `pull` verifies origin matches this EXACTLY and",
+    "  refuses otherwise, so the update channel cannot be repointed at",
+    "  another repository. Copy it from `git -C <repo> remote get-url origin`."
+  ],
+
+  "bind": "192.168.1.50",
+  "port": 8088,
+
+  "username": "f10",
+  "password": "CHANGE-ME",
+
+  "repo_dir": "/home/f10/f10-dashboard",
+  "git_remote": "git@github.com:OWNER/f10-dashboard.git",
+  "git_branch": "master",
+
+  "services": ["f10-dashboard", "f10-sync"],
+  "sync_status_url": "http://127.0.0.1:8091/sync/status",
+  "log_lines": 200
+}

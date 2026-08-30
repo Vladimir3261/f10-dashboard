@@ -112,6 +112,112 @@ TIMEOUTS = (TimeoutError, socket.timeout)
 DEMO_VIN = "DEMO0000000000000"
 
 
+# ------------------------------------------------------------- the clock
+#
+# The Pi has no RTC. It boots with whatever `fake-hwclock` saved at the
+# last shutdown, and systemd-timesyncd corrects it whenever the network
+# comes back - which on this host is mid-drive, over a phone hotspot.
+#
+# On 2026-08-29 that correction landed 47 seconds into a recording and
+# moved the clock forward 76.5 minutes. The run it corrupted contains a
+# phantom 4578-second gap, claims a 5064-second duration for eight real
+# minutes, and has ~18 seconds of samples stamped 76 minutes in the past.
+# All of it shipped to the lake that way.
+#
+# That is worse than a bad value. A bad value is one wrong number; a bad
+# clock silently corrupts every rate, gradient and trend derived from the
+# data - which is the entire premise of the long-term model. A drive that
+# looks like a 76-minute idle never happened.
+#
+# Three defences, because no single one is enough:
+#
+#   1. WAIT at startup for the clock to be trustworthy, briefly. Solves
+#      the common case (booting on a known network) outright.
+#   2. RECORD whether it was trustworthy, per run. A car that never sees
+#      a network still has to be able to record; it just must not claim
+#      its timestamps are wall-clock truth.
+#   3. DETECT a step mid-run and end the run there. `time.monotonic()`
+#      does not jump, so the difference between it and `time.time()` is
+#      constant unless the clock is stepped. One run then never spans a
+#      discontinuity - the same invariant a drive mode change preserves.
+#
+# Deliberately NOT done: retro-correcting already-written timestamps. The
+# sync agent ships continuously, so rows are often already in ClickHouse
+# by then; the lake keys on (vehicle, channel, ts, session), so a
+# corrected ts inserts a duplicate rather than replacing anything.
+
+#: systemd-timesyncd creates this once it has synchronised. Present is a
+#: positive answer; absent is only "cannot tell from here".
+TIMESYNC_STAMP = "/run/systemd/timesync/synchronized"
+
+#: A wall-clock jump larger than this (seconds) is a step, not drift.
+#: NTP slews small corrections gradually and only steps for large ones,
+#: so anything past a couple of seconds is a discontinuity.
+CLOCK_STEP_THRESHOLD = 2.0
+
+
+def clock_anchor() -> float:
+    """
+    `time.time() - time.monotonic()`.
+
+    Constant while the clock only drifts; jumps by exactly the step when
+    the clock is corrected. Comparing this against a value captured at
+    run start is how a mid-run correction is detected.
+    """
+    return time.time() - time.monotonic()
+
+
+def clock_is_synced() -> bool:
+    """
+    Whether the host clock has been disciplined by NTP.
+
+    Two probes, cheapest first. Both failing means "unknown", which is
+    reported as not-synced: claiming the timestamps are good when we
+    cannot tell is the failure mode this whole section exists to stop.
+    """
+    if os.path.exists(TIMESYNC_STAMP):
+        return True
+
+    try:
+        proc = subprocess.run(
+            ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return proc.returncode == 0 and proc.stdout.strip() == "yes"
+
+
+def wait_for_clock(timeout: float, report=print) -> bool:
+    """
+    Give NTP a bounded chance to land before recording starts.
+
+    Bounded, and non-fatal on expiry: a car parked out of range of any
+    network would otherwise never record at all, and a run with an
+    honestly-labelled bad clock is worth more than no run.
+    """
+    if timeout <= 0 or clock_is_synced():
+        return clock_is_synced()
+
+    report(f"[~] waiting up to {timeout:g}s for the clock to sync "
+           f"(no RTC on this host)")
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        if clock_is_synced():
+            report("[+] clock synced")
+
+            return True
+
+        time.sleep(0.5)
+
+    report("[!] clock NOT synced - recording anyway, and the runs will "
+           "say so. Timestamps may be wrong until NTP lands.")
+
+    return False
+
+
 # --------------------------------------------------------------- mappings
 
 
@@ -656,7 +762,13 @@ CREATE TABLE IF NOT EXISTS runs (
     -- WHICH revision of the mode table this name refers to is not here:
     -- it rides in `mapping_set` as `drive-modes@<version>`, so one string
     -- identifies the entire sampling configuration of the run.
-    mode        TEXT
+    mode        TEXT,
+    -- Was the host clock NTP-disciplined when this run opened? The Pi
+    -- has no RTC, so a run started before the network came back carries
+    -- timestamps that are simply wrong. 1 = trustworthy, 0 = not, NULL =
+    -- recorded before this was tracked. Anything time-derived - rates,
+    -- gradients, trends, which is most of the point - must filter on it.
+    clock_synced INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS params (
@@ -759,7 +871,8 @@ class Recorder:
 
     # -- called from the poll thread --------------------------------
 
-    def start_run(self, vin, gateway, ecu, ecu_addr, mode="normal") -> None:
+    def start_run(self, vin, gateway, ecu, ecu_addr, mode="normal",
+                  clock_synced=None) -> None:
         """
         Open a run. Any run already open is closed first.
 
@@ -767,8 +880,16 @@ class Recorder:
         keeps one run == one sampling configuration. `mode` is stored as
         plain text; WHICH revision of the mode table that name refers to
         is in `mapping_set`, alongside every mapping version.
+
+        `clock_synced` records whether the host clock was NTP-disciplined
+        when the run opened. None means unknown and is stored as NULL -
+        never guessed.
         """
-        self.q.put(("run", (time.time(), vin, gateway, ecu, ecu_addr, mode)))
+        self.q.put((
+            "run",
+            (time.time(), vin, gateway, ecu, ecu_addr, mode,
+             None if clock_synced is None else int(bool(clock_synced))),
+        ))
 
     def error(self, request_id: str, kind: str, message: str) -> None:
         """Record one per-request fault. Dropped silently if the queue is
@@ -827,6 +948,11 @@ class Recorder:
 
         if "mode" not in cols("runs"):
             self.db.execute("ALTER TABLE runs ADD COLUMN mode TEXT")
+
+        if "clock_synced" not in cols("runs"):
+            self.db.execute(
+                "ALTER TABLE runs ADD COLUMN clock_synced INTEGER"
+            )
 
         self.db.commit()
 
@@ -922,13 +1048,15 @@ class Recorder:
                     if self.meta_source is not None else ""
                 )
 
-                started, vin, gateway, ecu, ecu_addr, mode = payload
+                (started, vin, gateway, ecu, ecu_addr, mode,
+                 clock_synced) = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
                     "(started_at, vin, gateway, ecu, ecu_addr, mapping_set,"
-                    " mode) VALUES (?,?,?,?,?,?,?)",
-                    (started, vin, gateway, ecu, ecu_addr, mapping_set, mode),
+                    " mode, clock_synced) VALUES (?,?,?,?,?,?,?,?)",
+                    (started, vin, gateway, ecu, ecu_addr, mapping_set,
+                     mode, clock_synced),
                 )
                 self.run_id = cur.lastrowid
 
@@ -1049,6 +1177,10 @@ class Telemetry:
             #: currently in its awake or asleep window.
             "mode": "normal",
             "duty": "continuous",
+            #: Whether the host clock is NTP-disciplined. Surfaced so a
+            #: drive recorded on a bad clock is visible while it is
+            #: happening, not only in the database afterwards.
+            "clock_synced": None,
         }
         self.meta: List[Dict] = []
         self.meta_version = 0
@@ -1370,10 +1502,19 @@ def poll_loop(
                 ecus=[e.label() for e in ecus],
             )
 
+            #: Re-probed per connect, not cached from startup: on this
+            #: host the network usually arrives well after boot, so a run
+            #: opened later may be trustworthy when the first was not.
+            synced = clock_is_synced()
+            anchor = clock_anchor()
+
             if rec is not None:
                 rec.start_run(vin, ip, engine.label(), engine.addr,
-                              modes.current)
+                              modes.current, synced)
                 rec.event("connect", f"engine ECU {engine.label()}")
+
+                if not synced:
+                    rec.event("clock", "run opened with an unsynced clock")
 
             #
             # Confirm any proprietary SGBD variants by PROBE, never by
@@ -1488,9 +1629,38 @@ def poll_loop(
                     print(f"[+] drive mode -> {wanted}", flush=True)
 
                     if rec is not None:
+                        synced = clock_is_synced()
+                        anchor = clock_anchor()
                         rec.start_run(vin, ip, engine.label(), engine.addr,
-                                      wanted)
+                                      wanted, synced)
                         rec.event("mode", f"drive mode -> {wanted}")
+
+                #
+                # Did the wall clock step? `time.monotonic()` cannot, so
+                # a change in the difference between them is a clock
+                # correction - the 76-minute jump that corrupted drive 8.
+                # End the run there: one run then never spans a timeline
+                # discontinuity, and the segment recorded against the bad
+                # clock stays identifiable instead of being silently
+                # stitched to good data.
+                #
+                now_anchor = clock_anchor()
+                step = now_anchor - anchor
+
+                if abs(step) > CLOCK_STEP_THRESHOLD:
+                    synced = clock_is_synced()
+                    anchor = now_anchor
+                    print(f"[!] host clock stepped {step:+.1f}s - starting a "
+                          f"new run (synced={synced})", flush=True)
+
+                    if rec is not None:
+                        rec.event(
+                            "clock",
+                            f"clock stepped {step:+.1f}s; previous run's "
+                            f"timestamps are not comparable with this one",
+                        )
+                        rec.start_run(vin, ip, engine.label(), engine.addr,
+                                      modes.current, synced)
 
                 #
                 # The plan schedules requests, not channel names, so two
@@ -1524,6 +1694,7 @@ def poll_loop(
                     dropped=rec.dropped if rec else 0,
                     mode=modes.current,
                     duty=plan.duty_state(started),
+                    clock_synced=synced,
                 )
 
                 cycle += 1
@@ -1595,7 +1766,8 @@ def demo_loop(
     )
 
     if rec is not None:
-        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, modes.current)
+        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, modes.current,
+                      clock_is_synced())
 
     t0 = time.monotonic()
 
@@ -1606,7 +1778,8 @@ def demo_loop(
             modes.current = wanted
 
             if rec is not None:
-                rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, wanted)
+                rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, wanted,
+                              clock_is_synced())
                 rec.event("mode", f"drive mode -> {wanted}")
 
         t = time.monotonic() - t0
@@ -1661,6 +1834,7 @@ def demo_loop(
             rows=rec.rows if rec else 0,
             dropped=rec.dropped if rec else 0,
             mode=modes.current,
+            clock_synced=clock_is_synced(),
         )
 
         time.sleep(1.0 / args.rate)
@@ -3281,6 +3455,12 @@ def main() -> int:
                          "runtime from the dashboard.")
     ap.add_argument("--modes", default=DEFAULT_MODE_CONFIG,
                     help="drive-mode table (default: config/modes.yaml)")
+    ap.add_argument("--wait-for-clock", type=float, default=20.0,
+                    help="seconds to wait at startup for NTP to discipline "
+                         "the clock before recording (default 20). This "
+                         "host has no RTC, so a run started too early "
+                         "carries wrong timestamps. 0 disables the wait; "
+                         "the run is still labelled either way.")
     ap.add_argument("--demo", action="store_true",
                     help="simulated data, no vehicle needed")
 
@@ -3362,6 +3542,14 @@ def main() -> int:
         for name, classes in sorted(dead.items()):
             print(f"[~] mode {name}: no loaded mapping declares "
                   f"{', '.join(classes)} - those multipliers do nothing")
+
+    #
+    # Give NTP a bounded chance before anything is recorded. The Pi has
+    # no RTC; without this, a boot on a stale clock records against it
+    # and a correction lands mid-drive - see the clock section above.
+    #
+    if not args.no_db:
+        wait_for_clock(args.wait_for_clock)
 
     tel = Telemetry()
 

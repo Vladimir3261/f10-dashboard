@@ -1,0 +1,33 @@
+# The Pi's control panel. Installed by install.sh, which substitutes
+# @PI_USER@ and @REPO_DIR@.
+#
+# Independent of f10-dashboard on purpose: this is what you reach for
+# WHEN the runtime is broken, so it must not share its fate. It also
+# restarts that unit, which it could not do from inside it.
+[Unit]
+Description=F10 Pi admin panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@PI_USER@
+WorkingDirectory=@REPO_DIR@/hardware/raspberry-pi/admin
+ExecStart=/usr/bin/python3 @REPO_DIR@/hardware/raspberry-pi/admin/server.py \
+    --config @REPO_DIR@/hardware/raspberry-pi/admin/config.json
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# The panel reads system state and shells out to a short allowlist. It
+# has no business writing anywhere except its own directory.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@REPO_DIR@/hardware/raspberry-pi/admin
+PrivateTmp=yes
+NoNewPrivileges=no
+# ^ sudo needs this off. The privilege it can gain is bounded by
+#   /etc/sudoers.d/f10-admin, which names each command in full.
+
+[Install]
+WantedBy=multi-user.target

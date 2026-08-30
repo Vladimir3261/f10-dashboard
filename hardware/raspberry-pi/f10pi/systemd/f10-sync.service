@@ -7,6 +7,9 @@
 Description=F10 telemetry sync agent (ships drives to the lake)
 After=network-online.target
 Wants=network-online.target
+# Ships timestamped rows; same no-RTC reasoning as f10-dashboard.
+After=time-sync.target
+Wants=time-sync.target
 
 [Service]
 Type=simple
