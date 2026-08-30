@@ -25,12 +25,13 @@ schema_version: 1
 #
 # VERSIONING - READ THIS BEFORE EDITING
 #
-# `version` below is stamped onto every recorded session as `mode_ver`,
-# next to the mode's name. That is what keeps the name honest: without
-# it, a run labelled `long` in March and one labelled `long` in June
-# could have been taken at different rates and nothing would say so -
-# which is exactly the invisible confound that recording the mode at all
-# is meant to prevent.
+# Every session records its mode as PLAIN TEXT ("long") plus a single
+# fingerprint string listing every versioned data file that shaped the
+# run - this table included, as `drive-modes@<version>`. That is what
+# keeps the name honest: without a version, a run labelled `long` in
+# March and one labelled `long` in June could have been taken at
+# different rates and nothing would say so - which is exactly the
+# invisible confound that recording the mode at all is meant to prevent.
 #
 # So: **increment `version` by one on every change to the numbers in this
 # file.** Not for comments or descriptions - those do not alter what any
@@ -41,6 +42,10 @@ schema_version: 1
 # a typo used to silently do nothing.
 # ======================================================================
 
+# Identity, exactly like a mapping file's. `drive-modes@<version>` is
+# recorded in each session's mapping set alongside every mapping file, so
+# one string identifies the whole sampling configuration of a drive.
+id: drive-modes
 version: 1
 
 # The declared rates - what `normal` means - live in the mapping files:

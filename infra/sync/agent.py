@@ -191,12 +191,9 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         # `debug` reproduces - but claiming that here would be inventing
         # a fact, so an unknown mode stays empty.
         mode = "mode" if _has_column(con, "runs", "mode") else "''"
-        # Version of the mode table that mode name came from. The pair is
-        # what identifies a rate; the name alone does not.
-        mver = "mode_ver" if _has_column(con, "runs", "mode_ver") else "''"
         rows = con.execute(
             f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, "
-            f"{mset}, {mode}, {mver} FROM runs WHERE id >= ? ORDER BY id",
+            f"{mset}, {mode} FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
     finally:
@@ -207,10 +204,9 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
          "session_id": global_session_id(db_path, rid),
          "started": started, "ended": ended, "ecu": ecu or "",
          "ecu_addr": ecu_addr, "gateway": gateway or "",
-         "mappings": mset_val or "", "mode": mode_val or "",
-         "mode_ver": mver_val or ""}
+         "mappings": mset_val or "", "mode": mode_val or ""}
         for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val,
-        mode_val, mver_val in rows
+        mode_val in rows
     ]
 
 

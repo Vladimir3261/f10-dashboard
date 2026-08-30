@@ -178,17 +178,29 @@ class ResolvedProfile:
 
         return list(seen.values())
 
-    def mapping_set(self) -> str:
+    def mapping_set(self, extra: Optional[Sequence[str]] = None) -> str:
         """
-        A compact one-line fingerprint of the loaded mapping set:
-        `id@version` for each file, comma-joined and sorted. Stable for a
-        given set of files+versions, cheap to store on a session row and
-        to compare across runs.
+        A compact one-line fingerprint of everything that decided how a
+        run was recorded: `id@version` per file, comma-joined and sorted.
+
+        `extra` carries versioned configuration that is not a mapping
+        file but still changes what a run means - today that is the
+        drive-mode table (`drive-modes@1`). It belongs in the SAME string
+        rather than a column of its own: one equality check then answers
+        "were these two drives recorded the same way?", and the mode
+        column stays plain readable text.
+
+        It is deliberately not folded into the mapping files' own
+        versions. The mode table is owned by none of them, so bumping
+        theirs would falsely signal that every decode definition changed
+        and split per-channel datasets that did not.
         """
-        return ",".join(
-            f"{m['id']}@{m['version']}"
-            for m in sorted(self.mapping_manifest(), key=lambda r: r["id"])
-        )
+        entries = [
+            f"{m['id']}@{m['version']}" for m in self.mapping_manifest()
+        ]
+        entries.extend(extra or ())
+
+        return ",".join(sorted(entries))
 
     # -- ordering ---------------------------------------------------
 

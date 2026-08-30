@@ -17,29 +17,47 @@ dependency-free like the rest of bmwdiag.
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .loader import iter_mapping_files, load_file
+from .modes import DEFAULT_MODE_CONFIG, load_modes
 
 __all__ = ["build_lock", "render_lock", "load_lock", "diff_lock", "LOCK_NAME"]
 
 LOCK_NAME = "VERSIONS.lock"
 
 
+#: Directories a versioned data file can live under, longest first so a
+#: nested match wins. The lock records repo-relative paths so the file
+#: diffs identically on every machine.
+_ROOTS = ("mappings/", "config/")
+
+
 def _rel(path: str) -> str:
-    """Repo-relative, forward-slash path starting at `mappings/`."""
+    """Repo-relative, forward-slash path from a known data root."""
     p = path.replace(os.sep, "/")
-    marker = "mappings/"
-    i = p.rfind(marker)
 
-    return p[i:] if i >= 0 else p
+    for marker in _ROOTS:
+        i = p.rfind(marker)
+
+        if i >= 0:
+            return p[i:]
+
+    return p
 
 
-def build_lock(paths: List[str]) -> Dict[str, Any]:
+def build_lock(
+    paths: List[str], mode_config: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Scan `paths` for mapping files and return the lock document: every
     mapping's id, version, production flag and repo-relative path, sorted
     by id for a stable diff.
+
+    `mode_config` adds the drive-mode table (config/modes.yaml) to the
+    same ledger. It is not a mapping file, but it is versioned data that
+    changes how a run is recorded, and it appears in the same `id@version`
+    fingerprint on each session - so it is checked by the same guard.
     """
     entries: List[Dict[str, Any]] = []
 
@@ -53,6 +71,15 @@ def build_lock(paths: List[str]) -> Dict[str, Any]:
                 "path": _rel(mapping.source_path),
             })
 
+    if mode_config and os.path.isfile(mode_config):
+        table = load_modes(mode_config)
+        entries.append({
+            "id": table.id,
+            "version": table.version,
+            "production": True,
+            "path": _rel(table.source_path),
+        })
+
     entries.sort(key=lambda e: e["id"])
 
     return {
@@ -61,7 +88,9 @@ def build_lock(paths: List[str]) -> Dict[str, Any]:
             "`python3 -m bmwdiag.mapping lock mappings/`. Every mapping "
             "declares a positive integer version, bumped by one on every "
             "content change; this file records the current version of each "
-            "and is checked by the test suite. See docs/DATA_VERSIONING.md."
+            "and is checked by the test suite. Includes the drive-mode "
+            "table (config/modes.yaml), which is versioned data too. "
+            "See docs/DATA_VERSIONING.md."
         ),
         "mappings": entries,
     }
