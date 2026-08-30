@@ -85,13 +85,31 @@ class ChannelVersionResolution(unittest.TestCase):
             self.reg.add(m)
         self.profile = self.reg.resolve(AllCapabilities(), config={})
 
+    #
+    # These assert PROPAGATION - that a channel carries the version of
+    # the file that defines it - not any particular number. The numbers
+    # themselves are pinned in mappings/VERSIONS.lock and checked by
+    # LockfileEnforcement below; repeating them here would only mean
+    # editing this file on every bump without testing anything more.
+    #
+    def engine_version(self):
+        engine = next(
+            m for m in self.reg.mappings if m.id == "sae-obd-engine"
+        )
+
+        return engine.version
+
     def test_read_signal_inherits_its_file_version(self):
-        # rpm comes from the production OBD engine mapping, version 1.
-        self.assertEqual(self.profile.channel_version("rpm"), 1)
+        # rpm is read from the production OBD engine mapping.
+        self.assertEqual(
+            self.profile.channel_version("rpm"), self.engine_version()
+        )
 
     def test_derived_channel_has_a_version(self):
-        # boost is a derived channel in the engine mapping.
-        self.assertEqual(self.profile.channel_version("boost"), 1)
+        # boost is a derived channel in the same file, so same version.
+        self.assertEqual(
+            self.profile.channel_version("boost"), self.engine_version()
+        )
 
     def test_unknown_channel_has_no_version(self):
         self.assertIsNone(self.profile.channel_version("nonexistent_channel"))
@@ -106,7 +124,7 @@ class ChannelVersionResolution(unittest.TestCase):
 
     def test_mapping_set_is_sorted_id_at_version(self):
         s = self.profile.mapping_set()
-        self.assertIn("sae-obd-engine@1", s)
+        self.assertIn(f"sae-obd-engine@{self.engine_version()}", s)
         parts = s.split(",")
         self.assertEqual(parts, sorted(parts))               # deterministic
 
@@ -144,10 +162,10 @@ class RecorderWritesTheManifest(unittest.TestCase):
     def setUp(self):
         import live
         self.live = live
-        reg = MappingRegistry()
+        self.reg = MappingRegistry()
         for m in load_tree(support.MAPPINGS, production_only=False):
-            reg.add(m)
-        self.profile = reg.resolve(AllCapabilities(), config={})
+            self.reg.add(m)
+        self.profile = self.reg.resolve(AllCapabilities(), config={})
         self.db = os.path.join(tempfile.mkdtemp(), "rec.db")
 
     def _record(self):
@@ -174,11 +192,15 @@ class RecorderWritesTheManifest(unittest.TestCase):
         finally:
             con.close()
 
-        self.assertIn("sae-obd-engine@1", mset)
+        engine = next(
+            m for m in self.reg.mappings if m.id == "sae-obd-engine"
+        )
+
+        self.assertIn(f"sae-obd-engine@{engine.version}", mset)
         self.assertTrue(len(rm) >= 1)
         self.assertTrue(all(v >= 1 for _, v, _ in rm))
-        self.assertEqual(params["rpm"], "1")
-        self.assertEqual(params["boost"], "1")
+        self.assertEqual(params["rpm"], str(engine.version))
+        self.assertEqual(params["boost"], str(engine.version))
 
 
 class VersionFlowsToTheLake(unittest.TestCase):

@@ -16,7 +16,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-egs-transmission
-  version: 3
+  version: 4
   production: false
   description: >
     CANDIDATE - gear selector (P/R/N/D) + drive mode from the EGS (0x18)
@@ -64,10 +64,18 @@ defaults:
 # The rate bought nothing. Over three days that request produced 122,595
 # `gear` samples carrying 8 distinct values, and 124,485 `egs_da2e_b0`
 # samples carrying exactly ONE - the constant this file already documents as
-# unused. A ZF 8HP shift takes ~200-400 ms, so 4 Hz still captures every
-# gear the box selects.
+# unused.
+#
+# v4 halves it again, 4 Hz -> 2 Hz. A ZF 8HP shift takes ~200-400 ms, so
+# 2 Hz can in principle miss the instant of a shift, but not the fact of
+# one: the gear it lands in is held for seconds. What we want from this
+# channel is which gear was engaged under a given load, not the shift
+# transient - and the transmission is the ECU that sleeps, so every
+# request we do not send is a routing NACK we do not provoke. If shift
+# timing itself ever becomes the subject, `debug` mode puts it back to
+# 4 Hz without editing this file.
 polling_classes:
-  egs: {hz: 4, priority: 2}
+  egs: {hz: 2, priority: 4}
 
 requests:
 

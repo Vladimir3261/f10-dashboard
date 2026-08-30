@@ -144,9 +144,18 @@ class TestObdSession(LiveWiringCase):
 
 
 class TestPollCycle(LiveWiringCase):
-    def cycle(self, executor, profile, plan, values, cycle_no):
+    #: The wall clock the loop body sees. Fixed rather than
+    #: `time.monotonic()`: since OBD mapping v2 the tiers are wall-clock
+    #: periods, so two cycles microseconds apart correctly produce
+    #: nothing new and a test that wants cycle N must say when it happens.
+    T0 = 1000.0
+
+    def cycle(self, executor, profile, plan, values, cycle_no, now=None):
         """One iteration of the loop body, exactly as poll_loop runs it."""
-        fresh = executor.execute(plan.due(cycle_no, time.monotonic()))
+        if now is None:
+            now = self.T0 + cycle_no * 0.1
+
+        fresh = executor.execute(plan.due(cycle_no, now))
         values.update(fresh)
 
         derived = profile.apply_derived(values, fresh)
@@ -168,7 +177,7 @@ class TestPollCycle(LiveWiringCase):
         self.assertEqual(fresh["boost"], 0.59)
         self.assertEqual(fresh["fuel_l"], round(62.745 / 100.0 * 70.0, 2))
 
-    def test_slow_channels_are_skipped_between_slow_cycles(self):
+    def test_only_the_motion_tier_is_fresh_a_tenth_of_a_second_later(self):
         _, profile, _, _, plan, executor = self.build(supported=set(SAMPLE))
         values = {}
 
@@ -179,12 +188,35 @@ class TestPollCycle(LiveWiringCase):
         self.assertIn("map", fresh)
         self.assertIn("boost", fresh)
         #
-        # Coolant is slow; its cached value stays in `values` but is not
-        # re-reported as fresh, so nothing carried-forward is re-logged.
+        # Coolant is on the slow tier; its cached value stays in `values`
+        # but is not re-reported as fresh, so nothing carried-forward is
+        # re-logged. That is what keeps one row == one real ECU reading.
         #
         self.assertNotIn("coolant", fresh)
         self.assertEqual(values["coolant"], 91.0)
         self.assertNotIn("fuel_l", fresh)
+
+    def test_the_slow_tiers_come_back_when_their_period_elapses(self):
+        _, profile, _, _, plan, executor = self.build(supported=set(SAMPLE))
+        values = {}
+
+        self.cycle(executor, profile, plan, values, 0)
+
+        #: Ten seconds on: the 10 s tiers are due, the 60 s one is not.
+        fresh = self.cycle(executor, profile, plan, values, 100,
+                           now=self.T0 + 10.0)
+
+        self.assertIn("coolant", fresh)          # slow, 10 s
+        self.assertIn("voltage", fresh)          # slow, 10 s
+        self.assertNotIn("baro", fresh)          # rare, 60 s
+        self.assertNotIn("fuel", fresh)          # rare, 60 s
+
+        #: A minute on, everything.
+        fresh = self.cycle(executor, profile, plan, values, 600,
+                           now=self.T0 + 60.0)
+
+        self.assertIn("baro", fresh)
+        self.assertIn("fuel", fresh)
 
     def test_boost_uses_the_carried_forward_barometric_reading(self):
         _, profile, _, _, plan, executor = self.build(supported=set(SAMPLE))
@@ -193,6 +225,9 @@ class TestPollCycle(LiveWiringCase):
         self.cycle(executor, profile, plan, values, 0)
         fresh = self.cycle(executor, profile, plan, values, 3)
 
+        #: `baro` is on the 60 s tier and was NOT re-read this cycle, so
+        #: boost can only be right if it used the carried-forward value.
+        self.assertNotIn("baro", fresh)
         self.assertEqual(fresh["boost"], round((158.0 - 99.0) / 100.0, 3))
 
     def test_adding_a_request_needs_no_poll_loop_change(self):

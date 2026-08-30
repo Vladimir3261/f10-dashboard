@@ -4,6 +4,12 @@ Regression: the research pipeline changed NOTHING in production.
 The production OBD mapping is byte-pinned, the vehicle runtime still
 loads exactly the same requests, and the candidate files are excluded
 from it wholesale.
+
+The pin is a tripwire, not a freeze. It exists so that no research
+importer, candidate promotion or refactor can edit the production
+mapping as a side effect - reaching this file has to be a deliberate act.
+Updating it is legitimate ONLY together with a `mapping.version` bump and
+a note here saying what changed and why.
 """
 
 import hashlib
@@ -15,11 +21,17 @@ from tests.support import hexb
 
 from bmwdiag.mapping import MappingRegistry, decode_signal, load_file
 
-#: sha256 of mappings/obd/engine.yaml as it stood before the research
-#: pipeline existed. If this fails, the production mapping was edited -
-#: which this task explicitly must not do.
+#: sha256 of mappings/obd/engine.yaml.
+#:
+#: v1 -> v2 (2026-08-30): polling rates only. The twelve PIDs on the old
+#: `fast` class were split into four wall-clock tiers (motion / context /
+#: slow / rare) after the channel census showed the fast tier was 83% of
+#: stored rows at 0.1-3.8% distinct values. No request, decode step,
+#: signal or unit changed, which the decode tests below and the
+#: exhaustive sweeps in tests/test_existing_obd_mappings.py still prove
+#: byte for byte.
 ENGINE_YAML_SHA256 = (
-    "fa7f1ff7e74e53db696fb498de55b86a06a5b3658253c31f529c145870ab0eea"
+    "2c03669a8c9d32205f1c9fde67a36d65dfb9f9f1fb8cf8fb8af3d0e294aa5318"
 )
 
 

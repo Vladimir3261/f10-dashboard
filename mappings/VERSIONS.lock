@@ -3,7 +3,7 @@
   "mappings": [
     {
       "id": "candidate-f10-egs-transmission",
-      "version": 3,
+      "version": 4,
       "production": false,
       "path": "mappings/candidates/bmw/egs/f10_transmission.yaml"
     },
@@ -57,7 +57,7 @@
     },
     {
       "id": "sae-obd-engine",
-      "version": 1,
+      "version": 2,
       "production": true,
       "path": "mappings/obd/engine.yaml"
     }
