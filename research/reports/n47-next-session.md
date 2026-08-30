@@ -126,7 +126,28 @@ A follow-up on branch `fix/transport-failure-scope` rests a request that
 keeps failing and stops a nack counting against the link budget —
 reviewed, awaiting merge.
 
-### 1. A genuine cold start (still never captured)
+### 1. DONE — the cold start was captured (2026-08-30)
+
+Captured stationary, idling from **21.0 °C** against 17–19 °C ambient over
+41 minutes in one unbroken run
+(`drive-sessions/20260830T222056Z-session/`). Coolant and oil track to
+within 0.1 min at 40/60/80/85 °C — the strongest validation the
+temperature scales have had, two independently-sourced channels agreeing
+across a 67-degree climb.
+
+**But the load-driven oil lag is still uncaptured.** At idle oil ran a
+mean +0.27 °C *above* coolant, not below: with no load, oil takes its heat
+from the block rather than from work done. What remains open is a cold
+start followed by **driving**, which is the only way to see the lag the
+plan predicted. Keep this item open for that.
+
+Two channels also resolved themselves in the same session, both from item
+3 below: the operating-mode word has a distinct cold-start state
+(`0x80870001`, first ~1.2 min), and `n47d_egr_deviation` is not dead — it
+spans 0.00–5.54 % during the warm-up transient and settles to 0.0 once
+warm, so EGR health should be trended on warm-up, not cruise.
+
+### 1b. Still open — a cold start WITH driving
 
 The single most valuable *on-car* item, and still open after four
 sessions — every run so far has begun warm. Drive 7's run 3 opened at
