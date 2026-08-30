@@ -22,7 +22,7 @@ schema_version: 1
 
 mapping:
   id: example-synthetic-uds
-  version: 1
+  version: 2
   production: false
   description: >
     TEST FIXTURE - NOT A REAL BMW MAPPING. Synthetic UDS and raw-job
@@ -61,9 +61,9 @@ defaults:
     target: 0x7E
 
 polling_classes:
-  fast: {every: 1, priority: 0}
-  slow: {every: 10, priority: 1}
-  medium_hz: {hz: 5.0, priority: 1}
+  fast: {seconds: 0.1, priority: 0}
+  slow: {seconds: 1.0, priority: 1}
+  medium_hz: {seconds: 0.2, priority: 1}
   trickle: {seconds: 5.0, priority: 2}
 
 requests:

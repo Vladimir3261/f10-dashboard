@@ -23,7 +23,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dpf-egr
-  version: 1
+  version: 2
   production: false
   description: >
     F-series N47 DPF/emissions dynamic (0xF303) measurements from the
@@ -77,7 +77,7 @@ defaults:
     target: discovered_engine
 
 polling_classes:
-  dde_dyn: {every: 5, priority: 2, stagger: true}
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
 
 requests:
 

@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dynamic
-  version: 2
+  version: 3
   production: false
   description: >
     F-series N47 dynamic (0xF303) measurements from the d72n47a0
@@ -90,7 +90,7 @@ defaults:
 # each refreshes every ~N*0.5s, and the fast loop pauses only ~90ms at a
 # time instead of ~1.2s in a block.
 polling_classes:
-  dde_dyn: {every: 5, priority: 2, stagger: true}
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
 
 requests:
 

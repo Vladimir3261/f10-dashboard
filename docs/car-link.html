@@ -1,0 +1,1052 @@
+<title>Cable to Channel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* ---------------------------------------------------------------
+     Palette. Two accents carry meaning, not decoration:
+       petrol = the sustained TCP channel (everything that carries data)
+       amber  = the one-shot UDP discovery (used exactly once, at boot)
+     --------------------------------------------------------------- */
+  :root {
+    --paper:      #edf0f4;
+    --surface:    #f7f9fb;
+    --surface-2:  #e3e8ee;
+    --rule:       #cbd4de;
+    --rule-soft:  #dde3ea;
+    --ink:        #101720;
+    --ink-soft:   #47535f;
+    --ink-faint:  #6d7a87;
+
+    --petrol:     #0e5a6b;
+    --petrol-dim: #d3e5e9;
+    --amber:      #9c5c0f;
+    --amber-dim:  #f2e3cd;
+    --sage:       #2f6f52;
+    --clay:       #a8443c;
+    --violet:     #5a4a86;
+
+    --code-bg:    #f7f9fb;
+    --shadow:     0 1px 2px rgba(16, 23, 32, .05), 0 8px 24px -16px rgba(16, 23, 32, .28);
+
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 63ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #0c1117;
+      --surface:    #131b23;
+      --surface-2:  #1b242e;
+      --rule:       #2b3742;
+      --rule-soft:  #202b35;
+      --ink:        #e4ebf2;
+      --ink-soft:   #a3b1bd;
+      --ink-faint:  #7d8b98;
+
+      --petrol:     #5cb8cc;
+      --petrol-dim: #10323b;
+      --amber:      #d9a052;
+      --amber-dim:  #35271255;
+      --sage:       #6cc194;
+      --clay:       #e08b83;
+      --violet:     #a294d6;
+
+      --code-bg:    #0f161d;
+      --shadow:     0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -18px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #0c1117;
+    --surface:    #131b23;
+    --surface-2:  #1b242e;
+    --rule:       #2b3742;
+    --rule-soft:  #202b35;
+    --ink:        #e4ebf2;
+    --ink-soft:   #a3b1bd;
+    --ink-faint:  #7d8b98;
+
+    --petrol:     #5cb8cc;
+    --petrol-dim: #10323b;
+    --amber:      #d9a052;
+    --amber-dim:  #35271255;
+    --sage:       #6cc194;
+    --clay:       #e08b83;
+    --violet:     #a294d6;
+
+    --code-bg:    #0f161d;
+    --shadow:     0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -18px rgba(0, 0, 0, .8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  /* ------------------------------------------------------- masthead */
+
+  .masthead {
+    padding: 72px 0 40px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: clamp(38px, 7vw, 68px);
+    line-height: 1.02;
+    letter-spacing: -.015em;
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    max-width: var(--measure);
+    font-size: 18px;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .scope {
+    margin-top: 28px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tag {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    padding: 4px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    color: var(--ink-soft);
+    background: var(--surface);
+  }
+
+  .tag.out {
+    color: var(--ink-faint);
+    border-style: dashed;
+    text-decoration: line-through;
+    text-decoration-color: var(--ink-faint);
+  }
+
+  /* --------------------------------------------------- the spine */
+
+  .stage {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 0 28px;
+    padding-top: 56px;
+  }
+
+  .spine {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+
+  /* the vertical trace running the length of the document */
+  .spine::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: -56px;
+    left: 50%;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--rule);
+  }
+
+  .stage:last-of-type .spine::before { bottom: auto; height: 46px; }
+
+  .marker {
+    position: relative;
+    z-index: 1;
+    width: 46px;
+    height: 46px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 2px solid var(--ink);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .marker.udp { border-color: var(--amber); color: var(--amber); }
+  .marker.tcp { border-color: var(--petrol); color: var(--petrol); }
+  .marker.local { border-color: var(--violet); color: var(--violet); }
+
+  .stage-body { min-width: 0; padding-bottom: 8px; }
+
+  .stage h2 {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: 30px;
+    line-height: 1.12;
+    letter-spacing: -.01em;
+    margin: 6px 0 4px;
+    text-wrap: balance;
+  }
+
+  .whereami {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    margin: 0 0 16px;
+  }
+
+  .stage p { max-width: var(--measure); margin: 0 0 16px; }
+
+  .stage p:last-child { margin-bottom: 0; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .885em;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+  }
+
+  /* ----------------------------------------------------- panels */
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    box-shadow: var(--shadow);
+    margin: 0 0 20px;
+    overflow: hidden;
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--rule-soft);
+    background: var(--surface-2);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .panel-head .side { text-transform: none; letter-spacing: 0; color: var(--ink-faint); }
+
+  .panel pre {
+    margin: 0;
+    padding: 14px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.7;
+    background: var(--code-bg);
+    color: var(--ink);
+  }
+
+  .panel pre code { background: none; padding: 0; font-size: inherit; }
+
+  /* YAML / code syntax roles */
+  .k   { color: var(--petrol); font-weight: 500; }
+  .v   { color: var(--ink); }
+  .num { color: var(--violet); }
+  .cm  { color: var(--ink-faint); font-style: italic; }
+  .hl  { color: var(--amber); font-weight: 500; }
+  .ok  { color: var(--sage); }
+  .bad { color: var(--clay); }
+
+  /* --------------------------------------------- wire byte frame */
+
+  .frame {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 16px 14px;
+    background: var(--code-bg);
+  }
+
+  .field {
+    flex: 1 1 auto;
+    min-width: 64px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 7px 9px;
+    background: var(--surface);
+  }
+
+  .field .fname {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 3px;
+  }
+
+  .field .fbytes {
+    display: block;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+
+  .field.len   { border-color: var(--rule); }
+  .field.ctl   { border-color: var(--violet); background: var(--surface); }
+  .field.ctl .fbytes { color: var(--violet); }
+  .field.addr  { border-color: var(--amber); }
+  .field.addr .fbytes { color: var(--amber); }
+  .field.pay   { border-color: var(--petrol); flex-grow: 3; }
+  .field.pay .fbytes { color: var(--petrol); }
+
+  .framenote {
+    padding: 0 14px 14px;
+    background: var(--code-bg);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    margin: 0;
+  }
+
+  /* ------------------------------------------------- annotations */
+
+  .notes {
+    list-style: none;
+    margin: 0;
+    padding: 12px 14px;
+    border-top: 1px solid var(--rule-soft);
+    background: var(--surface);
+    display: grid;
+    gap: 9px;
+  }
+
+  .notes li {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    font-size: 14.5px;
+    color: var(--ink-soft);
+  }
+
+  .notes .key {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--petrol);
+    background: var(--petrol-dim);
+    padding: 2px 6px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+
+  .notes .key.amberkey { color: var(--amber); background: var(--amber-dim); }
+
+  /* ------------------------------------------------------ aside */
+
+  .aside {
+    max-width: var(--measure);
+    border-left: 3px solid var(--amber);
+    padding: 2px 0 2px 16px;
+    margin: 0 0 20px;
+    color: var(--ink-soft);
+    font-size: 15px;
+  }
+
+  .aside b { color: var(--ink); font-weight: 600; }
+
+  /* ------------------------------------------------------ table */
+
+  .tablewrap { overflow-x: auto; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+
+  td.mono { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+
+  tr:last-child td { border-bottom: none; }
+
+  /* ------------------------------------------------------- cycle */
+
+  .cycle {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+    gap: 10px;
+    margin: 0 0 20px;
+  }
+
+  .step {
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--petrol);
+    border-radius: 3px;
+    background: var(--surface);
+    padding: 12px 13px;
+  }
+
+  .step .sname {
+    display: block;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--petrol);
+    margin-bottom: 5px;
+  }
+
+  .step .swhat {
+    display: block;
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+  }
+
+  .step .swhere {
+    display: block;
+    margin-top: 7px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  /* ----------------------------------------------------- closing */
+
+  .closing {
+    margin-top: 72px;
+    padding-top: 28px;
+    border-top: 2px solid var(--ink);
+  }
+
+  .closing h2 {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: 24px;
+    margin: 0 0 14px;
+  }
+
+  .closing p { max-width: var(--measure); color: var(--ink-soft); margin: 0 0 14px; }
+
+  @media (max-width: 720px) {
+    .stage { grid-template-columns: 36px minmax(0, 1fr); gap: 0 16px; }
+    .marker { width: 34px; height: 34px; font-size: 13px; }
+    .stage h2 { font-size: 24px; }
+    .wrap { padding: 0 18px 64px; }
+    .masthead { padding: 48px 0 32px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">f10-dashboard · BMW F10 520d · N47 diesel</p>
+    <h1>Cable to Channel</h1>
+    <p class="standfirst">
+      What happens between plugging an Ethernet cable into the car and a number
+      landing in the database. Nine stages, the actual bytes on the wire, and the
+      YAML that decides all of it — because in this project
+      <strong>vehicle knowledge is data, not code</strong>.
+    </p>
+    <div class="scope">
+      <span class="tag">link-local · UDP discovery</span>
+      <span class="tag">HSFZ over TCP</span>
+      <span class="tag">capability probing</span>
+      <span class="tag">mapping resolution</span>
+      <span class="tag">the poll loop</span>
+      <span class="tag out">SQLite · dashboard · ClickHouse</span>
+    </div>
+  </header>
+
+  <!-- ============================================ 1 -->
+  <section class="stage">
+    <div class="spine"><span class="marker local">1</span></div>
+    <div class="stage-body">
+      <h2>Get an address nobody assigned</h2>
+      <p class="whereami">live.py · find_link_local_ip()</p>
+      <p>
+        The car's gateway has no DHCP server. Both ends self-assign from the
+        link-local range <code>169.254.0.0/16</code> — the same mechanism a laptop
+        uses when it plugs into a switch with nothing on it.
+      </p>
+      <p>
+        So before anything can be sent, the host needs a <code>169.254.x.x</code>
+        address on the cable interface. On a laptop the OS does this
+        automatically; on the Raspberry Pi it has to be configured. Without it,
+        every later stage fails with no route to host.
+      </p>
+      <div class="aside">
+        <b>Failure mode worth knowing:</b> if the interface came up with only a
+        regular DHCP address, discovery in stage 2 broadcasts into the wrong
+        subnet and simply times out. It looks like the car is off.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 2 -->
+  <section class="stage">
+    <div class="spine"><span class="marker udp">2</span></div>
+    <div class="stage-body">
+      <h2>Shout into the dark</h2>
+      <p class="whereami">live.py · discover() · UDP :6811</p>
+      <p>
+        We do not know the gateway's address — that is the whole point. So we
+        broadcast six bytes to everyone on the segment and wait for whoever
+        answers.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>UDP broadcast → 169.254.255.255:6811</span>
+          <span class="side">sent once, at startup</span>
+        </div>
+        <div class="frame">
+          <div class="field addr">
+            <span class="fname">identify request</span>
+            <span class="fbytes">00 00 00 00 00 11</span>
+          </div>
+        </div>
+        <p class="framenote">Four zero length bytes, then control word 0x0011 — "who is out there?"</p>
+      </div>
+
+      <p>
+        The ZGW — the car's central gateway — replies from its real address. Two
+        things come back: <strong>the IP we will talk to</strong>, and the VIN,
+        which the gateway volunteers in the payload whether we want it or not.
+      </p>
+
+      <div class="aside">
+        This is the <b>only</b> UDP in the whole system, and it happens exactly
+        once. Everything after it is one TCP connection. Passing
+        <code>--ip</code> skips this stage entirely.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 3 -->
+  <section class="stage">
+    <div class="spine"><span class="marker tcp">3</span></div>
+    <div class="stage-body">
+      <h2>Open the one connection</h2>
+      <p class="whereami">live.py · HsfzClient.connect() · TCP :6801</p>
+      <p>
+        Port 6801 is fixed — nothing was negotiated in stage 2, we only learned
+        an address. This single socket now carries every request for the rest of
+        the drive.
+      </p>
+      <p>
+        The protocol is <strong>HSFZ</strong> (BMW's "high-speed data interface"):
+        a four-byte length, a two-byte control word, then the payload. The first
+        two payload bytes are the source and destination ECU addresses — this is
+        how one socket reaches many control units.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>Request — read engine RPM from the DDE</span>
+          <span class="side">HSFZ frame, 10 bytes total</span>
+        </div>
+        <div class="frame">
+          <div class="field len">
+            <span class="fname">length</span>
+            <span class="fbytes">00 00 00 04</span>
+          </div>
+          <div class="field ctl">
+            <span class="fname">control</span>
+            <span class="fbytes">00 01</span>
+          </div>
+          <div class="field addr">
+            <span class="fname">src → dst</span>
+            <span class="fbytes">F4 12</span>
+          </div>
+          <div class="field pay">
+            <span class="fname">payload · OBD mode 01, PID 0x0C</span>
+            <span class="fbytes">01 0C</span>
+          </div>
+        </div>
+        <p class="framenote">F4 = tester (us) · 12 = engine ECU · control 0x0001 = diagnostic request</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>Response</span>
+          <span class="side">0x41 = 0x01 + 0x40, the positive-reply convention</span>
+        </div>
+        <div class="frame">
+          <div class="field len">
+            <span class="fname">length</span>
+            <span class="fbytes">00 00 00 06</span>
+          </div>
+          <div class="field ctl">
+            <span class="fname">control</span>
+            <span class="fbytes">00 02</span>
+          </div>
+          <div class="field addr">
+            <span class="fname">src → dst</span>
+            <span class="fbytes">12 F4</span>
+          </div>
+          <div class="field pay">
+            <span class="fname">payload · echo + two data bytes</span>
+            <span class="fbytes">41 0C 0C 3C</span>
+          </div>
+        </div>
+        <p class="framenote">0x0C3C = 3132 → ÷ 4 = 783 rpm. The divisor comes from the mapping, not from code.</p>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Control</th><th>Meaning</th><th>What we do</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">0x0001</td><td>diagnostic request</td><td>what we send</td></tr>
+            <tr><td class="mono">0x0002</td><td>positive response</td><td>decode it</td></tr>
+            <tr><td class="mono">0x0003 / 0x0043</td><td>not routable — nobody at that address</td><td>count a fault, keep the link</td></tr>
+            <tr><td class="mono">0x0040 / 0x0041</td><td>gateway alive-check</td><td>answer it, keep waiting</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="aside" style="margin-top:20px">
+        <b>The ZGW serves one client at a time.</b> A second tool on the same
+        cable shows up as a connection reset, not a polite refusal — which is why
+        the runbook says stop <code>live.py</code> before running anything else.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 4 -->
+  <section class="stage">
+    <div class="spine"><span class="marker tcp">4</span></div>
+    <div class="stage-body">
+      <h2>Ask who is home</h2>
+      <p class="whereami">live.py · discover_ecus() · bmwdiag/obd/capability.py</p>
+      <p>
+        We never assume an address means an ECU. The engine control unit is
+        <strong>whichever ECU answers PID 0x0C</strong> — engine speed. If BMW
+        moved it, or the same code ran on a different car, nothing would need
+        editing.
+      </p>
+      <p>
+        Each responding ECU also publishes a <em>support bitmask</em>: the list of
+        PIDs it admits to answering. On this car that comes back as 30 PIDs. That
+        list becomes a filter in the next stage.
+      </p>
+      <p>
+        Proprietary channels need a second, stricter probe. Rather than trusting
+        an identification string, we <strong>replay the mapping's own read</strong>
+        and see whether the ECU accepts it. A variant is confirmed by behaviour.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span>What comes out of stage 4</span></div>
+        <ul class="notes">
+          <li><span class="key">engine addr</span><span>0x12 — because it answered 0x0C, not because it is 0x12</span></li>
+          <li><span class="key">supported PIDs</span><span>the 30-entry set this ECU advertises</span></li>
+          <li><span class="key">sgbd variant</span><span><code>d72n47a0</code>, confirmed by a read the ECU accepted</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 5 -->
+  <section class="stage">
+    <div class="spine"><span class="marker local">5</span></div>
+    <div class="stage-body">
+      <h2>What a mapping file actually says</h2>
+      <p class="whereami">mappings/**/*.yaml · parsed by bmwdiag/mapping/loader.py</p>
+      <p>
+        Here is the whole idea. <code>live.py</code> does not know what engine RPM
+        is. It knows how to send bytes and how to follow instructions. The
+        instructions are these files.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>mappings/candidates/bmw/egs/f10_transmission.yaml</span>
+          <span class="side">abridged</span>
+        </div>
+<pre><code><span class="cm"># ---- identity ------------------------------------------</span>
+<span class="k">mapping</span>:
+  <span class="k">id</span>: <span class="v">candidate-f10-egs-transmission</span>
+  <span class="k">version</span>: <span class="num">4</span>          <span class="cm"># stamped on every sample</span>
+  <span class="k">production</span>: <span class="bad">false</span>   <span class="cm"># opt-in only, via --extra-mappings</span>
+
+<span class="cm"># ---- where the knowledge came from ---------------------</span>
+<span class="k">source</span>:
+  <span class="k">type</span>: <span class="v">manual</span>
+  <span class="k">notes</span>: <span class="v">OBDb/BMW-5-Series @ 9c5aa60 (CC-BY-SA-4.0)</span>
+
+<span class="cm"># ---- what has been proven ON THIS CAR ------------------</span>
+<span class="k">verification</span>:
+  <span class="k">status</span>: <span class="ok">verified</span>
+  <span class="k">method</span>: <span class="v">road drive 2026-08-27 — byte 1 steps 1..8 with speed</span>
+
+<span class="cm"># ---- which ECU answers ---------------------------------</span>
+<span class="k">ecu</span>:
+  <span class="k">family</span>: <span class="v">transmission</span>
+  <span class="k">target</span>: <span class="hl">0x18</span>
+
+<span class="cm"># ---- how often ------------------------------------------</span>
+<span class="k">polling_classes</span>:
+  <span class="k">egs</span>: {<span class="k">seconds</span>: <span class="num">0.5</span>, <span class="k">priority</span>: <span class="num">4</span>}
+
+<span class="cm"># ---- what to send ---------------------------------------</span>
+<span class="k">requests</span>:
+  <span class="k">egs.selector.DA2E</span>:
+    <span class="k">did</span>: <span class="hl">0xDA2E</span>              <span class="cm"># UDS service 0x22, read this</span>
+    <span class="k">polling</span>: {<span class="k">class</span>: <span class="v">egs</span>}
+    <span class="k">response</span>: {<span class="k">data_length</span>: <span class="num">2</span>}
+
+    <span class="cm"># ---- what comes back — TWO channels, ONE exchange ----</span>
+    <span class="k">signals</span>:
+      <span class="k">egs_da2e_b0</span>:
+        <span class="k">decode</span>: {<span class="k">type</span>: <span class="v">uint8</span>, <span class="k">offset</span>: <span class="num">0</span>}
+        <span class="k">log</span>: <span class="bad">false</span>          <span class="cm"># constant on this car: show, don't store</span>
+      <span class="k">gear</span>:
+        <span class="k">label</span>: <span class="v">Gear</span>
+        <span class="k">decode</span>: {<span class="k">type</span>: <span class="v">uint8</span>, <span class="k">offset</span>: <span class="num">1</span>,
+                 <span class="k">valid_min</span>: <span class="num">1</span>, <span class="k">valid_max</span>: <span class="num">8</span>}</code></pre>
+        <ul class="notes">
+          <li><span class="key">requests</span><span>one exchange with the ECU. This is the unit that gets scheduled.</span></li>
+          <li><span class="key">signals</span><span>the channels decoded <em>from that one reply</em>. Two here — so adding a second channel cost no extra traffic at all.</span></li>
+          <li><span class="key amberkey">did: 0xDA2E</span><span>a manufacturer-defined address. Means engaged gear on this ECU and something else entirely on another make.</span></li>
+          <li><span class="key">decode</span><span>a fixed vocabulary of arithmetic steps — no expression language. Nothing in these files ever executes.</span></li>
+        </ul>
+      </div>
+
+      <p>
+        Standard OBD looks the same but simpler, because the definitions are
+        public. This is the only file the default launch loads:
+      </p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>mappings/obd/engine.yaml</span>
+          <span class="side">SAE J1979 — no proprietary knowledge</span>
+        </div>
+<pre><code><span class="k">ecu</span>:
+  <span class="k">target</span>: <span class="hl">discovered_engine</span>   <span class="cm"># a NAME, never an address</span>
+  <span class="k">match</span>:
+    <span class="k">capability</span>:
+      <span class="k">obd_mode01_pid</span>: <span class="hl">0x0C</span>   <span class="cm"># "whoever answers RPM is the engine"</span>
+
+<span class="k">polling_classes</span>:
+  <span class="cm"># ONE unit: seconds of wall clock. Nothing else.</span>
+  <span class="k">motion</span>:  {<span class="k">seconds</span>: <span class="num">0.1</span>, <span class="k">priority</span>: <span class="num">0</span>}
+  <span class="k">context</span>: {<span class="k">seconds</span>: <span class="num">10</span>,  <span class="k">priority</span>: <span class="num">1</span>}
+  <span class="k">slow</span>:    {<span class="k">seconds</span>: <span class="num">10</span>,  <span class="k">priority</span>: <span class="num">2</span>}
+  <span class="k">rare</span>:    {<span class="k">seconds</span>: <span class="num">60</span>,  <span class="k">priority</span>: <span class="num">3</span>}
+
+<span class="k">requests</span>:
+  <span class="k">obd.mode01.0C</span>:
+    <span class="k">pid</span>: <span class="hl">0x0C</span>
+    <span class="k">polling</span>: {<span class="k">class</span>: <span class="v">motion</span>}
+    <span class="k">response</span>: {<span class="k">data_length</span>: <span class="num">2</span>}
+    <span class="k">signals</span>:
+      <span class="k">rpm</span>:
+        <span class="k">label</span>: <span class="v">Engine speed</span>
+        <span class="k">unit</span>: <span class="v">rpm</span>
+        <span class="k">decode</span>: {<span class="k">type</span>: <span class="v">uint16_be</span>, <span class="k">divide</span>: <span class="num">4.0</span>}
+
+<span class="cm"># computed from other channels, never read from an ECU</span>
+<span class="k">derived</span>:
+  <span class="k">boost</span>:
+    <span class="k">operation</span>: <span class="v">subtract_scale</span>
+    <span class="k">inputs</span>: {<span class="k">value</span>: <span class="v">map</span>, <span class="k">reference</span>: <span class="v">baro</span>}
+    <span class="k">fallback</span>: {<span class="k">reference</span>: <span class="num">100.0</span>}  <span class="cm"># baro is only read once a minute</span>
+    <span class="k">divide</span>: <span class="num">100.0</span></code></pre>
+        <ul class="notes">
+          <li><span class="key amberkey">discovered_engine</span><span>a late-bound placeholder. Stage 6 substitutes the address that actually answered.</span></li>
+          <li><span class="key">derived</span><span>channels computed from other channels. <code>boost = (map − baro) ÷ 100</code>, with a fallback so it works before the first barometric reading arrives.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 6 -->
+  <section class="stage">
+    <div class="spine"><span class="marker local">6</span></div>
+    <div class="stage-body">
+      <h2>Filter the data down to this car</h2>
+      <p class="whereami">bmwdiag/mapping/registry.py · resolve()</p>
+      <p>
+        The files were loaded at boot, before the socket existed. Now they meet
+        the real ECU and get cut down. Three gates, then the substitution.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head"><span>Three gates</span></div>
+        <ul class="notes">
+          <li><span class="key">file</span><span>Does the ECU satisfy <code>ecu.match</code>? A d72-only file is skipped whole on a d71 ECU.</span></li>
+          <li><span class="key">request</span><span>Is this PID in the support bitmask from stage 4? An unsupported one is dropped rather than polled forever into a refusal.</span></li>
+          <li><span class="key">derived</span><span>Are all its inputs actually being read? <code>boost</code> disappears if <code>map</code> does — better than publishing a channel that can never produce a value.</span></li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><span>Then the binding</span></div>
+<pre><code><span class="cm"># in the file, forever:</span>
+<span class="k">target</span>: <span class="hl">discovered_engine</span>
+
+<span class="cm"># at runtime, from stage 4:</span>
+targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</span>}
+
+<span class="cm"># every request in that file now addresses 0x12</span></code></pre>
+      </div>
+
+      <p>
+        Out of this comes a <strong>ResolvedProfile</strong>: the exact set of
+        requests this car can answer, each bound to a real address, plus the
+        channels they decode into.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============================================ 7 -->
+  <section class="stage">
+    <div class="spine"><span class="marker local">7</span></div>
+    <div class="stage-body">
+      <h2>Decide how often</h2>
+      <p class="whereami">bmwdiag/mapping/polling.py · config/modes.yaml</p>
+      <p>
+        Every request belongs to a named <em>polling class</em> declaring one
+        thing — a period in seconds — and that period follows what the channel
+        physically does. Coolant does not move in tenths of a second; engine
+        speed does.
+      </p>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Class</th><th>Period</th><th>Channels</th><th>Reasoning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">motion</td><td class="mono">0.1 s</td><td>rpm, speed, map, pedal</td><td>genuinely fast; the basis of load context</td></tr>
+            <tr><td class="mono">context</td><td class="mono">10 s</td><td>load, throttle, maf, rail, lambda</td><td>characterises a phase, not a transient</td></tr>
+            <tr><td class="mono">slow</td><td class="mono">10 s</td><td>temps, voltage, EGR</td><td>thermal mass — minutes, not seconds</td></tr>
+            <tr><td class="mono">rare</td><td class="mono">60 s</td><td>ambient, baro, fuel, odometer</td><td>weather and counters</td></tr>
+            <tr><td class="mono">dde_dyn</td><td class="mono">0.5 s &times; 22</td><td>the 22 proprietary DDE reads</td><td>staggered — see below</td></tr>
+            <tr><td class="mono">egs</td><td class="mono">0.5 s</td><td>engaged gear</td><td>the ECU that sleeps; fewer requests, fewer refusals</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="aside" style="margin-top:20px">
+        <b>Stagger</b> is the one rule that is not just a rate. The 22 DDE reads
+        fire <em>one per firing of the class, round-robin</em>. So the period is
+        the gap between firings, and a single channel refreshes every
+        0.5 s &times; 22 &asymp; 11 s. Without it, all 22 multi-frame reads would
+        land on one cycle and stall the fast channels.
+      </div>
+
+      <p>
+        A <strong>drive mode</strong> then scales those classes as a group. It is
+        not a second scheduler — one mechanism still decides what is due.
+      </p>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>config/modes.yaml</span>
+          <span class="side">abridged</span>
+        </div>
+<pre><code><span class="k">id</span>: <span class="v">drive-modes</span>
+<span class="k">version</span>: <span class="num">1</span>          <span class="cm"># recorded with every drive</span>
+
+<span class="k">modes</span>:
+  <span class="k">off</span>:
+    <span class="k">polls</span>: <span class="bad">false</span>     <span class="cm"># connected, but sends nothing</span>
+
+  <span class="k">sampling</span>:
+    <span class="k">duty</span>: {<span class="k">awake</span>: <span class="num">120</span>, <span class="k">asleep</span>: <span class="num">600</span>}
+    <span class="k">exempt</span>: [<span class="v">slow</span>, <span class="v">rare</span>, <span class="v">dde_dyn</span>]   <span class="cm"># these never sleep</span>
+
+  <span class="k">long</span>:
+    <span class="k">multipliers</span>:
+      <span class="k">motion</span>: <span class="num">5.0</span>       <span class="cm"># 0.1 s  ->  0.5 s</span>
+      <span class="k">egs</span>: <span class="num">4.0</span>          <span class="cm"># 0.5 s  ->  2 s</span>
+
+  <span class="k">normal</span>: {}          <span class="cm"># scales nothing, BY DEFINITION</span>
+
+  <span class="k">debug</span>:
+    <span class="k">multipliers</span>:
+      <span class="k">context</span>: <span class="num">0.01</span>     <span class="cm"># 10 s  ->  0.1 s</span></code></pre>
+        <ul class="notes">
+          <li><span class="key">multiplier</span><span>scales the class <em>period</em>. Above 1 = less often, below 1 = more often.</span></li>
+          <li><span class="key">normal</span><span>empty on purpose — so "what rate was this recorded at?" has exactly one answer.</span></li>
+          <li><span class="key amberkey">version</span><span>changing a multiplier changes what a recorded drive means, so the table is versioned like a mapping and travels with the data.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 8 -->
+  <section class="stage">
+    <div class="spine"><span class="marker tcp">8</span></div>
+    <div class="stage-body">
+      <h2>The loop</h2>
+      <p class="whereami">live.py · poll_loop() — runs ~10× a second, forever</p>
+      <p>
+        Everything above happens once. This is the part that repeats.
+      </p>
+
+      <div class="cycle">
+        <div class="step">
+          <span class="sname">due()</span>
+          <span class="swhat">Which requests have waited out their period? Returns requests, never channel names.</span>
+          <span class="swhere">polling.py</span>
+        </div>
+        <div class="step">
+          <span class="sname">execute()</span>
+          <span class="swhat">Send them. OBD PIDs get batched into one exchange; UDS DIDs go one at a time.</span>
+          <span class="swhere">execute.py</span>
+        </div>
+        <div class="step">
+          <span class="sname">decode()</span>
+          <span class="swhat">Bytes → numbers, following the arithmetic in the mapping. 0x0C3C ÷ 4 = 783.</span>
+          <span class="swhere">decoder.py</span>
+        </div>
+        <div class="step">
+          <span class="sname">derive()</span>
+          <span class="swhat">Compute the channels nobody reads. boost = map − baro.</span>
+          <span class="swhere">derive.py</span>
+        </div>
+        <div class="step">
+          <span class="sname">record</span>
+          <span class="swhat">Queue the fresh values. Only real readings — a carried-forward value is never re-logged.</span>
+          <span class="swhere">live.py</span>
+        </div>
+        <div class="step">
+          <span class="sname">sleep</span>
+          <span class="swhat">Whatever is left of the 100 ms.</span>
+          <span class="swhere">live.py</span>
+        </div>
+      </div>
+
+      <div class="aside">
+        <b>One row = one real ECU reading.</b> A slow channel keeps its last value
+        on the dashboard between reads, but that carried-forward value is never
+        written again. Otherwise a 60-second channel would look like it was
+        sampled at 10 Hz.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ 9 -->
+  <section class="stage">
+    <div class="spine"><span class="marker tcp">9</span></div>
+    <div class="stage-body">
+      <h2>When the car says no</h2>
+      <p class="whereami">bmwdiag/mapping/execute.py · fault_kind()</p>
+      <p>
+        The transmission goes to sleep. Asleep, it answers a routing refusal or
+        nothing at all. The distinction that matters is
+        <strong>whose failure it is</strong>.
+      </p>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>What it means</th><th>Response</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">transport_nack</td><td>gateway will not route to that ECU — usually asleep</td><td>record, skip that request, carry on</td></tr>
+            <tr><td class="mono">transport_timeout</td><td>the ECU did not answer in time</td><td>record, skip, carry on</td></tr>
+            <tr><td class="mono">transport_link</td><td>the socket itself is gone</td><td>reconnect</td></tr>
+            <tr><td class="mono">decode</td><td>bytes arrived but the mapping could not read them</td><td>record — this is a mapping bug</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="aside" style="margin-top:20px">
+        <b>This used to be one bug.</b> A single refusal from a sleeping
+        transmission tore down the whole connection, and one drive recorded as
+        four separate runs. A per-request fault now costs one request; only a
+        genuinely dead socket costs the link — and a run of consecutive faults
+        still triggers a reconnect, so a wedged link is not mistaken for a quiet
+        one.
+      </div>
+    </div>
+  </section>
+
+  <footer class="closing">
+    <h2>Why go to this trouble</h2>
+    <p>
+      Every arrow above could have been fifty lines of Python with the PIDs
+      hardcoded. It was, once. Pulling the vehicle knowledge out into data buys
+      three things that matter for a car being watched over years rather than
+      minutes.
+    </p>
+    <p>
+      <strong>A new channel is a YAML edit</strong> — no code, no release.
+      <strong>Every sample carries the version</strong> of the file that decoded
+      it, so a dataset analysed in six months is the same dataset, not one
+      silently reinterpreted. And <strong>nothing in the files executes</strong>,
+      so they can eventually compile to C structures for a runtime with no Python
+      in it at all.
+    </p>
+    <p style="color:var(--ink-faint);font-size:14px">
+      Read-only throughout. The runtime can send observational diagnostic reads
+      and nothing else — no writes, no actuators, no coding — enforced at a
+      single choke point.
+    </p>
+  </footer>
+
+</div>

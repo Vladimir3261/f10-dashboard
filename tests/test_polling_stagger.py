@@ -20,8 +20,8 @@ schema_version: 1
 mapping: {id: stagger-fixture, version: 1, production: false}
 ecu: {target: 0x12}
 polling_classes:
-  fast: {every: 1, priority: 0}
-  grp:  {every: 2, priority: 1, stagger: true}
+  fast: {seconds: 0.1, priority: 0}
+  grp:  {seconds: 0.2, priority: 1, stagger: true}
 defaults:
   request: {protocol: uds, service: 0x22, target: 0x12}
 requests:
@@ -52,6 +52,14 @@ requests:
 """
 
 
+#: A 10 Hz poll loop, so cycle N happens at T0 + N/10 seconds.
+T0 = 1000.0
+
+
+def at(cycle):
+    return T0 + cycle * 0.1
+
+
 class Stagger(unittest.TestCase):
     def setUp(self):
         self.mapping = load_text(STAGGERED, source="<stagger>")
@@ -65,21 +73,23 @@ class Stagger(unittest.TestCase):
 
     def test_at_most_one_group_member_per_cycle(self):
         for cycle in range(20):
-            due = self.plan.due(cycle)
+            due = self.plan.due(cycle, at(cycle))
             grp = [r.id for r in due if r.id in ("a", "b", "c")]
             self.assertLessEqual(len(grp), 1, f"cycle {cycle}: {grp}")
 
     def test_fast_channel_is_never_starved(self):
         for cycle in range(20):
-            due = {r.id for r in self.plan.due(cycle)}
+            due = {r.id for r in self.plan.due(cycle, at(cycle))}
             self.assertIn("fastone", due, f"cycle {cycle}")
 
     def test_members_round_robin_in_order(self):
-        # grp is due on even cycles (every=2); members cycle a, b, c, a...
+        # grp fires every 0.2 s = every other cycle at 10 Hz, and takes
+        # one member per firing: a, b, c, a... So a given member of a
+        # 3-member class refreshes every 0.6 s, not every 0.2 s.
         fired = []
 
         for cycle in range(12):
-            for r in self.plan.due(cycle):
+            for r in self.plan.due(cycle, at(cycle)):
                 if r.id in ("a", "b", "c"):
                     fired.append((cycle, r.id))
 
@@ -93,7 +103,8 @@ class Stagger(unittest.TestCase):
 
         for cycle in range(12):
             covered.update(
-                r.id for r in self.plan.due(cycle) if r.id in ("a", "b", "c")
+                r.id for r in self.plan.due(cycle, at(cycle))
+                if r.id in ("a", "b", "c")
             )
 
         self.assertEqual(covered, {"a", "b", "c"})
@@ -101,11 +112,11 @@ class Stagger(unittest.TestCase):
     def test_non_staggered_class_still_fires_all_members(self):
         """Sanity: flip stagger off and the group fires together again."""
         classes = resolve_classes(
-            [PollingClassDef("fast", "cycles", 1.0, 0),
-             PollingClassDef("grp", "cycles", 2.0, 1, stagger=False)]
+            [PollingClassDef("fast", 0.1, 0),
+             PollingClassDef("grp", 0.2, 1, stagger=False)]
         )
         plan = PollingPlan(self.mapping.requests, classes)
-        due = {r.id for r in plan.due(0)}
+        due = {r.id for r in plan.due(0, at(0))}
         self.assertTrue({"a", "b", "c"} <= due)
 
 

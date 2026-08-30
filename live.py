@@ -162,34 +162,22 @@ def load_extra(registry: MappingRegistry, paths: Sequence[str]) -> MappingRegist
 
 def describe_class(cls: PollingClassDef) -> str:
     """A polling class as a human-readable rate, for startup logging."""
-    if cls.kind == "hz":
-        return f"{cls.value:g} Hz"
+    if cls.period < 1.0:
+        return f"{cls.hz:g} Hz"
 
-    if cls.kind == "seconds":
-        return f"1/{cls.value:g}s"
-
-    return f"every {int(cls.value)} cycles"
+    return f"1/{cls.period:g}s"
 
 
 def polling_classes(registry: MappingRegistry, args) -> Dict[str, PollingClassDef]:
     """
-    Resolve polling classes, letting the CLI have the last word.
+    Resolve polling classes from the loaded mappings.
 
-    `--slow-every` is defined in poll-loop cycles and, when given, forces
-    `slow` back to a cycle-based class. It defaults to unset: since v2 of
-    the OBD mapping the rates are wall-clock and declared in the mapping
-    files, which is where they belong - a rate is a property of what the
-    channel measures, not of the loop that happens to read it. The flag
-    stays for ad-hoc experiments and for reproducing older runs.
+    There is no CLI rate override any more. A rate is a property of what
+    the channel measures, so it belongs in the mapping file; wanting all
+    of them faster or slower for one drive is what a drive mode is for,
+    and unlike a flag a mode is recorded with the data.
     """
-    overrides: Dict[str, PollingClassDef] = {}
-
-    if args.slow_every is not None:
-        overrides["slow"] = PollingClassDef(
-            "slow", "cycles", float(args.slow_every), 2
-        )
-
-    return resolve_classes(registry.polling_classes(), overrides)
+    return resolve_classes(registry.polling_classes())
 
 
 def numeric_only(
@@ -3285,10 +3273,6 @@ def main() -> int:
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
                     help="target poll rate in Hz (default 10)")
-    ap.add_argument("--slow-every", type=int, default=None,
-                    help="force the `slow` class back to every Nth loop "
-                         "cycle. Unset by default: rates are declared in "
-                         "the mapping files as wall-clock periods.")
     ap.add_argument("--mode", default=None,
                     help="drive mode - how hard to poll. Names come from "
                          "the mode table (--modes); the shipped set is "

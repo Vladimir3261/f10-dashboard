@@ -271,20 +271,30 @@ Polling classes are named in mapping files and defined at runtime:
 
 ```yaml
 polling_classes:
-  fast: {every: 1, priority: 0}
-  slow: {every: 10, priority: 1}
-  survey: {hz: 0.2, priority: 3}
+  motion: {seconds: 0.1, priority: 0}
+  slow:   {seconds: 10,  priority: 2}
+  survey: {seconds: 300, priority: 3}
 ```
 
-| kind | meaning |
-| --- | --- |
-| `every` / `cycles` | every Nth poll-loop iteration |
-| `hz` | N times per second, wall clock |
-| `seconds` | once every N seconds, wall clock |
+**One unit: `seconds`, wall clock.** A request is due when that many
+seconds have passed since it last went out. The poll loop's `--rate` sets
+only the granularity — asking for a period shorter than one loop cycle
+just means "every cycle".
 
-`fast` and `slow` stay cycle-based because `--rate` and `--slow-every`
-are defined in those terms, and `--slow-every` overrides whatever a
-mapping declares. Precedence is **runtime > mapping file > built-in**.
+`hz`, `every` and `cycles` were accepted until 2026-08-30 and are now
+refused by name at load time (silently ignoring them would poll at the
+wrong rate). `hz` and `seconds` were the same thing spelled differently;
+`cycles` was worse than redundant, because it rescaled every class
+whenever `--rate` changed, so one mapping file meant different sample
+rates on different launches. Seconds won over Hz because the declared
+rates are mostly slow: `{seconds: 60}` reads cleanly where
+`{hz: 0.01666…}` does not.
+
+There is no CLI rate override. A rate is a property of what the channel
+measures, so it belongs in the mapping file; wanting everything faster or
+slower for one drive is what a **drive mode** is for — and unlike a flag,
+a mode is recorded with the data. Precedence is
+**mapping file > built-in fallback**.
 
 `PollingPlan.due()` returns requests ordered by class priority then
 declaration order. That ordering is load-bearing: the OBD session batches
@@ -298,16 +308,22 @@ round-robin, instead of all its due members at once:
 
 ```yaml
 polling_classes:
-  dde_dyn: {every: 5, priority: 2, stagger: true}
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
 ```
 
 This exists for the F303 dynamic reads. Each is a three-frame exchange
 (clear + define + read ≈ 90 ms), so firing thirteen of them on one cycle
 stalls the fast OBD channels for over a second. Staggered, at most one
 proprietary read lands per cycle, bounding the stall to ~90 ms while the
-fast channels keep their cadence; each member is refreshed every
-`members × every` cycles. `stagger` is opt-in — `fast` and `slow` stay
-eager, so the standard-OBD traffic is byte-unchanged.
+fast channels keep their cadence.
+
+Note the arithmetic: **`seconds` is the gap between firings of the
+CLASS**, and one member goes out per firing, so a member's own refresh
+interval is `seconds × members` — 22 requests at `{seconds: 0.5}` means
+each channel is read every ~11 s. The class is therefore timed as a
+whole; timing its members individually would make it fire every cycle,
+since the members not chosen never have their clock advanced. `stagger`
+is opt-in, so the standard-OBD traffic is unaffected.
 
 ---
 
@@ -455,7 +471,7 @@ Works without a vehicle:
 python3 -m bmwdiag.mapping validate mappings/
 python3 -m bmwdiag.mapping list mappings/
 python3 -m bmwdiag.mapping show mappings/obd/engine.yaml
-python3 -m bmwdiag.mapping plan mappings/obd --slow-every 10
+python3 -m bmwdiag.mapping plan mappings/obd
 python3 -m bmwdiag.mapping request mappings/obd/engine.yaml obd.mode01.0C --target 0x12
 python3 -m bmwdiag.mapping decode mappings/obd/engine.yaml rpm "41 0C 0C 3C"
 ```
