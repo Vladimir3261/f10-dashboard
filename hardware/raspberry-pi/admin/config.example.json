@@ -37,5 +37,10 @@
   "sync_state_file": "/home/f10/f10-dashboard/local/sync-state.json",
 
   "log_lines": 200,
-  "recording_window_s": 60
+  "recording_window_s": 60,
+
+  "claude_enabled": true,
+  "claude_unit": "claude-tmux",
+  "claude_tmux_session": "claude",
+  "claude_pane_lines": 40
 }
