@@ -7,6 +7,7 @@ All offline - no car, no network, no ClickHouse. See docs/DATA_VERSIONING.md.
 """
 
 import os
+import pathlib
 import sqlite3
 import tempfile
 import time
@@ -202,6 +203,191 @@ class RecorderWritesTheManifest(unittest.TestCase):
         self.assertTrue(all(v >= 1 for _, v, _ in rm))
         self.assertEqual(params["rpm"], str(engine.version))
         self.assertEqual(params["boost"], str(engine.version))
+
+
+class RunOneCarriesItsProvenance(unittest.TestCase):
+    """
+    THE FIRST run of a recorder must carry its mapping provenance.
+
+    It did not, on the car path, for weeks. `poll_loop` called
+    `start_run()` forty-nine lines before `set_metadata()`, so the
+    recorder thread read `meta_source` while it was still None and wrote
+    an empty `mapping_set` with no `run_mappings` rows.
+
+    Nothing caught it because the demo path has the two calls the right
+    way round, and every existing test used a recorder set up demo-style.
+    The pattern on disk was exactly `X...` - run 1 empty, the rest fine -
+    which while drives fragmented into 4-6 runs cost ~18% of runs and
+    left the provenance in the others. Fixing the fragmentation made a
+    drive one run, and the loss went to 100%.
+
+    So these tests assert it for run ONE specifically, and for the case
+    where metadata was never set at all.
+    """
+
+    def setUp(self):
+        import live
+        self.live = live
+        self.reg = MappingRegistry()
+        for m in load_tree(support.MAPPINGS, production_only=False):
+            self.reg.add(m)
+        self.profile = self.reg.resolve(AllCapabilities(), config={})
+        self.db = os.path.join(tempfile.mkdtemp(), "rec.db")
+
+    def _read(self):
+        con = sqlite3.connect(self.db)
+        try:
+            runs = con.execute(
+                "SELECT id, mapping_set FROM runs ORDER BY id"
+            ).fetchall()
+            rm = con.execute(
+                "SELECT run_id, count(*) FROM run_mappings GROUP BY run_id"
+            ).fetchall()
+        finally:
+            con.close()
+
+        return runs, dict(rm)
+
+    def test_run_one_records_its_mapping_set(self):
+        rec = self.live.Recorder(self.db)
+        rec.set_metadata(self.profile)
+        rec.open()
+        rec.start_run("V", "gw", "DDE", 0x12)
+        time.sleep(0.2)
+        rec.close()
+
+        runs, rm = self._read()
+
+        self.assertEqual(runs[0][0], 1)
+        self.assertTrue(runs[0][1], "run 1 has an empty mapping_set")
+        self.assertIn("sae-obd-engine@", runs[0][1])
+        self.assertGreater(rm.get(1, 0), 0, "run 1 has no run_mappings rows")
+
+    def test_every_run_carries_it_not_just_the_later_ones(self):
+        """
+        The old bug was invisible from run 2 onward. Assert across a
+        sequence, the way a drive with mode switches produces one.
+        """
+        rec = self.live.Recorder(self.db)
+        rec.set_metadata(self.profile)
+        rec.open()
+
+        for mode in ("normal", "debug", "long"):
+            rec.start_run("V", "gw", "DDE", 0x12, mode)
+            time.sleep(0.15)
+
+        rec.close()
+
+        runs, rm = self._read()
+
+        self.assertEqual(len(runs), 3)
+
+        for run_id, mapping_set in runs:
+            with self.subTest(run=run_id):
+                self.assertTrue(mapping_set, f"run {run_id} lost provenance")
+                self.assertGreater(rm.get(run_id, 0), 0)
+
+    def test_provenance_is_snapshot_when_the_run_opens(self):
+        """
+        Not looked up later by the writer thread. Metadata replaced after
+        the run is enqueued must not change what that run recorded -
+        otherwise the value depends on thread timing.
+        """
+        rec = self.live.Recorder(self.db)
+        rec.set_metadata(self.profile)
+        rec.open()
+        rec.start_run("V", "gw", "DDE", 0x12)
+        #: Immediately swap it for something else, before the writer runs.
+        rec.set_metadata(
+            MappingRegistry().resolve(AllCapabilities(), config={})
+        )
+        time.sleep(0.3)
+        rec.close()
+
+        runs, _ = self._read()
+
+        self.assertIn("sae-obd-engine@", runs[0][1])
+
+    def test_opening_a_run_with_no_metadata_says_so(self):
+        """
+        It stays permitted - a recorder can legitimately be used without
+        a profile - but it must not be silent, because a run with no
+        provenance looks healthy until someone tries to attribute the
+        data months later.
+        """
+        import contextlib
+        import io
+
+        rec = self.live.Recorder(self.db)
+        rec.open()
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            rec.start_run("V", "gw", "DDE", 0x12)
+
+        time.sleep(0.2)
+        rec.close()
+
+        self.assertIn("NO mapping provenance", out.getvalue())
+
+
+class PollLoopSetsMetadataFirst(unittest.TestCase):
+    """
+    The ordering invariant inside `poll_loop`, asserted structurally.
+
+    The Recorder tests above cover the recorder. They cannot cover this:
+    the bug was that `poll_loop` called `start_run()` before
+    `set_metadata()`, and reaching that line needs a gateway, an ECU scan
+    and a resolved profile. The demo path had the two the right way
+    round, which is exactly why every existing test passed while the car
+    path shipped empty provenance for weeks.
+
+    So this reads the source. That is unusual and worth justifying: the
+    invariant is real, it is cheap to state here, and the alternative is
+    either no coverage at all or a fake vehicle stack built to assert one
+    line of ordering.
+    """
+
+    def _calls_in(self, function_name):
+        """Recorder method names called in `function_name`, in order."""
+        import ast
+
+        source = pathlib.Path(
+            os.path.join(support.ROOT, "live.py")
+        ).read_text()
+
+        tree = ast.parse(source)
+        func = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == function_name
+        )
+
+        return [
+            node.func.attr
+            for node in ast.walk(func)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "rec"
+        ]
+
+    def test_the_car_path_sets_metadata_before_opening_a_run(self):
+        calls = self._calls_in("poll_loop")
+
+        self.assertIn("set_metadata", calls)
+        self.assertIn("start_run", calls)
+        self.assertLess(
+            calls.index("set_metadata"), calls.index("start_run"),
+            "poll_loop opens a run before it knows what it is recording; "
+            "that run's mapping_set will be empty",
+        )
+
+    def test_the_demo_path_does_too(self):
+        calls = self._calls_in("demo_loop")
+
+        self.assertLess(
+            calls.index("set_metadata"), calls.index("start_run")
+        )
 
 
 class VersionFlowsToTheLake(unittest.TestCase):

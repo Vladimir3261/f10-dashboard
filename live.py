@@ -885,10 +885,37 @@ class Recorder:
         when the run opened. None means unknown and is stored as NULL -
         never guessed.
         """
+        #
+        # The provenance is SNAPSHOT here, on the calling thread, and
+        # travels in the payload. It used to be looked up by the writer
+        # thread when it happened to pop this message - a read of mutable
+        # shared state at an arbitrary later time, which is a race even
+        # when the call order is right. Now the writer only writes what
+        # it was handed.
+        #
+        manifest = (
+            self.meta_source.mapping_manifest()
+            if self.meta_source is not None else []
+        )
+        mapping_set = (
+            self.meta_source.mapping_set(self.extra_versions)
+            if self.meta_source is not None else ""
+        )
+
+        if not mapping_set:
+            #
+            # Loud, because silence is exactly how this survived: a run
+            # with no provenance looks identical to a healthy one until
+            # someone tries to attribute the data months later.
+            #
+            print("[!] opening a run with NO mapping provenance - "
+                  "set_metadata() must be called first", flush=True)
+
         self.q.put((
             "run",
             (time.time(), vin, gateway, ecu, ecu_addr, mode,
-             None if clock_synced is None else int(bool(clock_synced))),
+             None if clock_synced is None else int(bool(clock_synced)),
+             mapping_set, manifest),
         ))
 
     def error(self, request_id: str, kind: str, message: str) -> None:
@@ -1039,17 +1066,8 @@ class Recorder:
                         (payload[0], self.run_id),
                     )
 
-                manifest = (
-                    self.meta_source.mapping_manifest()
-                    if self.meta_source is not None else []
-                )
-                mapping_set = (
-                    self.meta_source.mapping_set(self.extra_versions)
-                    if self.meta_source is not None else ""
-                )
-
                 (started, vin, gateway, ecu, ecu_addr, mode,
-                 clock_synced) = payload
+                 clock_synced, mapping_set, manifest) = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
@@ -1791,13 +1809,21 @@ def poll_loop(
             synced = clock_is_synced()
             anchor = clock_anchor()
 
-            if rec is not None:
-                rec.start_run(vin, ip, engine.label(), engine.addr,
-                              modes.current, synced)
-                rec.event("connect", f"engine ECU {engine.label()}")
-
-                if not synced:
-                    rec.event("clock", "run opened with an unsynced clock")
+            #
+            # The run is NOT opened here. It cannot be: the mapping
+            # provenance it must record does not exist until the profile
+            # is resolved, forty lines below. Opening it here recorded
+            # every first run of every drive with an empty `mapping_set`
+            # and no `run_mappings` rows - the exact link
+            # docs/DATA_VERSIONING.md relies on to tie a dataset to the
+            # revision that produced it.
+            #
+            # It went unnoticed for weeks because fragmentation masked
+            # it: while a drive split into 4-6 runs, only the first lost
+            # its provenance and the rest carried it. Fixing the
+            # fragmentation made every drive one run, and the loss went
+            # from ~18% to 100%.
+            #
 
             #
             # Confirm any proprietary SGBD variants by PROBE, never by
@@ -1840,8 +1866,19 @@ def poll_loop(
             if not profile.requests:
                 raise HsfzError("ECU reports no usable PIDs")
 
+            #
+            # Metadata first, THEN the run: `start_run` snapshots the
+            # provenance at call time, so a run opened before the profile
+            # exists would record none.
+            #
             if rec is not None:
                 rec.set_metadata(profile, [modes.table.fingerprint()])
+                rec.start_run(vin, ip, engine.label(), engine.addr,
+                              modes.current, synced)
+                rec.event("connect", f"engine ECU {engine.label()}")
+
+                if not synced:
+                    rec.event("clock", "run opened with an unsynced clock")
 
             session = ObdSession(client, profile.obd_pid_lengths())
             plan = PollingPlan(
