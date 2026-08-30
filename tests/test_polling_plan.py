@@ -108,56 +108,106 @@ class TestGrouping(unittest.TestCase):
         self.assertEqual(reader.calls, [[0x0C]])
 
 
-class TestFastSlowCompatibility(unittest.TestCase):
-    def test_class_membership_matches_the_historical_table(self):
-        _, plan = obd_profile()
-        counts = plan.counts()
+class TestObdPollingTiers(unittest.TestCase):
+    """
+    The four tiers of OBD mapping v2.
 
-        self.assertEqual(counts, {"fast": 11, "slow": 13})
+    v1 had two cycle-based classes (`fast` every cycle, `slow` every Nth)
+    inherited from the hand-written dashboard. v2 replaced them with
+    wall-clock tiers chosen per channel, because the census showed the
+    11 fast PIDs were 83% of stored rows at 0.1-3.8% distinct values.
 
-    def test_fast_runs_every_cycle(self):
-        _, plan = obd_profile()
-        fast = {r.id for r in plan.by_class("fast")}
+    These tests assert the tiers exist and behave; the point of the
+    change - that far fewer requests are sent - is asserted in
+    tests/test_drive_modes.py against the actual schedule.
+    """
+
+    @staticmethod
+    def declared_plan():
+        """
+        A plan on the rates the mapping declares.
+
+        `obd_profile()` forces `slow` back to a cycle-based class the way
+        `--slow-every` used to; since v2 that flag defaults to unset, so
+        these tests must not inherit it.
+        """
+        registry = MappingRegistry([load_file(support.OBD_MAPPING)])
+        profile = registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+
+        return PollingPlan(
+            profile.requests, resolve_classes(registry.polling_classes())
+        )
+
+    def test_every_request_is_in_one_of_the_four_tiers(self):
+        plan = self.declared_plan()
+
+        self.assertEqual(
+            plan.counts(),
+            {"motion": 4, "context": 7, "slow": 8, "rare": 5},
+        )
+
+    def test_motion_runs_every_cycle_at_the_loop_rate(self):
+        """10 Hz against a 10 Hz loop means every cycle."""
+        plan = self.declared_plan()
+        motion = {r.id for r in plan.by_class("motion")}
+        now = 1000.0
 
         for cycle in range(0, 25):
-            due = {r.id for r in plan.due(cycle)}
+            due = {r.id for r in plan.due(cycle, now)}
 
-            self.assertTrue(fast <= due, f"fast request missing at cycle {cycle}")
+            self.assertTrue(
+                motion <= due, f"motion request missing at cycle {cycle}"
+            )
+            now += 0.1
 
-    def test_slow_runs_every_nth_cycle(self):
-        for slow_every in (1, 2, 5, 10, 30):
-            with self.subTest(slow_every=slow_every):
-                _, plan = obd_profile(slow_every)
-                slow = {r.id for r in plan.by_class("slow")}
+    def test_the_slower_tiers_wait_out_their_period(self):
+        plan = self.declared_plan()
+        start = 1000.0
 
-                for cycle in range(0, 60):
-                    due = {r.id for r in plan.due(cycle)}
-                    expected = cycle % slow_every == 0
+        #: Everything is due the first time it is asked for.
+        self.assertEqual(len(plan.due(0, start)), 24)
 
-                    self.assertEqual(
-                        slow <= due, expected,
-                        f"slow_every={slow_every} cycle={cycle}",
-                    )
+        #: One second later only the 10 Hz tier is.
+        for i in range(1, 11):
+            due = plan.due(i, start + i * 0.1)
 
-    def test_cycle_zero_reads_everything(self):
-        _, plan = obd_profile()
+            self.assertEqual(
+                [r.polling_class for r in due], ["motion"] * 4, f"cycle {i}"
+            )
 
-        self.assertEqual(len(plan.due(0)), 24)
-        self.assertEqual(len(plan.due(1)), 11)
+        #: At ten seconds context and slow come round again, but not rare.
+        due = {r.polling_class for r in plan.due(100, start + 10.0)}
 
-    def test_due_order_is_fast_then_slow(self):
+        self.assertEqual(due, {"motion", "context", "slow"})
+
+        #: At sixty, everything.
+        due = {r.polling_class for r in plan.due(600, start + 60.0)}
+
+        self.assertEqual(due, {"motion", "context", "slow", "rare"})
+
+    def test_due_order_is_by_tier_then_declaration(self):
         """The OBD session batches in list order; keep it deterministic."""
-        _, plan = obd_profile()
-        due = plan.due(0)
-        classes = [r.polling_class for r in due]
+        plan = self.declared_plan()
+        due = plan.due(0, 1000.0)
 
-        self.assertEqual(classes, ["fast"] * 11 + ["slow"] * 13)
+        self.assertEqual(
+            [r.polling_class for r in due],
+            ["motion"] * 4 + ["context"] * 7 + ["slow"] * 8 + ["rare"] * 5,
+        )
         self.assertEqual(due[0].id, "obd.mode01.0C")
 
-    def test_cli_slow_every_overrides_the_mapping_file(self):
+    def test_cli_slow_every_still_overrides_the_mapping_file(self):
+        """
+        `--slow-every` is no longer the default path, but it must keep
+        working - it is how an older run's cadence gets reproduced.
+        """
         registry = MappingRegistry([load_file(support.OBD_MAPPING)])
         declared = {c.name: c for c in registry.polling_classes()}
 
+        self.assertEqual(declared["slow"].kind, "seconds")
         self.assertEqual(declared["slow"].value, 10.0)
 
         classes = resolve_classes(
@@ -165,6 +215,7 @@ class TestFastSlowCompatibility(unittest.TestCase):
             {"slow": PollingClassDef("slow", "cycles", 3.0, 1)},
         )
 
+        self.assertEqual(classes["slow"].kind, "cycles")
         self.assertEqual(classes["slow"].value, 3.0)
 
 

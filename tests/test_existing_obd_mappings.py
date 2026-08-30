@@ -113,9 +113,16 @@ class TestEveryLegacyPidIsMapped(ObdRegressionCase):
             self.assertIn(pid, mapped, f"PID 0x{pid:02X} ({key}) is missing")
 
     def test_no_extra_channels_were_introduced(self):
+        keys = self.profile.keys()
         expected = ["boost"] + [row[1] for row in LEGACY_PIDS] + ["fuel_l"]
 
-        self.assertEqual(self.profile.keys(), expected)
+        #: Compared as a set: v2 regrouped the requests by polling tier,
+        #: which reorders the dashboard's channel list but adds and
+        #: removes nothing. The two computed channels DO have fixed
+        #: positions (`position: first` / `last`), so those are checked.
+        self.assertEqual(sorted(keys), sorted(expected))
+        self.assertEqual(keys[0], "boost")
+        self.assertEqual(keys[-1], "fuel_l")
 
     def test_key_is_bound_to_the_same_pid(self):
         for pid, key, *_ in LEGACY_PIDS:
@@ -232,44 +239,98 @@ class TestMetadataIsUnchanged(ObdRegressionCase):
             )
 
 
-class TestPollingClassesAreUnchanged(ObdRegressionCase):
-    def test_each_pid_kept_its_fast_slow_class(self):
-        for pid, key, _l, _u, _n, _d, _dig, fast, *_ in LEGACY_PIDS:
-            with self.subTest(key=key):
-                request = self.profile.request_for_signal(key)
+#: Where each channel sits in OBD mapping v2 (2026-08-30).
+#:
+#: The `fast` flag in LEGACY_PIDS above records where it sat in v1 and is
+#: deliberately left alone - that table is the frozen historical
+#: reference. This one is the current intent, and the difference between
+#: them IS the change: eleven channels were being read at 10 Hz because
+#: the original hand-written dashboard read them at 10 Hz, not because
+#: anything about them moves that fast.
+#:
+#: `map` is the one channel kept fast for a display reason rather than a
+#: physical one: the derived `boost` (map - baro) is the Drive view's
+#: hero gauge, and at 0.1 Hz it reads as a broken instrument.
+V2_TIERS = {
+    "rpm": "motion", "speed": "motion", "map": "motion", "pedal": "motion",
 
+    "load": "context", "throttle": "context", "maf": "context",
+    "rail": "context", "torque": "context", "relthr": "context",
+    "lambda": "context",
+
+    "coolant": "slow", "oil": "slow", "iat": "slow", "voltage": "slow",
+    "fuelrate": "slow", "cattemp": "slow", "egr": "slow", "egrerr": "slow",
+
+    "ambient": "rare", "baro": "rare", "fuel": "rare", "runtime": "rare",
+    "distance": "rare",
+}
+
+
+class TestPollingTiers(ObdRegressionCase):
+    def test_every_legacy_channel_has_a_v2_tier(self):
+        """No channel may fall through the re-tiering unassigned."""
+        self.assertEqual(
+            sorted(V2_TIERS), sorted(row[1] for row in LEGACY_PIDS)
+        )
+
+    def test_each_pid_is_in_its_declared_tier(self):
+        for key, tier in V2_TIERS.items():
+            with self.subTest(key=key):
                 self.assertEqual(
-                    request.polling_class, "fast" if fast else "slow"
+                    self.profile.request_for_signal(key).polling_class, tier
                 )
 
-    def test_the_due_set_matches_the_old_todo_list(self):
+    def test_the_fast_tier_shrank_and_nothing_got_faster(self):
         """
-        The old loop built `todo = [fast pids] + [slow pids]` and handed
-        it to ObdSession.read in that order. Batching depends on order,
-        so reproduce it exactly.
+        The direction of the change, asserted as a property rather than a
+        list: v2 may move a channel down a tier, never up. `map` is the
+        only channel allowed to stay in the fast tier.
         """
-        slow_every = 10
-        classes = resolve_classes(
-            self.registry.polling_classes(),
-            {"slow": type(self.registry.polling_classes()[0])(
-                "slow", "cycles", float(slow_every), 1
-            )},
+        rank = {"motion": 0, "context": 1, "slow": 2, "rare": 3}
+        was_fast = [row[1] for row in LEGACY_PIDS if row[7]]
+
+        for key in was_fast:
+            with self.subTest(key=key):
+                self.assertGreaterEqual(
+                    rank[V2_TIERS[key]], rank["motion"]
+                )
+
+        for key in (row[1] for row in LEGACY_PIDS if not row[7]):
+            with self.subTest(key=key):
+                self.assertGreaterEqual(
+                    rank[V2_TIERS[key]], rank["slow"],
+                    f"{key} was slow in v1 and must not have become faster",
+                )
+
+        self.assertEqual(
+            [k for k in was_fast if V2_TIERS[k] == "motion"],
+            ["rpm", "map", "speed", "pedal"],
         )
-        plan = PollingPlan(self.profile.requests, classes)
 
-        legacy_fast = [row[0] for row in LEGACY_PIDS if row[7]]
-        legacy_slow = [row[0] for row in LEGACY_PIDS if not row[7]]
-
-        for cycle in range(0, 30):
-            todo = list(legacy_fast)
-
-            if cycle % slow_every == 0:
-                todo += legacy_slow
-
-            self.assertEqual(
-                [r.pid for r in plan.due(cycle)], todo,
-                f"cycle {cycle}",
+    def test_the_plan_sends_far_fewer_requests_per_minute(self):
+        """
+        The whole point, in one number. Counted over a simulated minute
+        at the 10 Hz loop rate.
+        """
+        plan = PollingPlan(
+            self.profile.requests, resolve_classes(
+                self.registry.polling_classes()
             )
+        )
+
+        sent = 0
+        now = 1000.0
+
+        for cycle in range(600):
+            sent += len(plan.due(cycle, now))
+            now += 0.1
+
+        #: v1 sent 11 every cycle plus 13 every 10th = 6600 + 780 = 7380.
+        legacy = 11 * 600 + 13 * 60
+
+        self.assertLess(sent, legacy / 2.5)
+        #: 4 motion x 600 cycles, plus the slower tiers a handful of times.
+        self.assertGreater(sent, 2400)
 
 
 class TestCapabilityGating(ObdRegressionCase):

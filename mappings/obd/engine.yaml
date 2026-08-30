@@ -2,12 +2,16 @@ schema_version: 1
 
 mapping:
   id: sae-obd-engine
-  version: "1"
+  version: "2"
   description: >
     Standard SAE OBD-II Mode 01 current-data telemetry for the engine ECU.
     Every request and formula here is the one this application has been
     polling against the vehicle; the refactor that introduced this file
     moved them out of Python without reinterpreting any of them.
+
+    v2 (2026-08-30) changes ONLY polling rates - no request, decode or
+    signal was added, removed or reinterpreted, so every value this file
+    produces is bit-identical to v1. See `polling_classes` below.
 
 source:
   type: obd_standard
@@ -39,21 +43,46 @@ defaults:
     service: 0x01
     target: discovered_engine
 
+# ---------------------------------------------------------------------
+# Sampling follows the PHYSICS of the channel, not one global loop rate.
 #
-# fast runs every poll-loop cycle; slow runs every Nth, where N is
-# --slow-every. Both are cycle-based for compatibility with the existing
-# CLI; the polling model also understands hz and seconds.
+# Until v2 twelve PIDs sat on `fast` (every cycle, 10 Hz) purely because
+# that is how the original hand-written dashboard polled. The census over
+# 2026-08-26..29 (1.73M rows) showed what that bought: those eleven-odd
+# channels were 83% of all storage while carrying 0.1-3.8% distinct
+# values. The information was in the slow channels; the volume was in the
+# fast ones.
 #
+# Nothing is lost by desynchronising them. Channels do not need a common
+# cadence to be correlated - ClickHouse joins on nearest timestamp
+# (ASOF JOIN), so `coolant` at 0.1 Hz and `rpm` at 10 Hz still line up.
+#
+#   motion   10 Hz    genuinely fast, and the basis of load context.
+#                     `map` is here not because it moves fast but because
+#                     the derived `boost` channel (map - baro) is the
+#                     Drive view's hero gauge; at 0.1 Hz it would read as
+#                     a broken instrument.
+#   context  1/10 s   real but slower-moving load context. Sampled often
+#                     enough to characterise a driving phase, not to
+#                     resolve a single transient.
+#   slow     1/10 s   thermal mass and electrics: minutes, not seconds.
+#   rare     1/60 s   weather and counters: hours, or monotonic.
+#
+# A drive mode scales all of these together at runtime; `normal` is
+# exactly what is declared here. See bmwdiag/mapping/modes.py.
+# ---------------------------------------------------------------------
 polling_classes:
-  fast: {every: 1, priority: 0}
-  slow: {every: 10, priority: 1}
+  motion:  {hz: 10, priority: 0}
+  context: {seconds: 10, priority: 1}
+  slow:    {seconds: 10, priority: 2}
+  rare:    {seconds: 60, priority: 3}
 
 requests:
-  # -- polled every cycle ---------------------------------------
+  # -- motion: 10 Hz ---------------------------------------------
 
   obd.mode01.0C:
     pid: 0x0C
-    polling: {class: fast}
+    polling: {class: motion}
     response: {data_length: 2}
     signals:
       rpm:
@@ -64,7 +93,7 @@ requests:
 
   obd.mode01.0B:
     pid: 0x0B
-    polling: {class: fast}
+    polling: {class: motion}
     response: {data_length: 1}
     signals:
       map:
@@ -73,9 +102,33 @@ requests:
         display: {digits: 0, min: 0, max: 300}
         decode: {type: uint8}
 
+  obd.mode01.0D:
+    pid: 0x0D
+    polling: {class: motion}
+    response: {data_length: 1}
+    signals:
+      speed:
+        label: Vehicle speed
+        unit: km/h
+        display: {digits: 0, min: 0, max: 250}
+        decode: {type: uint8}
+
+  obd.mode01.49:
+    pid: 0x49
+    polling: {class: motion}
+    response: {data_length: 1}
+    signals:
+      pedal:
+        label: Accelerator pedal
+        unit: %
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  # -- context: every 10 s ---------------------------------------
+
   obd.mode01.04:
     pid: 0x04
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 1}
     signals:
       load:
@@ -86,7 +139,7 @@ requests:
 
   obd.mode01.11:
     pid: 0x11
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 1}
     signals:
       throttle:
@@ -95,20 +148,9 @@ requests:
         display: {digits: 0, min: 0, max: 100}
         decode: {type: uint8, scale: 100.0, divide: 255.0}
 
-  obd.mode01.0D:
-    pid: 0x0D
-    polling: {class: fast}
-    response: {data_length: 1}
-    signals:
-      speed:
-        label: Vehicle speed
-        unit: km/h
-        display: {digits: 0, min: 0, max: 250}
-        decode: {type: uint8}
-
   obd.mode01.10:
     pid: 0x10
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 2}
     signals:
       maf:
@@ -119,7 +161,7 @@ requests:
 
   obd.mode01.23:
     pid: 0x23
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 2}
     signals:
       rail:
@@ -130,7 +172,7 @@ requests:
 
   obd.mode01.62:
     pid: 0x62
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 1}
     signals:
       torque:
@@ -139,20 +181,9 @@ requests:
         display: {digits: 0, min: -25, max: 100}
         decode: {type: uint8, add: -125.0}
 
-  obd.mode01.49:
-    pid: 0x49
-    polling: {class: fast}
-    response: {data_length: 1}
-    signals:
-      pedal:
-        label: Accelerator pedal
-        unit: %
-        display: {digits: 1, min: 0, max: 100}
-        decode: {type: uint8, scale: 100.0, divide: 255.0}
-
   obd.mode01.45:
     pid: 0x45
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 1}
     signals:
       relthr:
@@ -163,7 +194,7 @@ requests:
 
   obd.mode01.24:
     pid: 0x24
-    polling: {class: fast}
+    polling: {class: context}
     response: {data_length: 4}
     signals:
       lambda:
@@ -172,7 +203,7 @@ requests:
         display: {digits: 3, min: 0.5, max: 2.0}
         decode: {type: uint16_be, offset: 0, divide: 32768.0}
 
-  # -- polled every --slow-every cycles -------------------------
+  # -- slow: every 10 s ------------------------------------------
 
   obd.mode01.05:
     pid: 0x05
@@ -207,17 +238,6 @@ requests:
         display: {digits: 0, min: -40, max: 120}
         decode: {type: uint8, add: -40.0}
 
-  obd.mode01.46:
-    pid: 0x46
-    polling: {class: slow}
-    response: {data_length: 1}
-    signals:
-      ambient:
-        label: Ambient temp
-        unit: °C
-        display: {digits: 0, min: -40, max: 60}
-        decode: {type: uint8, add: -40.0}
-
   obd.mode01.42:
     pid: 0x42
     polling: {class: slow}
@@ -229,28 +249,6 @@ requests:
         display: {digits: 2, min: 8, max: 16}
         decode: {type: uint16_be, divide: 1000.0}
 
-  obd.mode01.33:
-    pid: 0x33
-    polling: {class: slow}
-    response: {data_length: 1}
-    signals:
-      baro:
-        label: Barometric
-        unit: kPa
-        display: {digits: 0, min: 0, max: 120}
-        decode: {type: uint8}
-
-  obd.mode01.2F:
-    pid: 0x2F
-    polling: {class: slow}
-    response: {data_length: 1}
-    signals:
-      fuel:
-        label: Fuel level
-        unit: %
-        display: {digits: 0, min: 0, max: 100}
-        decode: {type: uint8, scale: 100.0, divide: 255.0}
-
   obd.mode01.5E:
     pid: 0x5E
     polling: {class: slow}
@@ -261,17 +259,6 @@ requests:
         unit: L/h
         display: {digits: 1, min: 0, max: 60}
         decode: {type: uint16_be, divide: 20.0}
-
-  obd.mode01.1F:
-    pid: 0x1F
-    polling: {class: slow}
-    response: {data_length: 2}
-    signals:
-      runtime:
-        label: Run time
-        unit: s
-        display: {digits: 0, min: 0, max: 7200}
-        decode: {type: uint16_be}
 
   obd.mode01.3C:
     pid: 0x3C
@@ -306,9 +293,55 @@ requests:
         display: {digits: 1, min: -100, max: 100}
         decode: {type: uint8, pre_add: -128.0, scale: 100.0, divide: 128.0}
 
+  # -- rare: every 60 s ------------------------------------------
+
+  obd.mode01.46:
+    pid: 0x46
+    polling: {class: rare}
+    response: {data_length: 1}
+    signals:
+      ambient:
+        label: Ambient temp
+        unit: °C
+        display: {digits: 0, min: -40, max: 60}
+        decode: {type: uint8, add: -40.0}
+
+  obd.mode01.33:
+    pid: 0x33
+    polling: {class: rare}
+    response: {data_length: 1}
+    signals:
+      baro:
+        label: Barometric
+        unit: kPa
+        display: {digits: 0, min: 0, max: 120}
+        decode: {type: uint8}
+
+  obd.mode01.2F:
+    pid: 0x2F
+    polling: {class: rare}
+    response: {data_length: 1}
+    signals:
+      fuel:
+        label: Fuel level
+        unit: %
+        display: {digits: 0, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}
+
+  obd.mode01.1F:
+    pid: 0x1F
+    polling: {class: rare}
+    response: {data_length: 2}
+    signals:
+      runtime:
+        label: Run time
+        unit: s
+        display: {digits: 0, min: 0, max: 7200}
+        decode: {type: uint16_be}
+
   obd.mode01.31:
     pid: 0x31
-    polling: {class: slow}
+    polling: {class: rare}
     response: {data_length: 2}
     signals:
       distance:
@@ -335,8 +368,8 @@ derived:
       reference: baro
     fallback:
       #
-      # Barometric pressure is a slow channel, so boost has to be able to
-      # run before the first reading arrives.
+      # Barometric pressure is a rare channel (once a minute), so boost
+      # has to be able to run before the first reading arrives.
       #
       reference: 100.0
     divide: 100.0

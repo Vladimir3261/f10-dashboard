@@ -51,6 +51,7 @@ from bmwdiag.mapping import (
     load_tree,
 )
 from bmwdiag.mapping.model import PollingClassDef
+from bmwdiag.mapping.modes import DEFAULT_MODE, DRIVE_MODES, get_mode, mode_names
 from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
 from bmwdiag.obd import (
@@ -159,18 +160,36 @@ def load_extra(registry: MappingRegistry, paths: Sequence[str]) -> MappingRegist
     return registry
 
 
+def describe_class(cls: PollingClassDef) -> str:
+    """A polling class as a human-readable rate, for startup logging."""
+    if cls.kind == "hz":
+        return f"{cls.value:g} Hz"
+
+    if cls.kind == "seconds":
+        return f"1/{cls.value:g}s"
+
+    return f"every {int(cls.value)} cycles"
+
+
 def polling_classes(registry: MappingRegistry, args) -> Dict[str, PollingClassDef]:
     """
     Resolve polling classes, letting the CLI have the last word.
 
-    `--slow-every` is defined in poll-loop cycles, so `slow` stays a
-    cycle-based class. Mappings may declare hz- or seconds-based classes
-    for requests that should not be tied to the loop cadence.
+    `--slow-every` is defined in poll-loop cycles and, when given, forces
+    `slow` back to a cycle-based class. It defaults to unset: since v2 of
+    the OBD mapping the rates are wall-clock and declared in the mapping
+    files, which is where they belong - a rate is a property of what the
+    channel measures, not of the loop that happens to read it. The flag
+    stays for ad-hoc experiments and for reproducing older runs.
     """
-    return resolve_classes(
-        registry.polling_classes(),
-        {"slow": PollingClassDef("slow", "cycles", float(args.slow_every), 1)},
-    )
+    overrides: Dict[str, PollingClassDef] = {}
+
+    if args.slow_every is not None:
+        overrides["slow"] = PollingClassDef(
+            "slow", "cycles", float(args.slow_every), 2
+        )
+
+    return resolve_classes(registry.polling_classes(), overrides)
 
 
 def numeric_only(
@@ -638,7 +657,15 @@ CREATE TABLE IF NOT EXISTS runs (
     ecu_addr    INTEGER,
     -- Compact fingerprint of the mapping set that decoded this run:
     -- "id@version,..." sorted. The per-file detail is in run_mappings.
-    mapping_set TEXT
+    mapping_set TEXT,
+    -- The drive mode in force for this run. A run has exactly ONE mode:
+    -- switching mode ends the current run and starts a new one, so a
+    -- dataset can never silently mix rates. Mode is a confound in every
+    -- longitudinal comparison this project exists to make, and making it
+    -- a property of the session is the only encoding where no query can
+    -- forget it. Drives that span a switch are reassembled by time
+    -- contiguity, which sessions already support.
+    mode        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS params (
@@ -731,8 +758,14 @@ class Recorder:
 
     # -- called from the poll thread --------------------------------
 
-    def start_run(self, vin, gateway, ecu, ecu_addr) -> None:
-        self.q.put(("run", (time.time(), vin, gateway, ecu, ecu_addr)))
+    def start_run(self, vin, gateway, ecu, ecu_addr, mode="normal") -> None:
+        """
+        Open a run. Any run already open is closed first.
+
+        A mode switch calls this again with the new mode, which is what
+        keeps one run == one sampling configuration.
+        """
+        self.q.put(("run", (time.time(), vin, gateway, ecu, ecu_addr, mode)))
 
     def error(self, request_id: str, kind: str, message: str) -> None:
         """Record one per-request fault. Dropped silently if the queue is
@@ -788,6 +821,9 @@ class Recorder:
 
         if "mapping_ver" not in cols("params"):
             self.db.execute("ALTER TABLE params ADD COLUMN mapping_ver TEXT")
+
+        if "mode" not in cols("runs"):
+            self.db.execute("ALTER TABLE runs ADD COLUMN mode TEXT")
 
         self.db.commit()
 
@@ -865,6 +901,15 @@ class Recorder:
             if kind == "run":
                 self._flush(pending)
 
+                #: Close the previous run before opening the next, so a
+                #: mode switch leaves a properly bounded session rather
+                #: than one that appears to run until the process exits.
+                if self.run_id is not None:
+                    self.db.execute(
+                        "UPDATE runs SET ended_at = ? WHERE id = ?",
+                        (payload[0], self.run_id),
+                    )
+
                 manifest = (
                     self.meta_source.mapping_manifest()
                     if self.meta_source is not None else []
@@ -874,11 +919,13 @@ class Recorder:
                     if self.meta_source is not None else ""
                 )
 
+                started, vin, gateway, ecu, ecu_addr, mode = payload
+
                 cur = self.db.execute(
                     "INSERT INTO runs"
-                    "(started_at, vin, gateway, ecu, ecu_addr, mapping_set) "
-                    "VALUES (?,?,?,?,?,?)",
-                    payload + (mapping_set,),
+                    "(started_at, vin, gateway, ecu, ecu_addr, mapping_set, mode) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (started, vin, gateway, ecu, ecu_addr, mapping_set, mode),
                 )
                 self.run_id = cur.lastrowid
 
@@ -929,6 +976,40 @@ class Recorder:
 # ------------------------------------------------------------------ state
 
 
+class ModeControl:
+    """
+    The requested drive mode, handed from the HTTP thread to the poll loop.
+
+    The HTTP thread only ever *requests* a mode; the poll loop applies it
+    between cycles and nothing else touches the plan. That keeps the
+    scheduler single-threaded - no lock around `due()`, no chance of a
+    mode changing halfway through building a cycle's request list.
+
+    A request survives a reconnect: `current` is what the loop last
+    applied, so a plan rebuilt after a dropped link comes back in the
+    mode the operator chose rather than the one the process started in.
+    """
+
+    def __init__(self, name: str = DEFAULT_MODE):
+        self._lock = threading.Lock()
+        self.current = name
+        self._pending: Optional[str] = None
+
+    def request(self, name: str) -> None:
+        """Validates eagerly, so a bad name is a 400 and never reaches the loop."""
+        get_mode(name)
+
+        with self._lock:
+            self._pending = name
+
+    def take(self) -> Optional[str]:
+        """The pending change, if any, clearing it. Called only by the loop."""
+        with self._lock:
+            pending, self._pending = self._pending, None
+
+        return pending
+
+
 class Telemetry:
     def __init__(self):
         self.lock = threading.Lock()
@@ -946,6 +1027,10 @@ class Telemetry:
             "latency_ms": 0.0,
             "ts": 0.0,
             "values": {},
+            #: Drive mode in force, and whether a duty-cycled mode is
+            #: currently in its awake or asleep window.
+            "mode": DEFAULT_MODE,
+            "duty": "continuous",
         }
         self.meta: List[Dict] = []
         self.meta_version = 0
@@ -1197,7 +1282,9 @@ def poll_loop(
     args,
     rec: Optional["Recorder"] = None,
     registry: Optional[MappingRegistry] = None,
+    modes: Optional[ModeControl] = None,
 ) -> None:
+    modes = modes if modes is not None else ModeControl(args.mode)
     registry = registry or load_registry(args.mappings)
     score_pids = registry.obd_pids()
     local_ip = args.local_ip or find_link_local_ip()
@@ -1261,7 +1348,8 @@ def poll_loop(
             )
 
             if rec is not None:
-                rec.start_run(vin, ip, engine.label(), engine.addr)
+                rec.start_run(vin, ip, engine.label(), engine.addr,
+                              modes.current)
                 rec.event("connect", f"engine ECU {engine.label()}")
 
             #
@@ -1309,7 +1397,11 @@ def poll_loop(
                 rec.set_metadata(profile)
 
             session = ObdSession(client, profile.obd_pid_lengths())
-            plan = PollingPlan(profile.requests, polling_classes(registry, args))
+            plan = PollingPlan(
+                profile.requests,
+                polling_classes(registry, args),
+                get_mode(modes.current),
+            )
             #
             # Record every per-request fault. Until this was wired the
             # executor's on_error hook went nowhere, so a request that timed
@@ -1334,10 +1426,17 @@ def poll_loop(
             counts = plan.counts()
 
             print(
-                f"[+] polling {counts.get('fast', 0)} fast + "
-                f"{counts.get('slow', 0)} slow PIDs: "
-                + ", ".join(profile.signal_keys())
+                "[+] polling "
+                + ", ".join(
+                    f"{n}x {name} @ {describe_class(plan.classes[name])}"
+                    for name, n in sorted(
+                        counts.items(),
+                        key=lambda kv: plan.classes[kv[0]].priority,
+                    )
+                )
+                + f" [mode: {modes.current}]"
             )
+            print(f"[+] channels:  {', '.join(profile.signal_keys())}")
 
             values: Dict[str, float] = {}
             cycle = 0
@@ -1350,6 +1449,25 @@ def poll_loop(
 
             while True:
                 started = time.monotonic()
+
+                #
+                # Apply a mode switch between cycles, never during one.
+                # The new mode starts a NEW run: one run has exactly one
+                # sampling configuration, so no analysis can mix rates
+                # without noticing. The drive is still reassembled from
+                # consecutive sessions when that is what you want.
+                #
+                wanted = modes.take()
+
+                if wanted is not None and wanted != modes.current:
+                    plan.set_mode(get_mode(wanted))
+                    modes.current = wanted
+                    print(f"[+] drive mode -> {wanted}", flush=True)
+
+                    if rec is not None:
+                        rec.start_run(vin, ip, engine.label(), engine.addr,
+                                      wanted)
+                        rec.event("mode", f"drive mode -> {wanted}")
 
                 #
                 # The plan schedules requests, not channel names, so two
@@ -1381,6 +1499,8 @@ def poll_loop(
                     hz=round(hz, 1),
                     rows=rec.rows if rec else 0,
                     dropped=rec.dropped if rec else 0,
+                    mode=modes.current,
+                    duty=plan.duty_state(started),
                 )
 
                 cycle += 1
@@ -1419,7 +1539,12 @@ def demo_loop(
     args,
     rec: Optional["Recorder"] = None,
     registry: Optional[MappingRegistry] = None,
+    modes: Optional[ModeControl] = None,
 ) -> None:
+    #: The demo synthesises values rather than scheduling requests, so a
+    #: mode has nothing to scale here - it is accepted and reported so the
+    #: dashboard control behaves the same way without a car attached.
+    modes = modes if modes is not None else ModeControl(args.mode)
     registry = registry or load_registry(args.mappings)
 
     #
@@ -1444,11 +1569,20 @@ def demo_loop(
     )
 
     if rec is not None:
-        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12)
+        rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, modes.current)
 
     t0 = time.monotonic()
 
     while True:
+        wanted = modes.take()
+
+        if wanted is not None and wanted != modes.current:
+            modes.current = wanted
+
+            if rec is not None:
+                rec.start_run(DEMO_VIN, "127.0.0.1", "demo", 0x12, wanted)
+                rec.event("mode", f"drive mode -> {wanted}")
+
         t = time.monotonic() - t0
         drive = 0.5 + 0.5 * math.sin(t / 7.0)
         rpm = 780 + drive * 3200
@@ -1500,6 +1634,7 @@ def demo_loop(
             values=values, latency_ms=round(6 + drive * 4, 1), hz=10.0,
             rows=rec.rows if rec else 0,
             dropped=rec.dropped if rec else 0,
+            mode=modes.current,
         )
 
         time.sleep(1.0 / args.rate)
@@ -2589,6 +2724,7 @@ def make_handler(
     db_path: Optional[str],
     shares: Optional["ShareTokens"] = None,
     share_base_url: str = "",
+    modes: Optional["ModeControl"] = None,
 ):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -2864,6 +3000,22 @@ def make_handler(
                 self._body("application/json", payload)
                 return
 
+            if path == "/api/modes":
+                #: The catalogue the mode picker renders from, so the
+                #: page never hardcodes a list that can drift from the
+                #: runtime's.
+                self._body("application/json", json.dumps({
+                    "current": modes.current if modes else DEFAULT_MODE,
+                    "modes": [
+                        {"name": n,
+                         "description": DRIVE_MODES[n].description,
+                         "polls": DRIVE_MODES[n].polls,
+                         "duty": list(DRIVE_MODES[n].duty or ())}
+                        for n in mode_names()
+                    ],
+                }).encode())
+                return
+
             if path == "/api/snapshot":
                 self._body("application/json",
                            json.dumps(public_snapshot(tel.get())).encode())
@@ -2892,7 +3044,12 @@ def make_handler(
                 self.send_error(404)
                 return
 
-            if shares is None or path not in ("/api/share", "/api/share/revoke"):
+            allowed = {"/api/mode"}
+
+            if shares is not None:
+                allowed |= {"/api/share", "/api/share/revoke"}
+
+            if path not in allowed:
                 self.send_error(404)
                 return
 
@@ -2911,6 +3068,36 @@ def make_handler(
 
             if not isinstance(body, dict):
                 self._json_body({"error": "bad JSON body"}, 400)
+                return
+
+            if path == "/api/mode":
+                #
+                # Changing the poll rate is the one control the dashboard
+                # has over the car link, and it is still observational:
+                # every mode is a subset of the requests the mappings
+                # already declare, and `off` sends nothing at all. No
+                # mode can widen the service allowlist.
+                #
+                if modes is None:
+                    self._json_body({"error": "mode control unavailable"}, 503)
+                    return
+
+                name = body.get("mode")
+
+                if not isinstance(name, str):
+                    self._json_body({"error": "mode must be a string"}, 400)
+                    return
+
+                try:
+                    modes.request(name)
+                except MappingError as exc:
+                    self._json_body({"error": str(exc)}, 400)
+                    return
+
+                #: `requested`, not `current` - the poll loop applies it on
+                #: its next cycle, so the page must not claim it is already
+                #: in force.
+                self._json_body({"requested": name})
                 return
 
             if path == "/api/share/revoke":
@@ -2982,8 +3169,16 @@ def main() -> int:
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
                     help="target poll rate in Hz (default 10)")
-    ap.add_argument("--slow-every", type=int, default=10,
-                    help="read slow PIDs every Nth cycle (default 10)")
+    ap.add_argument("--slow-every", type=int, default=None,
+                    help="force the `slow` class back to every Nth loop "
+                         "cycle. Unset by default: rates are declared in "
+                         "the mapping files as wall-clock periods.")
+    ap.add_argument("--mode", default=DEFAULT_MODE, choices=sorted(DRIVE_MODES),
+                    help="drive mode - how hard to poll. off=connected but "
+                         "silent, long=motorway cruising, sampling=duty-"
+                         "cycled bursts, normal=the declared rates, "
+                         "debug=everything fast (default: %(default)s). "
+                         "Switchable at runtime from the dashboard.")
     ap.add_argument("--demo", action="store_true",
                     help="simulated data, no vehicle needed")
 
@@ -3048,9 +3243,11 @@ def main() -> int:
         rec = Recorder(args.db, chunk=args.db_chunk, interval=args.db_flush)
         rec.open()
 
+    modes = ModeControl(args.mode)
+
     worker = threading.Thread(
         target=demo_loop if args.demo else poll_loop,
-        args=(tel, args, rec, registry),
+        args=(tel, args, rec, registry, modes),
         daemon=True,
     )
     worker.start()
@@ -3064,6 +3261,7 @@ def main() -> int:
             None if args.no_db else args.db,
             shares,
             args.share_base_url,
+            modes,
         ),
     )
     server.daemon_threads = True
