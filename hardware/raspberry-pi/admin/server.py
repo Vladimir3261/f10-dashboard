@@ -1444,8 +1444,15 @@ PAGE = r"""<!doctype html>
       <div id="carsession"></div>
     </div>
 
+    <!-- Known from disk: true with the car absent, and the answer to
+         "did --extra-mappings work?" before a drive rather than after. -->
     <div class="card">
-      <h2>Mappings loaded</h2>
+      <h2>Loaded from disk</h2>
+      <div id="carloaded"></div>
+    </div>
+
+    <div class="card" id="cardactive">
+      <h2>Active on this ECU</h2>
       <div id="carmappings"></div>
     </div>
 
@@ -1678,6 +1685,46 @@ function render(s) {
 }
 
 /* ---------------------------------------------------- car link tab */
+/* Known from disk, with or without a car: which files loaded, which came
+   from --extra-mappings, and the rates they declare. */
+function renderLoaded(loaded, connected) {
+  const maps = loaded.mappings || [];
+
+  if (!maps.length) {
+    $("carloaded").innerHTML =
+      '<span class="sub">no mappings loaded</span>';
+    return;
+  }
+
+  const extra = maps.filter(m => m.extra).length;
+
+  $("carloaded").innerHTML =
+    `<div class="recmeta" style="margin-bottom:12px">`
+    + [`<b>${maps.length}</b> file${maps.length === 1 ? "" : "s"}`,
+       `<b>${extra}</b> via --extra-mappings`,
+       `<b>${loaded.channels || 0}</b> channels declared`,
+      ].map(x => `<span>${x}</span>`).join("")
+    + `</div>`
+    + maps.map(m => `
+      <div class="sess">
+        <span class="nm"><b>${escape_(m.id)}</b>
+          <span>v${m.version} · ${m.requests} request${m.requests === 1 ? "" : "s"}
+            · ${m.signals} channel${m.signals === 1 ? "" : "s"}
+            · ${escape_(m.ecu_family)} ${escape_(m.ecu_target)}</span></span>
+        ${m.extra ? '<span class="badge extra">--extra</span>' : ""}
+        ${m.verification === "verified" ? '<span class="tick yes">verified</span>'
+          : `<span class="badge rej">${escape_(m.verification)}</span>`}
+      </div>`).join("")
+    + `<table style="margin-top:14px"><thead><tr>
+         <th>class</th><th>every</th><th>requests</th></tr></thead><tbody>`
+    + (loaded.classes || []).map(c => `<tr>
+         <td class="k">${escape_(c.name)}</td>
+         <td>${c.period_s < 1 ? c.period_s.toFixed(1) : Math.round(c.period_s)}s
+             ${c.stagger ? " each" : ""}</td>
+         <td>${c.requests}</td></tr>`).join("")
+    + `</tbody></table>`;
+}
+
 /* Fetched only while its tab is open: a much bigger payload than the
    status poll, and nothing in it changes second to second. */
 let carLoaded = false;
@@ -1695,13 +1742,31 @@ async function loadCar(force) {
 }
 
 function renderCar(d) {
+  /* Split by what the car is needed for. Which mappings loaded and at
+     what rates is settled at boot; only the session facts - which ECU
+     answered, what capability filtering dropped, success rates - need a
+     link. Blanking everything made the panel unable to answer "did my
+     extra mappings load?", which is the question you have with the car
+     off, before the drive rather than after it. */
+  renderLoaded(d.loaded || {}, d.ready);
+
   if (!d.ready) {
     $("carsession").innerHTML =
-      `<div class="recwarn">${escape_(d.detail || "not connected")}</div>`;
-    for (const id of ["carmappings", "cardropped"]) $(id).innerHTML = "";
-    for (const id of ["carrequests", "carchannels"]) $(id).innerHTML = "";
+      `<div class="recwarn">${escape_(d.detail || "not connected")}</div>`
+      + `<p class="hint">The mapping set below is what this process would
+         poll once the car answers. Which ECU responds, what gets filtered
+         for this vehicle, and per-request success rates need the link.</p>`;
+    $("cardropped").innerHTML =
+      '<span class="sub">needs the car — filtering is decided against the '
+      + 'ECU that answers</span>';
+    $("carrequests").innerHTML = "";
+    $("carchannels").innerHTML = "";
+    //: "Active on this ECU" has no meaning without one.
+    $("cardactive").style.display = "none";
     return;
   }
+
+  $("cardactive").style.display = "";
 
   const s = d.session || {}, t = d.totals || {};
 

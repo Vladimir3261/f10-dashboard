@@ -1179,20 +1179,100 @@ class Diagnostics:
         with self._lock:
             self._state.update(kwargs)
 
-    def clear(self) -> None:
+    def clear(self, status: str = "") -> None:
+        """
+        Drop the car-dependent picture, keep what was loaded from disk.
+
+        A stale session reads as live and is worse than none. But the
+        mapping set is a property of how the process was started, not of
+        the link, so wiping it too would leave the panel unable to say
+        what it would poll once the car came back.
+        """
         with self._lock:
-            self._state = {}
+            keep = {
+                k: v for k, v in self._state.items()
+                if k in ("registry", "extra_ids")
+            }
+            keep["status"] = status
+            self._state = keep
 
     def _get(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._state)
+
+    def loaded(self) -> Dict[str, Any]:
+        """
+        What is known WITHOUT the car: which mapping files loaded, their
+        versions, which arrived via --extra-mappings, and the rates they
+        declare.
+
+        All of it is settled at boot, before any socket exists. Reporting
+        nothing until the link comes up made the panel unable to answer
+        "did my extra mappings actually load?" - which is precisely the
+        question you have in the driveway, with the car off, before you
+        find out on the motorway that you recorded 24 channels instead
+        of 47.
+        """
+        state = self._get()
+        registry = state.get("registry")
+
+        if registry is None:
+            return {"mappings": [], "classes": [], "channels": 0}
+
+        extra_ids = set(state.get("extra_ids") or ())
+        classes = {c.name: c for c in registry.polling_classes()}
+        members: Dict[str, int] = {}
+
+        for request in registry.requests:
+            members[request.polling_class] = members.get(
+                request.polling_class, 0
+            ) + 1
+
+        return {
+            "mappings": [{
+                "id": m.id,
+                "version": m.version,
+                "production": m.production,
+                "path": m.source_path,
+                "source_type": m.provenance.type,
+                "verification": m.verification.status,
+                "ecu_family": m.ecu.family,
+                "ecu_target": m.ecu.target.describe(),
+                "extra": m.id in extra_ids,
+                "requests": len(m.requests),
+                "signals": len(m.signals) + len(m.derived),
+            } for m in registry.mappings],
+            "classes": [{
+                "name": name,
+                #: The honest per-channel interval: a staggered class
+                #: fires one member per firing, so a member's own
+                #: refresh is period x members.
+                "period_s": cls.period * (
+                    members.get(name, 1) if cls.stagger else 1
+                ),
+                "requests": members.get(name, 0),
+                "stagger": cls.stagger,
+            } for name, cls in sorted(
+                classes.items(), key=lambda kv: kv[1].priority
+            ) if members.get(name)],
+            "channels": len(registry.signals) + len(registry.derived),
+        }
 
     def report(self) -> Dict[str, Any]:
         state = self._get()
         profile = state.get("profile")
 
         if profile is None:
-            return {"ready": False, "detail": "not connected to the car yet"}
+            #
+            # No link yet. Everything that does not depend on the car is
+            # still worth showing - the alternative is a blank page that
+            # cannot distinguish "not connected" from "nothing loaded".
+            #
+            return {
+                "ready": False,
+                "detail": state.get("status") or "not connected to the car yet",
+                "loaded": self.loaded(),
+            }
 
         executor = state.get("executor")
         plan = state.get("plan")
@@ -1320,6 +1400,7 @@ class Diagnostics:
 
         return {
             "ready": True,
+            "loaded": self.loaded(),
             "session": {
                 "ecu": state.get("ecu"),
                 "ecu_addr": (
@@ -1939,7 +2020,7 @@ def poll_loop(
             tel.update(connected=False, status=msg)
             #: A disconnected picture is worse than none - the counters
             #: would keep reading as if the link were live.
-            diag.clear()
+            diag.clear(msg)
 
             if rec is not None:
                 rec.event("error", msg)
@@ -3805,7 +3886,10 @@ def main() -> int:
         rec.open()
 
     diag = Diagnostics()
-    diag.publish(extra_ids=extra_ids)
+    #: Published before the worker starts, so the panel can answer "what
+    #: would this poll?" from the moment the process is up - with the car
+    #: absent, and before the first connection attempt.
+    diag.publish(registry=registry, extra_ids=extra_ids)
 
     worker = threading.Thread(
         target=demo_loop if args.demo else poll_loop,

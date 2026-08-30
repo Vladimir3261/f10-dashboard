@@ -48,7 +48,15 @@ answered, and what resolution threw away. Fetched only while the tab is
 open — it is a much larger payload than the status poll and nothing in it
 changes second to second.
 
-**This session** — the ECU that answered and at what address, the SGBD
+**Loaded from disk** — shown **with or without a car**: which mapping
+files loaded, their versions, which came via `--extra-mappings`, how many
+channels each declares, and the rates the classes declare. All of that is
+settled at boot, so this answers *"did my extra mappings actually load?"*
+in the driveway rather than on the motorway. A disconnect clears the
+session picture but keeps this, because the mapping set is a property of
+how the process was started, not of the link.
+
+**This session** — needs the link. The ECU that answered and at what address, the SGBD
 variants confirmed *by probe*, how many PIDs it advertises, and the full
 `id@version` fingerprint of every versioned file that shaped the run,
 mode table included. That string is what two drives are compared on.
