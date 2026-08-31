@@ -192,6 +192,44 @@ at all — the fix would introduce a regression, and take boost
 (`map - baro`) down with it. Nothing declares the new fields until
 storage can carry the label.
 
+## Who acts on it
+
+A label nothing consumes is decoration. Two consumers act on it, and they
+answer different questions.
+
+**The diagnostics view** (`/api/diagnostics`, Car link tab) reports quality
+per channel, separately from the per-request counters. Those counters
+answer "did the exchange work"; they cannot answer "did anything usable
+come back", because a positive response still decodes to a sentinel. A
+channel at 100% request success and 100% sentinel is broken in a way no
+request counter can show, and it now reads as `sentinel 76` in the
+channel table. `flagged_pct` is `None` — not `0.0` — until a channel has
+decoded at least once, because "0% flagged" on a channel that never
+answered would read as a clean bill of health.
+
+**The analytics exclude flagged samples by default.**
+`analysis/session_report.py` drops them from every series and statistic,
+counts them per channel, and says in the report how many it left out.
+`--include-flagged` puts them back for anyone deliberately studying them.
+A channel flagged into total silence still appears in the quality table
+with `samples: 0`, because omitting it would put "answered, but nothing
+usable" back in the same bucket as "never polled".
+
+The lake battery (`analysis/clickhouse/insights.sql`) reads the recorded
+label rather than re-deriving it. It used to hard-code `value >= 255` and
+`value >= 2.0` to rediscover MAP saturation and the lambda sentinel by
+hand, in every report; a newly declared sentinel now appears there
+without anyone editing the file. One caveat for longitudinal work: rows
+recorded before this layer are all `ok` because nothing was labelling
+them, not because they were clean, so any comparison of flagged rates
+across that boundary is comparing two different questions.
+
+`pinned_at_max` survives in the session report, doing a different job.
+It runs over what is left *after* the declared flags are removed, so it
+now surfaces saturation nobody has declared **yet** — which is how the
+MAF 222.22 g/s artifact was found. It is a lead to investigate, never a
+finding.
+
 ### The derived-channel corner
 
 `boost = map - baro` is computed from MAP. When MAP is saturated, boost

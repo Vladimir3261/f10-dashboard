@@ -1891,15 +1891,28 @@ function renderCar(d) {
             <span>${escape_(x.detail)}</span></div>`).join("")
       ).join("");
 
+  /* Quality is signal-level and says something the request counters
+     cannot: a channel can be answering every request and still be
+     returning nothing but sentinels. Rendered as the labels themselves
+     ("sentinel 76") rather than a bare percentage, because WHICH way a
+     reading is unusable is the part that tells you what to do about it. */
+  const qcell = c => {
+    if (!c.quality || Object.keys(c.quality).length === 0) return "—";
+    const bad = Object.entries(c.quality).filter(([q]) => q !== "ok");
+    if (bad.length === 0) return '<span class="sub">ok</span>';
+    return bad.map(([q, n]) => `${escape_(q)} ${n}`).join(", ");
+  };
+
   $("carchannels").innerHTML =
     `<thead><tr><th>channel</th><th>unit</th><th>from</th>
-      <th>v</th><th>stored</th><th>value</th></tr></thead><tbody>`
+      <th>v</th><th>stored</th><th>quality</th><th>value</th></tr></thead><tbody>`
     + (d.channels || []).map(c => `<tr>
         <td class="k">${escape_(c.key)}</td>
         <td>${escape_(c.unit || "")}</td>
         <td>${escape_(c.derived ? "derived" : c.request)}</td>
         <td>${c.version == null ? "—" : c.version}</td>
         <td class="${c.logged ? "" : "warn"}">${c.logged ? "yes" : "no"}</td>
+        <td class="${c.flagged ? "warn" : ""}">${qcell(c)}</td>
         <td>${c.value == null ? "—" : escape_(String(c.value))}</td>
         </tr>`).join("")
     + `</tbody>`;
