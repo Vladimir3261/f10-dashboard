@@ -20,18 +20,40 @@ of the data actually satisfied it. A metric with 5% coverage is not a
 metric, and the point of returning coverage alongside the value is that
 the report can say so instead of printing a confident average.
 
-Measured on the lake, 2026-08-31, to choose the windows below:
+Measured on the lake, 2026-08-31, with the SAME symmetric-nearest rule
+this module implements:
 
-    pair                        median gap   within 0.5 s   within 15 s
-    boost actual / setpoint        12.33 s          4.7 %        98.7 %
-    rail actual / setpoint          6.63 s          4.3 %        96.6 %
-    DDE coolant / OBD coolant       4.48 s          9.6 %       100.0 %
+    pair                        median gap   p10..p90       within 1 s
+    boost actual / setpoint         0.56 s   0.52..0.59        98.9 %
+    rail actual / setpoint          4.32 s                     (see below)
+    DDE coolant / OBD coolant       2.75 s                     100 %
 
-Those gaps are a property of the polling schedule, not of this module.
-Tightening a window does not improve the data - it correctly reveals how
-little of it was ever comparable. See `docs/ALIGNMENT.md`.
+The boost pair is far better aligned than a backward-only match suggests:
+measuring it with ClickHouse's one-directional ASOF reports a 12.3 s
+median, because it can only ever look BACKWARD to the previous
+round-robin visit. Looking both ways finds the setpoint 0.56 s away,
+consistently - p10 to p90 spans 70 ms. That is a real property of the
+schedule, and it is why this module and the lake queries must use the
+same rule or they will disagree about the same data.
+
+Windows are therefore set from measurement, not taste. A 0.5 s window for
+boost sits just BELOW the actual 0.56 s separation and rejects 95% of the
+data - an artifact of the threshold, not a finding about the car.
+
+What the residual 0.56 s costs, measured against 10 Hz MAP as a proxy for
+how fast manifold pressure really moves:
+
+    change over 0.56 s:   median 0 hPa,  p90 140 hPa,  p99 672 hPa
+
+So the pair is comparable at steady state and increasingly noisy under
+hard transients, where the misalignment alone can inject more error than
+the deviation being measured. Reported deviations are trustworthy in
+aggregate; a single large excursion may be sampling, not the actuator.
+Co-scheduling the pair would remove that residual entirely - see the
+acquisition follow-up in `docs/ALIGNMENT.md`.
 """
 
+import statistics
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 __all__ = [
@@ -64,15 +86,18 @@ class Pairing(NamedTuple):
 #: coolant and far too loose for a control loop.
 PAIRINGS: Dict[Tuple[str, str], Pairing] = {
     ("n47d_boost_act", "n47d_boost_set"): Pairing(
-        0.5,
-        "Boost tracking is a control-loop error. The turbo moves in "
-        "hundreds of milliseconds under load, so anything older is the "
-        "engine changing rather than the controller failing.",
+        1.0,
+        "Boost tracking is a control-loop error, and the turbo moves in "
+        "hundreds of milliseconds - but the two channels are actually "
+        "sampled 0.56 s apart (p10..p90 = 0.52..0.59), so 1.0 s captures "
+        "98.9% of pairs while 0.5 s captures 4.6%. The tighter number "
+        "would measure the threshold, not the car. The residual 0.56 s is "
+        "worth up to ~140 hPa (p90) of spurious deviation under transients.",
     ),
     ("n47d_rail_act", "n47d_rail_set"): Pairing(
-        0.5,
-        "Rail pressure is the fastest loop on the engine - injection "
-        "events are milliseconds apart. Same reasoning as boost.",
+        1.0,
+        "Same shape as boost: the fastest loop on the engine, but bounded "
+        "by how close the schedule actually places the two reads.",
     ),
     ("n47d_coolant", "coolant"): Pairing(
         15.0,
@@ -171,11 +196,12 @@ def align(a: Series, b: Series, max_age_s: float) -> AlignmentResult:
             pairs.append((ts, av, best_value))
             gaps.append(best_gap)
 
-    median = None
-
-    if gaps:
-        ordered = sorted(gaps)
-        median = round(ordered[len(ordered) // 2], 3)
+    #
+    # statistics.median, not the upper-middle element: the gap is part of
+    # the evidence a reader weighs, so it should be the conventional
+    # statistic rather than a subtly different one.
+    #
+    median = round(statistics.median(gaps), 3) if gaps else None
 
     return AlignmentResult(
         pairs=pairs,

@@ -39,6 +39,11 @@ def a_run(offset, max_speed=0.0, with_speed=True):
     run = {
         "started": 1000.0,
         "units": {},
+        #: These fixtures exercise warm-up behaviour, which is entirely
+        #: time-derived, so the run has to declare a disciplined clock.
+        #: The analysis fails closed without it - by design, see
+        #: session_report.time_trusted().
+        "clock_synced": 1,
         "series": {
             "coolant": [(t, 20 + (t - 1000.0) * 0.18) for t in stamps],
             #: +2 s, so pairing has to tolerate real sampling skew.

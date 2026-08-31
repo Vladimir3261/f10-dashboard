@@ -44,6 +44,14 @@ SETPOINT_PAIRS = [
     ("n47d_rail_act", "n47d_rail_set", "rail pressure"),
 ]
 
+#: Why a time-derived metric was not evaluated. Kept as one string so the
+#: report, the JSON and the tests all say the same thing.
+TIME_UNTRUSTED = (
+    "not evaluated: the host clock was not NTP-disciplined for this run "
+    "(runs.clock_synced != 1), so every timestamp difference below it - "
+    "gradients, alignment windows, rates - is unsupported"
+)
+
 DRIVING_SPEED = 3.0   # km/h; above this the car is moving
 WARM_C = 80.0         # coolant target for warm-up timing
 
@@ -243,6 +251,22 @@ def _stats(values: List[float]) -> Dict:
     }
 
 
+def time_trusted(run: Dict) -> bool:
+    """
+    Whether this run's timestamps can carry a time-derived conclusion.
+
+    Fails closed. `clock_synced` is 1 only when NTP had disciplined the
+    host clock when the run opened; 0 means it had not, and NULL means the
+    run predates the flag. Unknown is not good enough - the Pi has no RTC
+    and once corrected itself 76.5 minutes mid-recording, so an
+    undisciplined run's timestamps may not even be ordered as recorded.
+
+    Warning the reader is not sufficient: a plausible number with a
+    caveat attached is exactly what gets quoted later without the caveat.
+    """
+    return run.get("clock_synced") == 1
+
+
 def elapsed(series, t0):
     return [(ts - t0, v) for ts, v in series]
 
@@ -252,6 +276,14 @@ def elapsed(series, t0):
 
 def warmup(run: Dict) -> Dict:
     """Coolant/oil rise from start; time to warm; oil-lags-coolant."""
+    if not time_trusted(run):
+        #
+        # Warm-up is entirely time-derived: seconds-to-warm, gradients,
+        # the oil-vs-coolant lag. None of it survives an undisciplined
+        # clock, so it is not computed rather than computed and captioned.
+        #
+        return {"unavailable": TIME_UNTRUSTED}
+
     t0 = run["started"]
     out: Dict = {}
 
@@ -339,6 +371,10 @@ def warmup(run: Dict) -> Dict:
 
 def crosschecks(run: Dict) -> List[Dict]:
     """Proprietary DDE read vs the standard OBD PID, sampled together."""
+    if not time_trusted(run):
+        #: every pair here is chosen by a time window
+        return []
+
     out = []
 
     for prop_key, obd_key, scale, label in CROSSCHECKS:
@@ -416,6 +452,13 @@ def load_behaviour(run: Dict, span) -> Dict:
         if s:
             out["ranges"][key] = _stats([v for _, v in s])
 
+    if not time_trusted(run):
+        #: ranges above are pure value statistics and stay; anything that
+        #: needs two channels lined up in time does not
+        out["setpoint_tracking_unavailable"] = TIME_UNTRUSTED
+
+        return out
+
     for act_key, set_key, label in SETPOINT_PAIRS:
         act = _in_span(run["series"].get(act_key, []), span)
         setp = run["series"].get(set_key, [])
@@ -486,6 +529,24 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
     Human interpretation of the numbers - the point of the whole exercise.
     Distinguishes a real disagreement from an OBD limitation.
     """
+    if not time_trusted(run):
+        #
+        # Fails closed. Everything findings() would otherwise say - warm-up
+        # behaviour, cross-check agreement, setpoint tracking - rests on
+        # timestamp differences this run cannot support.
+        #
+        return [
+            "**Time-derived analysis was not performed for this run.** "
+            + TIME_UNTRUSTED
+            + ". Value ranges and sample counts below are still valid; "
+            "anything involving elapsed time, gradients or channel "
+            "alignment was skipped rather than reported with a caveat."
+        ]
+
+    if not time_trusted(run):
+        #: value ranges survive; the measured-vs-modelled alignment does not
+        return {"unavailable": TIME_UNTRUSTED}
+
     out: List[str] = []
 
     #
@@ -657,11 +718,13 @@ def quality(run: Dict) -> List[Dict]:
     """
     out = []
     flagged_counts = run.get("flagged_counts", {})
+    #: sample counts are just counts; max_gap_s is a timestamp difference
+    trusted = time_trusted(run)
 
     for key, s in sorted(run["series"].items()):
         ts = [t for t, _ in s]
         vals = [v for _, v in s]
-        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        gaps = [b - a for a, b in zip(ts, ts[1:])] if trusted else []
         vmax = max(vals)
         pinned = sum(1 for v in vals if v == vmax)
         flags = flagged_counts.get(key, {})
@@ -792,16 +855,21 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
     # support any of it, and saying so at the top is the only place a
     # reader will not miss it.
     #
-    if run.get("clock_synced") != 1:
+    if not time_trusted(run):
         state = (
             "was NOT NTP-disciplined" if run.get("clock_synced") == 0
             else "is UNKNOWN (this run predates the flag)"
         )
         L += [
-            f"> ⚠️ **The host clock {state} for this run.** Every "
-            "time-derived number below - warm-up gradients, alignment "
-            "windows, sample rates - rests on timestamps that may not be "
-            "ordered or spaced as recorded. Treat them as indicative only.",
+            f"> ⚠️ **The host clock {state} for this run, so every "
+            "time-derived metric has been SKIPPED** - warm-up, "
+            "cross-checks, setpoint tracking, sample gaps. They are not "
+            "computed and captioned; they are not computed. The Pi has no "
+            "RTC and once corrected itself 76.5 min mid-recording, which "
+            "can leave timestamps out of order, not merely offset.",
+            ">",
+            "> Value ranges and sample counts are unaffected and are "
+            "reported below.",
             "",
         ]
 
@@ -884,6 +952,8 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
               f"{MIN_USEFUL_COVERAGE:.0f}% is reported as insufficient rather "
               "than averaged: the number would describe the poll schedule, "
               "not the sensors."]
+    elif not time_trusted(run):
+        L.append(f"_{TIME_UNTRUSTED}_")
     else:
         L.append("_no cross-check pairs available_")
 
@@ -893,6 +963,10 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         L.append(f"- max speed {ph['max_speed']} km/h; "
                  f"{ph['driving_samples']} driving / {ph['idle_samples']} idle "
                  "samples (speed>3 km/h = driving).")
+
+    if lb.get("setpoint_tracking_unavailable"):
+        L.append("")
+        L.append(f"_setpoint tracking {lb['setpoint_tracking_unavailable']}_")
 
     if lb.get("setpoint_tracking"):
         L.append("")

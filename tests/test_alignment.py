@@ -100,13 +100,25 @@ class CoverageReportsWhatWasRejected(unittest.TestCase):
     def test_median_gap_is_reported(self):
         result = align([(0.0, 1.0), (1.0, 1.0)], [(0.1, 9.0), (1.4, 9.0)], 1.0)
 
-        self.assertEqual(result.median_gap_s, 0.4)
+        #: conventional median (mean of the two middle gaps), not the
+        #: upper-middle element - the gap is part of the evidence
+        self.assertEqual(result.median_gap_s, 0.25)
 
 
 class WindowsArePerPair(unittest.TestCase):
-    def test_a_control_loop_gets_a_tight_window(self):
+    def test_a_control_loop_window_is_set_from_measurement(self):
+        #
+        # 1.0 s, not the 0.5 s a control loop suggests in the abstract.
+        # The two channels are actually sampled 0.56 s apart (p10..p90 =
+        # 0.52..0.59), so 0.5 s rejects 95% of pairs - that measures the
+        # threshold, not the car. Documented in the module and in
+        # docs/ALIGNMENT.md, including what the residual 0.56 s costs.
+        #
         self.assertEqual(
-            pairing_for("n47d_boost_act", "n47d_boost_set").max_age_s, 0.5
+            pairing_for("n47d_boost_act", "n47d_boost_set").max_age_s, 1.0
+        )
+        self.assertEqual(
+            pairing_for("n47d_rail_act", "n47d_rail_set").max_age_s, 1.0
         )
 
     def test_a_slow_thermal_pair_gets_a_wide_one(self):
@@ -304,11 +316,176 @@ class TheCommittedSqlKeepsTheContract(unittest.TestCase):
             with self.subTest(section=number):
                 self.assertIn("clock_synced=1", sections[number])
 
+    def test_every_asof_join_is_two_sided(self):
+        #
+        # ClickHouse's ASOF is one-directional: `a.ts>=b.ts` finds only
+        # the most recent EARLIER row, so a sample 100 ms AFTER `a` is
+        # ignored in favour of one 10 s before. That is not "nearest", and
+        # it made the lake disagree with the Python matcher on the same
+        # data - different pairs, different coverage, different
+        # conclusions.
+        #
+        # Every comparison must therefore join both directions. Verified
+        # against the live lake for the distinguishing case (a@10.0 with
+        # b@9.6 and b@10.2, window 0.5): the two-sided form selects 10.2,
+        # matching align(); the backward-only form selected 9.6.
+        #
+        for text in [self.sql()] + [
+            " ".join(t.get("rawSql", "") for t in p.get("targets", []))
+            for p in self.panels()
+        ]:
+            backward = re.findall(r"ASOF LEFT JOIN[^)]*?AS (\w+)\s*\n?\s*"
+                                  r"ON [^\n]*?a\.ts>=", text)
+            backward += re.findall(r"\)\s*(\w+)\s*\n?\s*ON [^\n]*?a\.ts>=",
+                                   text)
+            forward = re.findall(r"\)\s*(\w+)\s*\n?\s*ON [^\n]*?a\.ts<=", text)
+
+            if not backward:
+                continue
+
+            with self.subTest(kind="two-sided"):
+                self.assertEqual(
+                    len(backward), len(forward),
+                    "every backward ASOF join needs a forward partner; "
+                    f"backward={backward} forward={forward}",
+                )
+
+    def test_the_unmatched_forward_side_is_guarded(self):
+        #
+        # An unmatched LEFT ASOF yields the type default (1970), which
+        # makes the FORWARD gap negative - and a negative gap wins
+        # least(), silently pairing a sample with nothing. The guard is
+        # load-bearing, not defensive decoration.
+        #
+        self.assertIn(">= 0", self.sql())
+        self.assertIn("1e18", self.sql())
+
+    def test_the_nearer_candidate_is_the_one_selected(self):
+        #
+        # The picker must choose by gap, not by direction. Ties go to
+        # prev, matching align()'s strict-less-than comparison.
+        #
+        self.assertRegex(self.sql(), r"if\(\s*\w*prev_gap <= \w*next_gap")
+
     def test_the_coverage_section_exists(self):
         self.assertIn("alignment coverage", self.sql())
 
-    def test_the_boost_panel_warns_that_it_will_be_sparse(self):
+    def test_the_boost_panel_states_its_measured_window(self):
+        #
+        # The window is 1.0 s because the pair is sampled 0.56 s apart,
+        # not because a control loop wants 1 s. Whoever reads the panel
+        # needs the residual misalignment and what it costs, or they will
+        # read a transient excursion as actuator wear.
+        #
         boost = [p for p in self.panels() if "Boost tracking" in p.get("title", "")]
 
         self.assertTrue(boost)
-        self.assertIn("SPARSE OR EMPTY", boost[0]["description"])
+        self.assertIn("0.56 s apart", boost[0]["description"])
+        self.assertIn("140 hPa", boost[0]["description"])
+
+
+class UntrustedClockFailsClosed(unittest.TestCase):
+    """
+    A run whose clock was not disciplined must not produce a time-derived
+    conclusion at all.
+
+    Warning the reader is not enough: a plausible number with a caveat
+    attached is exactly what gets quoted later without the caveat. These
+    assert the numbers are ABSENT, not merely captioned.
+    """
+
+    def _run(self, clock):
+        path = os.path.join(tempfile.mkdtemp(), "tele.db")
+        rec = live.Recorder(path, chunk=1, interval=0.05)
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12, clock_synced=clock)
+        time.sleep(0.05)
+        base = time.time()
+
+        for i in range(40):
+            t = base + i * 10.0
+            rec.write(t, {"coolant": 20.0 + i * 2.0,
+                          "n47d_oil_temp": 18.0 + i * 2.0,
+                          "n47d_coolant": 20.0 + i * 2.0,
+                          "n47d_boost_act": 1500.0,
+                          "n47d_boost_set": 1400.0,
+                          "speed": 50.0})
+
+        rec.close()
+
+        return session_report.load_run(path, None)
+
+    def test_a_trusted_run_does_produce_the_metrics(self):
+        """The control: these all work when the clock is disciplined."""
+        run = self._run(True)
+
+        self.assertTrue(session_report.time_trusted(run))
+        self.assertNotIn("unavailable", session_report.warmup(run))
+        self.assertTrue(session_report.crosschecks(run))
+
+    def test_warmup_is_not_computed_on_an_unsynced_run(self):
+        run = self._run(False)
+
+        self.assertFalse(session_report.time_trusted(run))
+        self.assertIn("unavailable", session_report.warmup(run))
+        self.assertNotIn("coolant", session_report.warmup(run))
+
+    def test_crosschecks_are_not_computed_on_an_unsynced_run(self):
+        self.assertEqual(session_report.crosschecks(self._run(False)), [])
+
+    def test_setpoint_tracking_is_not_computed_on_an_unsynced_run(self):
+        lb = session_report.load_behaviour(self._run(False), None)
+
+        self.assertEqual(lb["setpoint_tracking"], [])
+        self.assertIn("setpoint_tracking_unavailable", lb)
+
+    def test_value_ranges_survive_because_they_are_not_time_derived(self):
+        #
+        # Failing closed must not mean failing blank. A min/max/mean over
+        # values does not depend on the timestamps being right.
+        #
+        lb = session_report.load_behaviour(self._run(False), None)
+
+        self.assertTrue(lb["ranges"])
+
+    def test_sample_gaps_are_withheld_but_counts_are_not(self):
+        run = self._run(False)
+        rows = {q["key"]: q for q in session_report.quality(run)}
+
+        self.assertGreater(rows["coolant"]["samples"], 0)
+        self.assertIsNone(rows["coolant"]["max_gap_s"])
+
+    def test_an_unknown_clock_fails_closed_too(self):
+        #
+        # NULL means "recorded before the flag existed" - unknown, and
+        # unknown is not good enough. Unknown stays unknown.
+        #
+        run = self._run(None)
+
+        self.assertIsNone(run["clock_synced"])
+        self.assertFalse(session_report.time_trusted(run))
+        self.assertIn("unavailable", session_report.warmup(run))
+
+    def test_the_findings_state_the_exclusion_rather_than_going_quiet(self):
+        run = self._run(False)
+        lines = session_report.findings(
+            run, session_report.warmup(run), session_report.crosschecks(run),
+            session_report.load_behaviour(run, None), session_report.dpf(run),
+        )
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not performed", lines[0])
+
+    def test_the_report_renders_without_the_time_derived_numbers(self):
+        run = self._run(False)
+        md = session_report.render_markdown(
+            run, session_report.warmup(run), session_report.crosschecks(run),
+            session_report.phase_mask(run),
+            session_report.load_behaviour(run, None), session_report.dpf(run),
+            session_report.quality(run),
+        )
+
+        self.assertIn("SKIPPED", md)
+        self.assertIn("not evaluated", md)
+        #: and no cross-check verdict table was emitted
+        self.assertNotIn("| coolant °C |", md)
