@@ -3,10 +3,12 @@
 Why storage has to record *why* a value is not trustworthy, what the lake
 says is actually wrong today, and how the layer is being built.
 
-Status: the decoder carries quality (this document's "the change"); the
-storage path and the mapping declarations are not landed yet. Numbers
-below are from the lake on 2026-08-31, 2,862,258 samples across 115
-sessions and 7 drives.
+Status: built. The decoder carries quality, storage records it end to
+end, and the production mapping declares the two cases below that it can
+prove. Nothing has driven with it yet, so no flagged row exists in the
+lake — the first drive on this code is what will show it working.
+Numbers below are from the lake on 2026-08-31, 2,862,258 samples across
+115 sessions and 7 drives, all of them recorded before this layer.
 
 ## The defect
 
