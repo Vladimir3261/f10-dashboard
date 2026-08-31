@@ -302,3 +302,75 @@ class PreMigrationDatabase(unittest.TestCase):
         }
 
         self.assertEqual(by_value, {800.0: "7", 42.0: "9"})
+
+
+class ProvenanceIsSnapshotWhenTheRunOpens(ProvenanceCase):
+    """
+    The writer thread must never read the live profile.
+
+    `meta_source` is shared mutable state owned by the poll thread.
+    set_metadata() can replace it between a run being queued and the
+    writer popping that run's first sample - so looking the version up at
+    write time would label the sample with the NEXT run's mapping. That is
+    the same defect run_channels exists to remove, just reintroduced by
+    where the lookup happens.
+
+    The race is made deterministic here rather than slept on: start_run()
+    and write() only enqueue, and the writer thread does not exist until
+    open(). So everything can be queued under v1, the profile swapped to
+    v2, and only then the writer let loose - which is exactly the
+    interleaving that would otherwise be down to scheduling luck.
+    """
+
+    def test_a_later_set_metadata_cannot_relabel_a_queued_sample(self):
+        rec = live.Recorder(self.db, chunk=1, interval=0.05)
+        rec.set_metadata(profile_at_version(1))
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+        rec.write(time.time(), {"x": 1.0})
+
+        #: the profile changes before the writer has touched any of it
+        rec.set_metadata(profile_at_version(2))
+
+        rec.open()
+        rec.close()
+
+        self.assertEqual(self.rows(), [("x", 1.0, "1")])
+
+    def test_the_snapshot_travels_in_the_run_payload(self):
+        #
+        # Directly, without threads: the queued payload must already carry
+        # the answer, the same way mapping_set and the manifest do.
+        #
+        rec = live.Recorder(self.db)
+        rec.set_metadata(profile_at_version(1))
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+        rec.set_metadata(profile_at_version(2))
+
+        kind, payload = rec.q.get_nowait()
+        provenance = payload[-1]
+
+        self.assertEqual(kind, "run")
+        self.assertEqual(provenance["x"], ("prov-test", "1", "X", "rpm"))
+        self.assertEqual(provenance["x_doubled"][1], "1")
+
+    def test_each_run_gets_its_own_snapshot(self):
+        #
+        # And the swap does take effect for the run that follows it - the
+        # fix must pin provenance to the run, not freeze it forever.
+        #
+        rec = live.Recorder(self.db, chunk=1, interval=0.05)
+        rec.set_metadata(profile_at_version(1))
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+        rec.write(time.time(), {"x": 1.0})
+        time.sleep(0.15)
+
+        rec.set_metadata(profile_at_version(2))
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+        rec.write(time.time(), {"x": 2.0})
+        rec.close()
+
+        self.assertEqual(
+            sorted((v, ver) for _k, v, ver in self.rows()),
+            [(1.0, "1"), (2.0, "2")],
+        )
