@@ -40,6 +40,24 @@
 --
 -- The per-pair windows are the same ones analysis/alignment.py declares.
 -- See docs/ALIGNMENT.md.
+--
+-- THE ALIGNMENT PATTERN, used verbatim by every comparison below.
+--
+-- ClickHouse's ASOF JOIN is one-directional: `a.ts>=b.ts` can only find
+-- the most recent EARLIER row, so a sample 100 ms after `a` is ignored in
+-- favour of one 10 s before it. That is not "nearest", and it silently
+-- disagreed with the Python matcher on the same data.
+--
+-- So each comparison joins BOTH directions and picks the nearer:
+--
+--   ASOF LEFT JOIN ... prev ON a.session_id=prev.session_id AND a.ts>=prev.ts
+--   ASOF LEFT JOIN ... next ON a.session_id=next.session_id AND a.ts<=next.ts
+--
+-- An unmatched LEFT side yields the type default (1970), which makes
+-- prev_gap enormous - harmless, it loses and fails the window - but makes
+-- next_gap NEGATIVE, which would win least(). Hence the >= 0 guard.
+-- Ties go to `prev`, matching analysis/alignment.py.
+--
 
 -- 1. Session inventory ------------------------------------------------
 SELECT '=== 1. drives (sessions) ===' AS _;
@@ -65,18 +83,25 @@ SELECT round(maf,-1) AS maf_gps,
        round(quantile(0.1)(dp),1)  AS p10,
        round(quantile(0.9)(dp),1)  AS p90
 FROM (
-  SELECT a.ts AS ts, a.value AS dp, b.value AS maf,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0 AS gap_s
+  SELECT a.ts AS ts, a.value AS dp,
+         if(prev_gap <= next_gap, prev.value, next.value) AS maf,
+         dateDiff('millisecond', prev.ts, a.ts)/1000.0 AS prev_gap,
+         if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+            dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18) AS next_gap,
+         least(prev_gap, next_gap) AS gap_s
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='dpf.differential_pressure'
           AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
-  ASOF JOIN (SELECT session_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='engine.maf' AND quality='ok'
-          AND session_id IN (SELECT session_id FROM telemetry.sessions
-                             WHERE vehicle_id={vin:String} AND clock_synced=1)) b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.maf'
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.maf'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- both slow channels; 15 s per the contract
 GROUP BY maf_gps ORDER BY maf_gps;
@@ -88,32 +113,60 @@ SELECT multiIf(rpm<1000,'idle',rpm<1800,'1000-1800',rpm<2600,'1800-2600','2600+'
        round(avg(abs(dev)),1) AS mean_abs_dev,
        round(quantile(0.95)(abs(dev)),1) AS p95_abs_dev
 --
--- NOTE, and it is the whole reason this contract exists: actual and
--- setpoint share the staggered DDE class, so their median gap on this
--- vehicle is ~12 s and only ~5% of pairs fall inside the 0.5 s window a
--- control loop needs. This query will therefore return very few rows,
--- and that is the correct answer - the deviation it used to report was
--- mostly the engine having moved between the two reads. Co-scheduling
--- the pair at acquisition is the fix; see docs/ALIGNMENT.md.
+-- WINDOW NOTE. Actual and setpoint are sampled 0.56 s apart on this
+-- vehicle (p10..p90 = 0.52..0.59), so the window is 1.0 s and captures
+-- 98.9% of pairs. A 0.5 s window - the number a control loop suggests in
+-- the abstract - sits just BELOW the real separation and keeps 4.6%,
+-- measuring the threshold rather than the car.
+--
+-- Measuring this pair with a BACKWARD-ONLY ASOF reports a 12.3 s median,
+-- because it can only look back to the previous round-robin visit. That
+-- is why the two-sided pattern above is not an optimisation.
+--
+-- The residual 0.56 s is not free: against 10 Hz MAP as a proxy for real
+-- slew, manifold pressure moves 0 hPa at the median but 140 hPa at p90
+-- and 672 hPa at p99 over that interval. So this metric is sound in
+-- aggregate and at steady state, and a single large excursion under hard
+-- acceleration may be misalignment rather than the actuator.
+-- Co-scheduling the pair would remove the residual; see docs/ALIGNMENT.md.
 --
 FROM (
-  SELECT a.value - b.value AS dev, c.value AS rpm
+  SELECT a.value - if(sp_prev_gap <= sp_next_gap, sp_prev.value, sp_next.value)
+             AS dev,
+         if(rpm_prev_gap <= rpm_next_gap, rpm_prev.value, rpm_next.value)
+             AS rpm,
+         dateDiff('millisecond', sp_prev.ts, a.ts)/1000.0 AS sp_prev_gap,
+         if(dateDiff('millisecond', a.ts, sp_next.ts) >= 0,
+            dateDiff('millisecond', a.ts, sp_next.ts)/1000.0, 1e18)
+             AS sp_next_gap,
+         dateDiff('millisecond', rpm_prev.ts, a.ts)/1000.0 AS rpm_prev_gap,
+         if(dateDiff('millisecond', a.ts, rpm_next.ts) >= 0,
+            dateDiff('millisecond', a.ts, rpm_next.ts)/1000.0, 1e18)
+             AS rpm_next_gap
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.boost.actual'
           AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
-  ASOF JOIN (SELECT session_id, ts, value FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
-  ASOF JOIN (SELECT session_id, ts, value FROM telemetry.samples
+          AND quality='ok') sp_prev
+    ON a.session_id=sp_prev.session_id AND a.ts>=sp_prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
+          AND quality='ok') sp_next
+    ON a.session_id=sp_next.session_id AND a.ts<=sp_next.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.rpm'
-          AND quality='ok') c
-  ON a.session_id=c.session_id AND a.ts>=c.ts
-  WHERE dateDiff('millisecond', b.ts, a.ts) <= 500      -- control loop
-    AND dateDiff('millisecond', c.ts, a.ts) <= 500      -- conditioning var
+          AND quality='ok') rpm_prev
+    ON a.session_id=rpm_prev.session_id AND a.ts>=rpm_prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.rpm'
+          AND quality='ok') rpm_next
+    ON a.session_id=rpm_next.session_id AND a.ts<=rpm_next.ts
 )
+WHERE least(sp_prev_gap, sp_next_gap) <= 1.0        -- measured separation 0.56 s
+  AND least(rpm_prev_gap, rpm_next_gap) <= 1.0      -- conditioning variable
 GROUP BY rpm_band ORDER BY n DESC;
 
 -- 4. DPF soot vs distance-since-regen (accumulation over the fleet-life)
@@ -121,17 +174,25 @@ SELECT '=== 4. DPF soot vs distance-since-regen ===' AS _;
 SELECT round(dist,0) AS dist_km,
        round(quantile(0.5)(soot),2) AS med_soot_g
 FROM (
-  SELECT a.value AS dist, b.value AS soot,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0 AS gap_s
+  SELECT a.value AS dist,
+         if(prev_gap <= next_gap, prev.value, next.value) AS soot,
+         dateDiff('millisecond', prev.ts, a.ts)/1000.0 AS prev_gap,
+         if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+            dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18) AS next_gap,
+         least(prev_gap, next_gap) AS gap_s
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String}
           AND channel='dpf.distance_since_regeneration' AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
-  ASOF JOIN (SELECT session_id, ts, value FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='dpf.soot_mass.measured'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='dpf.soot_mass.measured'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- two slow ECU model outputs
 GROUP BY dist_km ORDER BY dist_km;
@@ -142,17 +203,25 @@ SELECT session_id,
        round(avg(abs(dde - obd)),3) AS mean_abs_diff,
        count() AS pairs
 FROM (
-  SELECT a.session_id AS session_id, a.value AS dde, b.value AS obd,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0 AS gap_s
+  SELECT a.session_id AS session_id, a.value AS dde,
+         if(prev_gap <= next_gap, prev.value, next.value) AS obd,
+         dateDiff('millisecond', prev.ts, a.ts)/1000.0 AS prev_gap,
+         if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+            dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18) AS next_gap,
+         least(prev_gap, next_gap) AS gap_s
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel_raw='n47d_coolant'
           AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
-  ASOF JOIN (SELECT session_id, ts, value FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel_raw='coolant'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel_raw='coolant'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- coolant moves far slower than the window
 GROUP BY session_id HAVING pairs>20 ORDER BY session_id;
@@ -232,39 +301,57 @@ SELECT pair,
        max_age_s,
        round(100.0 * countIf(gap_s <= max_age_s) / count(), 1) AS pct_in_window
 FROM (
-  SELECT 'boost act/set' AS pair, 0.5 AS max_age_s,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0 AS gap_s
+  SELECT 'boost act/set' AS pair, 1.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
   FROM (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.boost.actual'
           AND quality='ok') a
-  ASOF JOIN (SELECT session_id, ts FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 
   UNION ALL
 
-  SELECT 'rail act/set', 0.5,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0
+  SELECT 'rail act/set' AS pair, 1.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
   FROM (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.actual'
           AND quality='ok') a
-  ASOF JOIN (SELECT session_id, ts FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.setpoint'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.setpoint'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 
   UNION ALL
 
-  SELECT 'DDE/OBD coolant', 15.0,
-         dateDiff('millisecond', b.ts, a.ts)/1000.0
+  SELECT 'DDE/OBD coolant' AS pair, 15.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
   FROM (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel_raw='n47d_coolant'
           AND quality='ok') a
-  ASOF JOIN (SELECT session_id, ts FROM telemetry.samples
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel_raw='coolant'
-          AND quality='ok') b
-  ON a.session_id=b.session_id AND a.ts>=b.ts
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel_raw='coolant'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 GROUP BY pair, max_age_s
 ORDER BY pct_in_window;

@@ -36,50 +36,106 @@ construction (a mode change ends the run, and `run_channels` pins the
 mapping version per run). A comparison that cannot cross a session
 cannot silently mix two configurations either.
 
+## Symmetric nearest, on both sides
+
+"Nearest" means nearest in *either direction*. ClickHouse's `ASOF JOIN`
+is one-directional — `a.ts >= b.ts` finds only the most recent **earlier**
+row — so a sample 100 ms after `a` is ignored in favour of one 10 s
+before it. Every comparison therefore joins both ways and picks the
+smaller gap:
+
+```sql
+ASOF LEFT JOIN (...) prev ON a.session_id=prev.session_id AND a.ts>=prev.ts
+ASOF LEFT JOIN (...) next ON a.session_id=next.session_id AND a.ts<=next.ts
+...
+if(prev_gap <= next_gap, prev.value, next.value)   -- ties go to prev
+```
+
+An unmatched `LEFT` side yields the type default (1970), which makes
+`prev_gap` enormous (harmless — it loses and fails the window) but makes
+`next_gap` **negative**, and a negative gap would win `least()`. Hence
+the `>= 0` guard. This is load-bearing, not decoration.
+
+This matters because it is the difference between the two
+implementations agreeing and disagreeing about the same data. Measured
+against the live lake: `a@10.0` with `b@9.6` and `b@10.2` selects `10.2`
+two-sided, and `9.6` backward-only.
+
 ## The windows
 
 Declared once, in `analysis/alignment.py`, and mirrored in the SQL:
 
 | pair | window | reasoning |
 |---|---|---|
-| boost actual / setpoint | 0.5 s | the turbo moves in hundreds of ms under load |
-| rail actual / setpoint | 0.5 s | the fastest loop on the engine |
-| DDE / OBD coolant | 15 s | two reads of one slow sensor; a wide window costs nothing |
+| boost actual / setpoint | 1.0 s | measured 0.56 s apart; see below |
+| rail actual / setpoint | 1.0 s | same shape |
+| DDE / OBD coolant | 15 s | two reads of one slow sensor |
 | DDE ambient / OBD baro | 60 s | effectively constant over a minute |
 | oil / coolant (warm-up) | 15 s | the quantity of interest is minutes wide |
 | soot measured / modelled | 15 s | two slow ECU model outputs |
-| *anything undeclared* | 1.0 s | strict on purpose — an undeclared comparison should look visibly poor rather than inherit a convenient window |
+| *anything undeclared* | 1.0 s | strict on purpose |
 
 ## Coverage is part of the result
 
-Every comparison reports how much of its input actually satisfied the
-window. Below **50%** the report states that the comparison cannot be
-concluded rather than printing an average — a metric covering a fraction
-of its own inputs is describing the poll schedule, not the car.
+Every comparison reports how much of its input satisfied the window.
+Below **50%** the report states that the comparison cannot be concluded
+rather than printing an average — a metric covering a fraction of its own
+inputs is describing the poll schedule, not the car.
 
-## What this cost, measured
+## What the data actually looks like
 
-On the lake as of 2026-08-31:
+Measured on the lake, 2026-08-31, with symmetric nearest:
 
-| pair | median gap | inside its window |
+| pair | median gap | p10–p90 | inside window |
+|---|---|---|---|
+| boost actual / setpoint | **0.56 s** | 0.52–0.59 | 98.9 % (1.0 s) |
+| rail actual / setpoint | 4.32 s | — | (1.0 s) |
+| DDE / OBD coolant | 2.75 s | — | 100 % (15 s) |
+
+**A correction worth recording.** An earlier draft of this work reported
+the boost pair as 12.33 s apart with 4.7% coverage, and concluded the
+Stage-3 flagship metric "did not have the data to exist". That was an
+artifact of measuring with a backward-only ASOF, which can only reach
+back to the previous round-robin visit. Looking both ways, the setpoint
+is 0.56 s from the actual, consistently — p10 to p90 spans 70 ms. The
+pair is well aligned; the earlier number described the query, not the
+car.
+
+The window is 1.0 s for the same reason. 0.5 s — the number a control
+loop suggests in the abstract — sits just *below* the real 0.56 s
+separation and keeps 4.6% of pairs. That measures the threshold.
+
+### What the residual 0.56 s costs
+
+Not nothing. Using 10 Hz OBD MAP as a proxy for how fast manifold
+pressure really moves, the change over a 0.56 s interval is:
+
+| median | p90 | p99 |
 |---|---|---|
-| boost actual / setpoint | **12.33 s** | **4.7 %** |
-| rail actual / setpoint | 6.63 s | 4.3 % |
-| DDE / OBD coolant | 4.48 s | 100 % |
+| 0 hPa | 140 hPa | 672 hPa |
 
-And only **9 of 119 sessions** carry `clock_synced = 1`, so most
-historical data is legitimately excluded from time-derived work.
+So the metric is sound at steady state and in aggregate, and increasingly
+noisy under hard transients, where misalignment alone can inject more
+error than the deviation being measured. **A single large excursion may
+be sampling rather than the actuator**; a rising trend across many
+sessions at comparable load is still meaningful.
 
-Two consequences worth stating plainly:
+## Clock trust: the analysis fails closed
 
-1. **Boost actual-vs-setpoint — the proposed Stage-3 flagship — does not
-   currently have the data to exist.** It was previously reported from
-   pairs a median of twelve seconds apart. Enforcing the window does not
-   break the metric; it reveals that the metric was never supported. The
-   query and the Grafana panel will be sparse or empty, and that is the
-   correct output.
-2. The DDE/OBD coolant cross-check is unaffected — 100% coverage — which
-   is what a genuinely comparable pair looks like.
+`clock_synced = 1` is required, and a run without it does not get a
+time-derived number *with a warning* — it does not get one at all.
+`warmup()`, `crosschecks()`, setpoint tracking, the soot alignment and
+per-channel sample gaps are all skipped and reported as not evaluated.
+
+Warning the reader is not enough: a plausible number with a caveat
+attached is exactly what gets quoted later without the caveat.
+
+Value ranges, sample counts and quality breakdowns are unaffected — they
+do not depend on the timestamps being right — so an untrusted run still
+produces a useful descriptive report.
+
+Only **9 of 119 sessions** currently carry `clock_synced = 1`, so most
+historical data is legitimately outside time-derived work.
 
 ## Acquisition follow-up: co-schedule the control pairs
 
