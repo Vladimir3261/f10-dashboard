@@ -9,8 +9,16 @@ refactor ever changes the last float digit of a channel, these fail.
 import unittest
 
 from . import support
-from bmwdiag.mapping import decode_response, decode_signal, decode_value, load_file
-from bmwdiag.mapping.decoder import match_prefix
+from bmwdiag.mapping import (
+    Reading,
+    decode_response,
+    decode_signal,
+    decode_value,
+    load_file,
+    read_response,
+    read_value,
+)
+from bmwdiag.mapping.decoder import QUALITIES, match_prefix
 from bmwdiag.mapping.errors import ResponseMismatchError, UnknownDecoderError
 from bmwdiag.mapping.model import Decode
 from bmwdiag.mapping.registry import MappingRegistry
@@ -324,3 +332,130 @@ class TestGroupedResponse(DecoderCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadingQuality(DecoderCase):
+    """
+    The data-quality layer: a flagged reading keeps its value and says why.
+
+    The point of these is the distinction storage could not previously
+    make - "the ECU answered, and said no-value" versus "nobody asked".
+    Both used to be an absent row.
+    """
+
+    def test_labels_match_the_lake_enum(self):
+        #
+        # telemetry.samples.quality is Enum8 over exactly these names, and
+        # ClickHouse fails a whole insert batch on an unknown enum value
+        # (unlike an unknown column, which it drops silently). If this
+        # tuple grows without an ALTER MODIFY COLUMN migration, sync dies
+        # on the first flagged sample.
+        #
+        self.assertEqual(
+            QUALITIES,
+            ("ok", "saturated", "sentinel", "stale", "clipped", "decode_fail"),
+        )
+
+    def test_plain_reading_is_ok_and_usable(self):
+        reading = read_value(Decode(type="uint8"), bytes([42]))
+
+        self.assertEqual(reading, Reading(42.0, "ok"))
+        self.assertTrue(reading.usable)
+
+    def test_sentinel_keeps_its_decoded_value(self):
+        #
+        # The case that motivated the layer: lambda's raw 0xFFFF decodes to
+        # exactly 2.0 and was stored as if the mixture were 2.0. It is now
+        # labelled - and the 2.0 is kept, because that is what the bytes
+        # said. Inventing a placeholder would be a different lie.
+        #
+        decode = Decode(type="uint16_be", divide=32768.0, invalid=(0xFFFF,))
+        reading = read_value(decode, hexb("FF FF"))
+
+        self.assertEqual(reading.value, 2.0)
+        self.assertEqual(reading.quality, "sentinel")
+        self.assertFalse(reading.usable)
+
+    def test_saturated_is_labelled_at_the_declared_rail(self):
+        #
+        # OBD MAP is a single byte, so 255 kPa means "255 or more" - 6,756
+        # samples sat on that rail in the lake against ~180 on each
+        # neighbouring value.
+        #
+        decode = Decode(type="uint8", saturated=(255,))
+
+        self.assertEqual(read_value(decode, bytes([255])).quality, "saturated")
+        self.assertEqual(read_value(decode, bytes([254])).quality, "ok")
+
+    def test_out_of_range_is_clipped(self):
+        decode = Decode(type="uint8", valid_max=100.0)
+        reading = read_value(decode, bytes([200]))
+
+        self.assertEqual(reading.value, 200.0)
+        self.assertEqual(reading.quality, "clipped")
+
+    def test_sentinel_wins_over_a_range_violation(self):
+        #
+        # A sentinel usually decodes outside the sane range as well. The
+        # more specific fact - the ECU declared it unavailable - is the one
+        # worth keeping.
+        #
+        decode = Decode(type="uint8", invalid=(0xFF,), valid_max=100.0)
+
+        self.assertEqual(read_value(decode, bytes([255])).quality, "sentinel")
+
+    def test_raw_domain_not_value_domain(self):
+        #
+        # `invalid` lists bit patterns, so the test survives a scale
+        # correction. Here the sentinel decodes to 51.0, and 51.0 arrived
+        # at any other way stays usable.
+        #
+        decode = Decode(type="uint8", divide=5.0, invalid=(0xFF,))
+
+        self.assertEqual(read_value(decode, bytes([255])).quality, "sentinel")
+        self.assertEqual(read_value(decode, bytes([250])).quality, "ok")
+
+    def test_read_response_keeps_what_decode_response_drops(self):
+        request = self.example_registry.find_request("example.raw.job")
+        response = hexb("71 01 AB CD 02 00 00 FF")
+
+        readings = read_response(request, response)
+        values = decode_response(request, response)
+
+        self.assertNotIn("example_invalid", values)
+        self.assertIn("example_invalid", readings)
+        self.assertEqual(readings["example_invalid"].quality, "sentinel")
+        self.assertFalse(readings["example_invalid"].usable)
+
+    def test_narrow_view_drops_a_saturated_reading(self):
+        #
+        # Defined rather than incidental. Between the decoder gaining
+        # `saturated:` and storage gaining a quality column, no mapping
+        # declares it - but the wrapper's behaviour for that case must not
+        # be "unreachable, therefore unspecified". It maps every non-ok
+        # reading to None, saturated included, which is what keeps the
+        # wrapper byte-identical for callers that cannot carry a label.
+        #
+        # This is also the reason the mapping declarations land last: the
+        # moment `map` declares saturated: [255] while the executor still
+        # calls this wrapper, MAP=255 goes from stored to dropped.
+        #
+        decode = Decode(type="uint8", saturated=(255,))
+
+        self.assertIsNone(decode_value(decode, bytes([255])))
+        self.assertEqual(decode_value(decode, bytes([254])), 254.0)
+
+    def test_narrow_view_drops_a_clipped_reading(self):
+        decode = Decode(type="uint8", valid_max=100.0)
+
+        self.assertIsNone(decode_value(decode, bytes([200])))
+
+    def test_narrow_view_is_unchanged(self):
+        #
+        # decode_value/decode_response are still exactly what they were.
+        # Every existing caller sees the old behaviour.
+        #
+        decode = Decode(type="uint8", invalid=(0xFF,))
+
+        self.assertIsNone(decode_value(decode, bytes([255])))
+        self.assertEqual(decode_value(decode, bytes([10])), 10.0)

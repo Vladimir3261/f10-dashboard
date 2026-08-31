@@ -2,13 +2,29 @@
 Primitive decoders and the response -> signal-values step.
 
 Nothing here is vehicle-specific. It takes a `RequestDef`, a raw response
-and produces `{signal key: value}`. A value of None means "this response
-carried nothing usable for that signal" and the caller should skip it,
-which is exactly what the old poll loop did when a decode lambda raised.
+and produces readings for the signals that request owns.
+
+There are two views of the same decode, and the difference is the whole
+point of the data-quality layer:
+
+  * `read_value` / `read_response` return a `Reading` - the decoded
+    number *plus* a quality label saying whether to trust it. A value the
+    ECU flagged as unavailable still comes back, carrying `sentinel`, so
+    "the sensor said no-value" is recorded rather than inferred from an
+    absence.
+  * `decode_value` / `decode_response` are the older, narrower view: only
+    usable readings, with None (or an omitted key) for everything else.
+    They are wrappers over the first pair and their behaviour has not
+    changed - a caller that has no way to carry a label is better off
+    dropping the value than silently treating a sentinel as a reading.
+
+Before this layer existed only the second view was available, which made
+"the sensor answered 2.0 meaning no-value" and "we never asked" the same
+row in storage: none at all.
 """
 
 import struct
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 from .errors import (
     DecodeError,
@@ -21,12 +37,51 @@ from .model import Decode, RequestDef, SignalDef
 
 __all__ = [
     "PRIMITIVES",
+    "QUALITIES",
+    "Reading",
     "primitive_width",
+    "read_value",
+    "read_response",
     "decode_value",
     "decode_signal",
     "decode_response",
     "match_prefix",
 ]
+
+#: Quality labels, in the ECU's own terms.
+#:
+#: This tuple is a contract with the lake's schema, not a local choice:
+#: `telemetry.samples.quality` is an Enum8 over exactly these six names,
+#: and ClickHouse rejects an unknown enum value by failing the entire
+#: insert batch (unlike an unknown column, which it drops silently).
+#: Adding a label here without the matching ALTER would break sync.
+OK = "ok"
+SATURATED = "saturated"
+SENTINEL = "sentinel"
+STALE = "stale"
+CLIPPED = "clipped"
+DECODE_FAIL = "decode_fail"
+
+QUALITIES = (OK, SATURATED, SENTINEL, STALE, CLIPPED, DECODE_FAIL)
+
+
+class Reading(NamedTuple):
+    """
+    One decoded signal value and how much to trust it.
+
+    `value` is always the number the bytes actually decoded to, even when
+    the quality says not to use it: a sentinel row whose value is the real
+    2.0 is honest, and a placeholder would not be. Suppression is the
+    caller's job - see `usable`.
+    """
+
+    value: Any
+    quality: str = OK
+
+    @property
+    def usable(self) -> bool:
+        """True when this reading may be used as a measurement."""
+        return self.quality == OK
 
 
 def _int_be(data: bytes) -> int:
@@ -184,8 +239,22 @@ def _transform(decode: Decode, raw: Any) -> Any:
     return float(value)
 
 
-def decode_value(decode: Decode, payload: bytes) -> Any:
-    """Decode one value out of `payload` (already offset to the data area)."""
+def read_value(decode: Decode, payload: bytes) -> Reading:
+    """
+    Decode one signal out of `payload` (already offset to the data area).
+
+    Always returns the number the bytes decoded to. The quality label says
+    whether that number is a measurement:
+
+        raw listed in `invalid`     -> sentinel   (the ECU said no-value)
+        raw listed in `saturated`   -> saturated  (the sensor hit its rail)
+        value outside valid_min/max -> clipped    (outside the declared range)
+
+    The first two are raw-domain tests, deliberately: a sentinel is a bit
+    pattern (0xFFFF), not a float, and comparing after the transform would
+    make the test depend on the scale. The label survives the transform, so
+    a sentinel still reports the value it decodes to.
+    """
     width = primitive_width(decode)
     start = decode.offset
     end = start + width
@@ -199,34 +268,57 @@ def decode_value(decode: Decode, payload: bytes) -> Any:
         )
 
     raw = _read_primitive(decode, payload[start:end])
+    quality = OK
 
-    if isinstance(raw, int) and decode.invalid and raw in decode.invalid:
-        return None
+    if isinstance(raw, int):
+        if decode.invalid and raw in decode.invalid:
+            quality = SENTINEL
+        elif decode.saturated and raw in decode.saturated:
+            quality = SATURATED
 
     if decode.enum is not None:
         if not isinstance(raw, int):
             raise DecodeError("enum decoding needs an integer primitive")
 
-        return dict(decode.enum).get(raw, decode.enum_default)
+        return Reading(dict(decode.enum).get(raw, decode.enum_default), quality)
 
     if isinstance(raw, (bytes, str)):
-        return raw
+        return Reading(raw, quality)
 
     if decode.lookup is not None:
         value = _interpolate(decode.lookup, raw)
     else:
         value = _transform(decode, raw)
 
-    if decode.valid_min is not None and value < decode.valid_min:
-        return None
-
-    if decode.valid_max is not None and value > decode.valid_max:
-        return None
+    #
+    # A range violation only *labels* a reading that nothing more specific
+    # has claimed. A sentinel usually decodes outside the sane range too
+    # (lambda's 0xFFFF lands on exactly 2.0, the top of its scale), and
+    # "the ECU said no-value" is the more useful of the two facts.
+    #
+    if quality == OK:
+        if decode.valid_min is not None and value < decode.valid_min:
+            quality = CLIPPED
+        elif decode.valid_max is not None and value > decode.valid_max:
+            quality = CLIPPED
 
     if decode.round is not None:
         value = round(value, decode.round)
 
-    return value
+    return Reading(value, quality)
+
+
+def decode_value(decode: Decode, payload: bytes) -> Any:
+    """
+    Decode one usable value out of `payload`, or None.
+
+    The narrow view: anything the ECU flagged, or that fell outside the
+    declared range, reads as None. Callers that can carry a quality label
+    should use `read_value` instead and keep the value.
+    """
+    reading = read_value(decode, payload)
+
+    return reading.value if reading.usable else None
 
 
 def match_prefix(request: RequestDef, response: bytes) -> bytes:
@@ -271,22 +363,31 @@ def decode_signal(signal: SignalDef, request: RequestDef, response: bytes) -> An
     return decode_value(signal.decode, match_prefix(request, response))
 
 
-def decode_response(request: RequestDef, response: bytes) -> Dict[str, Any]:
+def read_response(request: RequestDef, response: bytes) -> Dict[str, Reading]:
     """
-    Decode every signal a request owns out of one response.
+    Decode every signal a request owns out of one response, with quality.
 
-    A signal that decodes to None (sentinel, out of range) is left out
-    rather than reported as a value.
+    Every signal the response carried is present, including the ones the
+    ECU flagged as unavailable. That is the difference that lets storage
+    tell "the sensor reported no-value" apart from "we never asked".
     """
     payload = match_prefix(request, response)
-    out: Dict[str, Any] = {}
 
-    for signal in request.signals:
-        value = decode_value(signal.decode, payload)
+    return {
+        signal.key: read_value(signal.decode, payload)
+        for signal in request.signals
+    }
 
-        if value is None:
-            continue
 
-        out[signal.key] = value
+def decode_response(request: RequestDef, response: bytes) -> Dict[str, Any]:
+    """
+    Decode every usable signal a request owns out of one response.
 
-    return out
+    A signal that is not usable (sentinel, saturated, out of range) is left
+    out rather than reported as a value. See `read_response` to keep it.
+    """
+    return {
+        key: reading.value
+        for key, reading in read_response(request, response).items()
+        if reading.usable
+    }

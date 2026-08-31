@@ -441,6 +441,11 @@ def _decode(raw: Any, source: str, path: str) -> Decode:
     if invalid and not isinstance(invalid, (list, tuple)):
         invalid = [invalid]
 
+    saturated = data.get("saturated") or ()
+
+    if saturated and not isinstance(saturated, (list, tuple)):
+        saturated = [saturated]
+
     rounding = data.get("round", 3)
 
     if rounding is not None:
@@ -463,6 +468,9 @@ def _decode(raw: Any, source: str, path: str) -> Decode:
         lookup=lookup,
         invalid=tuple(
             _as_int(v, source, f"{path}.invalid") for v in invalid
+        ),
+        saturated=tuple(
+            _as_int(v, source, f"{path}.saturated") for v in saturated
         ),
         valid_min=(
             None if data.get("valid_min") is None

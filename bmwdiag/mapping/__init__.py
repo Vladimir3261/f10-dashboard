@@ -17,7 +17,15 @@ responses against them, and schedules the requests they describe.
 See docs/MAPPING_ARCHITECTURE.md.
 """
 
-from .decoder import decode_response, decode_signal, decode_value
+from .decoder import (
+    QUALITIES,
+    Reading,
+    decode_response,
+    decode_signal,
+    decode_value,
+    read_response,
+    read_value,
+)
 from .derive import apply_derived, compute_derived
 from .errors import MappingError
 from .execute import fault_kind, MappingExecutor
@@ -66,9 +74,13 @@ __all__ = [
     "apply_mode",
     "compute_derived",
     "load_modes",
+    "QUALITIES",
+    "Reading",
     "decode_response",
     "decode_signal",
     "decode_value",
+    "read_response",
+    "read_value",
     "load_file",
     "load_text",
     "load_tree",
