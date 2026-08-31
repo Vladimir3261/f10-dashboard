@@ -85,6 +85,14 @@ the row exists, so that run's answer is known, and the answer is
 "unknown". `runs.mapping_set` remains the whole-run fingerprint — it says
 what was loaded, but cannot say which file owned one particular channel.
 
+That fallback is the **best available legacy provenance, not a
+guarantee**. A database that had already crossed a mapping revision
+*before* `run_channels` existed may already hold a stale
+`params.mapping_ver` — that is the original bug, and once it has happened
+there is nothing left to reconstruct the true version from. The value is
+reported because it is the only evidence there is, not because it is
+known to be correct.
+
 ### The drive mode is text; its version is in the fingerprint
 
 `sessions.mode` holds the mode **name** as plain text (`long`), because
@@ -161,7 +169,7 @@ opened — it is a `CREATE TABLE IF NOT EXISTS`, so the migration is
 idempotent — but their existing runs are deliberately **not** back-filled.
 The only version those rows could be given is today's, which is exactly
 the retroactive relabelling the table exists to prevent. They keep
-resolving through `params.mapping_ver`, which is what was true when they
-were written. Applying the lake column to an already-deployed ClickHouse is a
+resolving through `params.mapping_ver`, with the caveat above: best
+available, not guaranteed. Applying the lake column to an already-deployed ClickHouse is a
 one-time migration — see
 `infra/clickhouse/migrations/2026-08-29_mapping_versioning.sql`.

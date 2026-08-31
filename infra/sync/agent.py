@@ -177,9 +177,15 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         # run_channels answers it correctly: one row per (run, channel)
         # carrying the version that decoded THAT run. The join is LEFT and
         # falls back to params.mapping_ver, because rows recorded before
-        # this table existed have no run_channels row - and their old
-        # value is exactly what was true when they were written. Falling
-        # back is preserving history, not guessing at it.
+        # this table existed have no run_channels row.
+        #
+        # That fallback is the BEST AVAILABLE legacy provenance, not a
+        # guarantee. A database that already crossed a mapping revision
+        # before run_channels existed may carry a stale params.mapping_ver
+        # for exactly the reason this change exists - and after the fact
+        # there is nothing left to reconstruct the true version from. It
+        # is reported rather than blanked because it is the only evidence
+        # there is, not because it is known to be right.
         #
         # An empty string in run_channels.mapping_version is NOT a
         # fallback trigger: the row exists, so that run's answer is known

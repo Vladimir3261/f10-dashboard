@@ -928,6 +928,10 @@ class Recorder:
         #: next run must re-record provenance even for a channel it has
         #: already seen, because that is the whole point of the table.
         self.run_channel_seen: set = set()
+        #: key -> (mapping_id, version, label, unit) as it was when the
+        #: CURRENT run opened. Handed over in the run payload, never read
+        #: from `meta_source` by the writer thread. See start_run().
+        self.run_provenance: Dict[str, Tuple] = {}
         self.rows = 0
         self.dropped = 0
         self.db: Optional[sqlite3.Connection] = None
@@ -985,6 +989,20 @@ class Recorder:
             self.meta_source.mapping_set(self.extra_versions)
             if self.meta_source is not None else ""
         )
+        #
+        # Per-channel provenance is snapshot here for the same reason and
+        # in the same breath as the manifest above. Reading it in the
+        # writer thread instead would leave a window: set_metadata() can
+        # replace the profile between this run being queued and the
+        # writer popping the first sample of it, and the sample would then
+        # be labelled with the NEXT run's mapping version. That is the
+        # very defect run_channels exists to remove, so it must not be
+        # reintroduced by where the lookup happens.
+        #
+        channel_provenance = (
+            self._provenance_snapshot()
+            if self.meta_source is not None else {}
+        )
 
         if not mapping_set:
             #
@@ -999,8 +1017,29 @@ class Recorder:
             "run",
             (time.time(), vin, gateway, ecu, ecu_addr, mode,
              None if clock_synced is None else int(bool(clock_synced)),
-             mapping_set, manifest),
+             mapping_set, manifest, channel_provenance),
         ))
+
+    def _provenance_snapshot(self) -> Dict[str, Tuple]:
+        """
+        Freeze every channel's mapping identity as it is right now.
+
+        Cheap: one pass over the profile's channels, tens of entries, once
+        per run - not once per sample.
+        """
+        snapshot: Dict[str, Tuple] = {}
+
+        for key in self.meta_source.keys():
+            version = self.meta_source.channel_version(key)
+            _pid, label, unit = self.meta_source.param_row(key)
+            snapshot[key] = (
+                self.meta_source.channel_mapping_id(key),
+                "" if version is None else str(version),
+                label,
+                unit,
+            )
+
+        return snapshot
 
     def error(self, request_id: str, kind: str, message: str) -> None:
         """Record one per-request fault. Dropped silently if the queue is
@@ -1092,8 +1131,9 @@ class Recorder:
         # It is deliberately NOT back-filled for runs that predate it.
         # The only version those rows could be given is today's, which is
         # exactly the retroactive relabelling this table exists to
-        # prevent. They keep resolving through params.mapping_ver, which
-        # is what was true when they were written.
+        # prevent. They keep resolving through params.mapping_ver - the
+        # best available answer for them, though not a guaranteed one if
+        # that database had already crossed a revision.
         #
         self.db.commit()
 
@@ -1135,15 +1175,21 @@ class Recorder:
         Record which mapping decoded `key` during the current run.
 
         Written once per channel per run, on the channel's first sample.
-        The version comes from the profile in force right now, so it is
-        the one that actually produced the values being stored - not the
-        one that happened to be loaded the first time this database ever
-        saw the channel.
+
+        Read STRICTLY from the snapshot taken when this run opened, never
+        from `self.meta_source`. The profile is shared mutable state owned
+        by another thread: set_metadata() can replace it between a run
+        being queued and this writer popping the run's first sample, and
+        reading it here would label that sample with the next run's
+        mapping version - the exact defect this table exists to remove.
 
         Derived channels come through here on exactly the same path: they
-        are written with `write()` like any other value, and
-        channel_version()/channel_mapping_id() resolve a derived key to
-        the file that defines it.
+        are written with `write()` like any other value, and the snapshot
+        covers every channel the profile knows, derived ones included.
+
+        A channel absent from the snapshot records unknown rather than
+        borrowing an answer from somewhere else. That happens when a run
+        opened with no profile at all, and "" is the honest reply.
         """
         if self.run_id is None:
             return
@@ -1153,12 +1199,9 @@ class Recorder:
         if seen in self.run_channel_seen:
             return
 
-        if self.meta_source is not None:
-            mapping_id = self.meta_source.channel_mapping_id(key)
-            version = self.meta_source.channel_version(key)
-            _pid, label, unit = self.meta_source.param_row(key)
-        else:
-            mapping_id, version, label, unit = None, None, key, ""
+        mapping_id, version, label, unit = self.run_provenance.get(
+            key, (None, "", key, "")
+        )
 
         #
         # INSERT OR IGNORE, not REPLACE: within one run the first write
@@ -1171,8 +1214,7 @@ class Recorder:
             "INSERT OR IGNORE INTO run_channels"
             "(run_id, param_id, mapping_id, mapping_version, label, unit) "
             "VALUES (?,?,?,?,?,?)",
-            (self.run_id, param_id, mapping_id,
-             "" if version is None else str(version), label, unit),
+            (self.run_id, param_id, mapping_id, version, label, unit),
         )
         self.run_channel_seen.add(seen)
 
@@ -1228,7 +1270,8 @@ class Recorder:
                     )
 
                 (started, vin, gateway, ecu, ecu_addr, mode,
-                 clock_synced, mapping_set, manifest) = payload
+                 clock_synced, mapping_set, manifest,
+                 channel_provenance) = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
@@ -1239,6 +1282,7 @@ class Recorder:
                 )
                 self.run_id = cur.lastrowid
                 self.run_channel_seen.clear()
+                self.run_provenance = channel_provenance
 
                 if manifest:
                     self.db.executemany(
