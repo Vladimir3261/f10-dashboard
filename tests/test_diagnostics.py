@@ -21,7 +21,9 @@ import unittest
 from tests import support  # noqa: F401
 
 import live
-from bmwdiag.mapping import MappingExecutor, load_file, load_text
+from bmwdiag.mapping import (
+    MappingExecutor, fault_kind, load_file, load_text,
+)
 from bmwdiag.mapping.polling import PollingPlan, resolve_classes
 from bmwdiag.mapping.registry import (
     AllCapabilities,
@@ -521,6 +523,131 @@ class WithoutTheCar(unittest.TestCase):
 
     def test_no_registry_at_all_is_empty_not_a_crash(self):
         self.assertEqual(live.Diagnostics().report()["loaded"]["mappings"], [])
+
+
+class TwoViewsMustAgree(unittest.TestCase):
+    """
+    `/api/diagnostics` and `telemetry.channel_errors` count the same
+    faults.
+
+    Found on drive 10: the view reported 6 failed requests and the table
+    held 3. The missing four were OBD PIDs that `ObdSession` absorbs
+    under its own three-strikes policy - the executor counted them but
+    never called `on_error`, so nothing reached the database.
+
+    That is worse than either number alone. The table is what analysis
+    queries, so it was the under-reporting one, and "how often does this
+    channel fail?" - the question channel_errors exists to answer - came
+    back wrong for every OBD channel.
+    """
+
+    def setUp(self):
+        self.registry = engine_registry()
+        self.profile = self.registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+
+    def test_a_dropped_pid_reaches_on_error(self):
+        from tests.test_mapping_requests import FakeObdReader
+
+        seen = []
+        executor = MappingExecutor(
+            self.profile,
+            obd_reader=FakeObdReader({0x0C: b"\x0c\x3c"}),   # 0x0B absent
+            on_error=lambda rid, exc: seen.append((rid, exc)),
+        )
+
+        executor.execute([
+            self.profile.request("obd.mode01.0C"),
+            self.profile.request("obd.mode01.0B"),
+        ])
+
+        self.assertEqual([rid for rid, _ in seen], ["obd.mode01.0B"])
+
+    def test_the_two_counts_match(self):
+        """The property, stated directly: reported == counted."""
+        from tests.test_mapping_requests import FakeObdReader
+
+        reported = []
+        executor = MappingExecutor(
+            self.profile,
+            obd_reader=FakeObdReader({0x0C: b"\x0c\x3c"}),
+            on_error=lambda rid, exc: reported.append(rid),
+        )
+
+        for _ in range(3):
+            executor.execute([
+                self.profile.request("obd.mode01.0C"),
+                self.profile.request("obd.mode01.0B"),
+                self.profile.request("obd.mode01.0D"),
+            ])
+
+        counted = sum(s["failed"] for s in executor.stats().values())
+
+        self.assertEqual(len(reported), counted)
+        self.assertEqual(counted, 6)          # two PIDs x three cycles
+
+    def test_a_dropped_pid_keeps_its_own_fault_kind(self):
+        """
+        `no_response` stays distinguishable from a nack or a timeout: a
+        PID the ECU ignores and a gateway that refused to route are
+        different diagnoses, and the kind column exists to be grouped by.
+        """
+        from bmwdiag.mapping.execute import NoResponse
+        from tests.test_mapping_requests import FakeObdReader
+
+        kinds = []
+        executor = MappingExecutor(
+            self.profile,
+            obd_reader=FakeObdReader({0x0C: b"\x0c\x3c"}),
+            on_error=lambda rid, exc: kinds.append(fault_kind(exc)),
+        )
+
+        executor.execute([self.profile.request("obd.mode01.0B")])
+
+        self.assertEqual(kinds, ["no_response"])
+        self.assertIsInstance(NoResponse("x"), Exception)
+
+
+class SuccessRateIsNeverFlattering(unittest.TestCase):
+    """
+    A success rate is never rounded UP to 100% while a failure exists.
+
+    6963/6964 rounds to 100.0, and drive 10 rendered "100%" beside
+    "failed: 1". Not wrong arithmetically, and precisely what makes
+    someone stop trusting a panel whose only job is telling them what is
+    broken.
+    """
+
+    def rate(self, ok, sent):
+        registry = engine_registry()
+        profile = registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+        executor = MappingExecutor(profile)
+        rid = "obd.mode01.0C"
+        st = executor._stat(rid)
+        st["sent"], st["ok"], st["failed"] = sent, ok, sent - ok
+
+        diag = live.Diagnostics()
+        diag.publish(profile=profile, executor=executor)
+
+        return next(
+            r for r in diag.report()["requests"] if r["id"] == rid
+        )["success_pct"]
+
+    def test_one_failure_in_seven_thousand_is_not_one_hundred_percent(self):
+        self.assertLess(self.rate(6963, 6964), 100.0)
+
+    def test_a_clean_run_still_reads_one_hundred(self):
+        """The floor must not make a perfect run look imperfect."""
+        self.assertEqual(self.rate(6964, 6964), 100.0)
+
+    def test_ordinary_rates_are_unaffected(self):
+        self.assertEqual(self.rate(1, 2), 50.0)
+        self.assertEqual(self.rate(0, 3), 0.0)
 
 
 class NotOnTheShareSurface(unittest.TestCase):

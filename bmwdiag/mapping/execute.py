@@ -60,6 +60,18 @@ def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
 TRANSPORT_FAULT_BUDGET = 6
 
 
+class NoResponse(Exception):
+    """
+    A PID the OBD reader asked for and did not get back.
+
+    Not raised by anything - `ObdSession` absorbs these under its own
+    three-strikes policy and simply omits the PID from the reply. It
+    exists so the no-response case can travel down the same `on_error`
+    path as a real transport fault, rather than being counted in one
+    place and reported in another.
+    """
+
+
 def fault_kind(exc: Exception) -> str:
     """
     A stable, structured name for what went wrong.
@@ -77,6 +89,9 @@ def fault_kind(exc: Exception) -> str:
 
     if isinstance(exc, TimeoutError):
         return "transport_timeout"
+
+    if isinstance(exc, NoResponse):
+        return "no_response"
 
     if exc.__class__.__name__.endswith("Nack"):
         return "transport_nack"
@@ -198,16 +213,32 @@ class MappingExecutor:
         stat["ok"] += 1
         stat["last_ok"] = when
 
-    def _note(self, request_id: str, exc: Exception) -> None:
+    def _record_fault(self, request_id: str, kind: str, message: str,
+                      exc: Optional[Exception] = None) -> None:
+        """
+        Count a fault AND report it. Both, always.
+
+        These used to be separate: the OBD path incremented the counters
+        directly and never called `on_error`, so `/api/diagnostics` said
+        six failures while `telemetry.channel_errors` held three. Two
+        views of the same drive disagreeing about how many faults it had
+        is worse than either number alone - and the table is the one
+        analysis queries, so it was the under-reporting one.
+        """
         stat = self._stat(request_id)
         stat["failed"] += 1
-        kind = fault_kind(exc)
         stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
-        stat["last_error"] = f"{kind}: {exc}"
+        stat["last_error"] = f"{kind}: {message}"
         stat["last_error_at"] = time.time()
 
         if self.on_error is not None:
-            self.on_error(request_id, exc)
+            #: A PID the reader simply dropped has no exception of its
+            #: own; synthesise one so the recorder's contract - which
+            #: takes an exception - holds for every path.
+            self.on_error(request_id, exc if exc is not None else NoResponse(message))
+
+    def _note(self, request_id: str, exc: Exception) -> None:
+        self._record_fault(request_id, fault_kind(exc), str(exc), exc)
 
     def bind(self, request: RequestDef) -> DiagnosticRequest:
         return build_request(request, self.targets)
@@ -272,13 +303,10 @@ class MappingExecutor:
         #
         for pid, request in by_pid.items():
             if pid not in got:
-                stat = self._stat(request.id)
-                stat["failed"] += 1
-                stat["kinds"]["no_response"] = (
-                    stat["kinds"].get("no_response", 0) + 1
+                self._record_fault(
+                    request.id, "no_response",
+                    "the ECU did not return this PID",
                 )
-                stat["last_error"] = "no_response: the ECU did not return this PID"
-                stat["last_error_at"] = time.time()
 
         for pid, data in got.items():
             request = by_pid.get(pid)

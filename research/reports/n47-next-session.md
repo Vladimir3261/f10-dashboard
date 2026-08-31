@@ -189,10 +189,33 @@ health. Rail actual-vs-setpoint and EGR deviation are the next two.
 
 ### 3. Channels that look wrong or unexercised
 
-- **`n47d_egr_deviation` (0x487A)** read a flat 0.0 % for the whole of
-  drive 7 (103,701 samples), yet read 13.65 % earlier the same day at
-  warm idle. Confirm it actually varies under load rather than being
-  pinned by our decode.
+- **`n47d_egr_deviation` (0x487A)** — *no longer suspected dead.*
+  Session 9 showed it moving 0.00–5.54 % across 26 distinct values, all
+  in the warm-up transient and back to 0.0 once warm. So EGR health
+  belongs on the **warm-up**, not on cruise, which is where it was being
+  looked for.
+
+  **One open outlier.** Drive 10 (`drive-20260831T115807Z`, run 1,
+  11:58:44Z) has a single sample at **144.43 %**, 35 s in at 1272 rpm,
+  26 km/h, 29.6 % pedal — a gentle pull-away, not an extreme. p90 was
+  4.17 %; the max is suspect and should not be quoted.
+
+  A signed-read-as-unsigned artifact was proposed and **does not fit**:
+  144.43 % is raw 11832 (0x2E38) at `scale: 0.012207`, which is positive
+  under either interpretation, and a negative `int16` misread would land
+  near full scale (800 %), not 144 %.
+
+  The likelier mechanism is **F303 cross-talk**. Every DDE dynamic read
+  shares dynamic DID `0xF303` and re-arms it per read; `d72n47a0_dynamic.yaml`
+  already warns that a stale define decodes one measurement's bytes as
+  another's. A single outlier at a benign operating point is what that
+  would look like. To settle it, capture the raw bytes at that timestamp
+  — the decoded value alone cannot distinguish the two.
+
+  Until then: **p90 is the usable number.** Adding `valid_min`/`valid_max`
+  to the decode would stop it being stored as truth, but would currently
+  *drop* it silently — which is why this wants the Stage-1 quality flag
+  work rather than a clamp.
 - **`lambda`** sits at exactly 2.0 for 5,773 of 7,797 samples — the
   "no value" sentinel. Either find the DDE's real lambda DID or mark the
   OBD channel unusable so it stops polluting reports.
