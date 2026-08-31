@@ -826,6 +826,39 @@ CREATE TABLE IF NOT EXISTS run_mappings (
     source_path TEXT
 );
 
+-- Per-run, per-channel provenance: which mapping file and which data
+-- version decoded THIS channel during THIS run, plus the label and unit
+-- in force at the time.
+--
+-- `params` is channel IDENTITY and is written once, on first sight, with
+-- INSERT OR IGNORE. That makes params.mapping_ver a property of the FIRST
+-- run that ever saw the channel, which stops being true the moment a
+-- mapping is revised and the same database is reused: new samples would
+-- keep pointing at the old version. Updating that row in place would be
+-- worse - every historical sample would then claim to have been decoded
+-- by a revision that did not exist when it was recorded.
+--
+-- So provenance is scoped to the run instead. A sample resolves its
+-- version through (run_id, param_id), and because a run has exactly one
+-- mapping configuration, one row per channel per run is enough - no need
+-- to repeat the version on all 100k samples.
+--
+-- runs.mapping_set stays as the whole-run fingerprint; it answers "what
+-- was loaded" but cannot answer "which file owned this one channel".
+CREATE TABLE IF NOT EXISTS run_channels (
+    run_id          INTEGER NOT NULL,
+    param_id        INTEGER NOT NULL,
+    mapping_id      TEXT,
+    -- Integer string, "" when unknown. Never NULL for a row that exists:
+    -- the reader falls back to params.mapping_ver only when the ROW is
+    -- absent, so an empty string has to mean "this run knew, and the
+    -- answer was nothing" rather than "ask somewhere else".
+    mapping_version TEXT,
+    label           TEXT,
+    unit            TEXT,
+    PRIMARY KEY (run_id, param_id)
+);
+
 CREATE TABLE IF NOT EXISTS samples (
     run_id   INTEGER NOT NULL,
     ts       REAL NOT NULL,
@@ -890,6 +923,11 @@ class Recorder:
         self.q: "queue.Queue" = queue.Queue(maxsize=20000)
         self.run_id: Optional[int] = None
         self.param_ids: Dict[str, int] = {}
+        #: (run_id, param_id) pairs already given a run_channels row. Reset
+        #: on every run start: the same Recorder outlives a run, and the
+        #: next run must re-record provenance even for a channel it has
+        #: already seen, because that is the whole point of the table.
+        self.run_channel_seen: set = set()
         self.rows = 0
         self.dropped = 0
         self.db: Optional[sqlite3.Connection] = None
@@ -1046,6 +1084,17 @@ class Recorder:
         if "quality" not in cols("samples"):
             self.db.execute("ALTER TABLE samples ADD COLUMN quality TEXT")
 
+        #
+        # `run_channels` needs no ALTER: it is a new table, and the
+        # CREATE TABLE IF NOT EXISTS in SCHEMA runs on every open, so an
+        # older database gains it simply by being opened. Idempotent.
+        #
+        # It is deliberately NOT back-filled for runs that predate it.
+        # The only version those rows could be given is today's, which is
+        # exactly the retroactive relabelling this table exists to
+        # prevent. They keep resolving through params.mapping_ver, which
+        # is what was true when they were written.
+        #
         self.db.commit()
 
     def _param_id(self, key: str) -> int:
@@ -1080,6 +1129,52 @@ class Recorder:
         self.param_ids[key] = ident
 
         return ident
+
+    def _note_run_channel(self, param_id: int, key: str) -> None:
+        """
+        Record which mapping decoded `key` during the current run.
+
+        Written once per channel per run, on the channel's first sample.
+        The version comes from the profile in force right now, so it is
+        the one that actually produced the values being stored - not the
+        one that happened to be loaded the first time this database ever
+        saw the channel.
+
+        Derived channels come through here on exactly the same path: they
+        are written with `write()` like any other value, and
+        channel_version()/channel_mapping_id() resolve a derived key to
+        the file that defines it.
+        """
+        if self.run_id is None:
+            return
+
+        seen = (self.run_id, param_id)
+
+        if seen in self.run_channel_seen:
+            return
+
+        if self.meta_source is not None:
+            mapping_id = self.meta_source.channel_mapping_id(key)
+            version = self.meta_source.channel_version(key)
+            _pid, label, unit = self.meta_source.param_row(key)
+        else:
+            mapping_id, version, label, unit = None, None, key, ""
+
+        #
+        # INSERT OR IGNORE, not REPLACE: within one run the first write
+        # wins and nothing may overwrite it. A run has exactly one
+        # sampling and mapping configuration, so a second answer here
+        # would mean something is wrong, and silently taking the newer
+        # one would hide it.
+        #
+        self.db.execute(
+            "INSERT OR IGNORE INTO run_channels"
+            "(run_id, param_id, mapping_id, mapping_version, label, unit) "
+            "VALUES (?,?,?,?,?,?)",
+            (self.run_id, param_id, mapping_id,
+             "" if version is None else str(version), label, unit),
+        )
+        self.run_channel_seen.add(seen)
 
     def _flush(self, pending: List[Tuple]) -> None:
         if not pending or self.db is None:
@@ -1143,6 +1238,7 @@ class Recorder:
                      mode, clock_synced),
                 )
                 self.run_id = cur.lastrowid
+                self.run_channel_seen.clear()
 
                 if manifest:
                     self.db.executemany(
@@ -1179,8 +1275,10 @@ class Recorder:
                 ts, values, qualities = payload
 
                 for key, value in values.items():
+                    param_id = self._param_id(key)
+                    self._note_run_channel(param_id, key)
                     pending.append((
-                        self.run_id, ts, self._param_id(key), value,
+                        self.run_id, ts, param_id, value,
                         qualities.get(key, "ok"),
                     ))
 
