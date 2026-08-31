@@ -25,22 +25,36 @@ f10pi/
 # 1. clone the project repo
 git clone <REPO_URL> ~/f10-dashboard && cd ~/f10-dashboard/hardware/raspberry-pi/f10pi
 
-# 2. fill in local secrets from the templates (these files are gitignored)
+# 2. fill in local secrets/config from the templates (these files are gitignored)
 cp config/local.env.example        config/local.env
 cp config/wifi.example.env         config/wifi.env
 cp config/wireguard.example.conf   config/wireguard.conf
-$EDITOR config/*.env config/*.conf   # put your real SSIDs/PSKs/keys here
+$EDITOR config/*.env config/*.conf   # set Wi-Fi country, SSIDs/PSKs/keys, etc.
 
 # 3. provision (idempotent — safe to re-run)
 sudo ./scripts/bootstrap.sh
 
-# 4. verify
+# 4. reboot if bootstrap changed Wi-Fi firmware or the kernel cmdline
+sudo reboot
+
+# 5. verify
 ./scripts/verify.sh
+./scripts/verify-wifi-regulatory.sh
 ```
 
 `bootstrap.sh` runs the individual `configure-*.sh` steps in order:
-hostname → Wi-Fi profiles → WireGuard → SSH → BMW `eth0` → application
-services. Each step is idempotent and can also be run on its own.
+hostname → Wi-Fi regulatory/firmware → Wi-Fi profiles → WireGuard → SSH →
+BMW `eth0` → application services. Each step is idempotent and can also be
+run on its own.
+
+The Wi-Fi regulatory step exists because Raspberry Pi 4 / BCM43455 firmware
+`7.45.265` was observed to miss a preferred channel-13 network during the
+initial boot scan, causing NetworkManager to fall back to a lower-priority
+hotspot. The provisioning script only patches that known-bad firmware version,
+uses a pinned Infineon release with verified SHA-256 hashes, and configures the
+country before the first boot scan. See
+[`docs/wifi-regulatory.md`](docs/wifi-regulatory.md) for the full investigation,
+fix, verification commands, and rollback notes.
 
 ## The application on the Pi
 
@@ -65,7 +79,7 @@ fill it in; the real files are gitignored:
 
 | template | real (gitignored) | holds |
 |---|---|---|
-| `local.env.example` | `local.env` | hostname, paths, toggles |
+| `local.env.example` | `local.env` | hostname, paths, toggles, Wi-Fi country |
 | `wifi.example.env` | `wifi.env` | Wi-Fi SSIDs + PSKs + priorities |
 | `wireguard.example.conf` | `wireguard.conf` | WireGuard keys + endpoint |
 
