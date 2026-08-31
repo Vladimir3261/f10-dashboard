@@ -207,24 +207,37 @@ class ResolvedProfile:
 
     # -- data versioning --------------------------------------------
 
+    def channel_mapping_id(self, key: str) -> Optional[str]:
+        """
+        The id of the mapping file that owns channel `key`, or None.
+
+        A read signal belongs to the file its request came from; a derived
+        channel to the file that defines it. Recorded per run alongside the
+        version, because a version number only means something next to the
+        file it counts for.
+        """
+        signal = self._signal_by_key.get(key)
+
+        if signal is not None:
+            request = self._request_by_id.get(signal.request_id)
+
+            return request.mapping_id if request is not None else None
+
+        definition = self._derived_by_key.get(key)
+
+        return definition.mapping_id if definition is not None else None
+
     def channel_version(self, key: str) -> Optional[int]:
         """
         The data version of the mapping file that owns channel `key`.
 
         A read signal inherits the version of the file its request came
         from; a derived channel the version of the file that defines it.
-        Returns None for an unknown channel. This is the value stamped
-        onto every recorded sample so a dataset ties back to the exact
-        mapping revision that produced it. See docs/DATA_VERSIONING.md.
+        Returns None for an unknown channel. This is the value recorded
+        per run so a dataset ties back to the exact mapping revision that
+        produced it. See docs/DATA_VERSIONING.md.
         """
-        signal = self._signal_by_key.get(key)
-
-        if signal is not None:
-            request = self._request_by_id.get(signal.request_id)
-            mapping_id = request.mapping_id if request is not None else None
-        else:
-            definition = self._derived_by_key.get(key)
-            mapping_id = definition.mapping_id if definition is not None else None
+        mapping_id = self.channel_mapping_id(key)
 
         if mapping_id is None:
             return None
