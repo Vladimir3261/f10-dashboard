@@ -650,6 +650,72 @@ class SuccessRateIsNeverFlattering(unittest.TestCase):
         self.assertEqual(self.rate(0, 3), 0.0)
 
 
+class RestingIsVisible(unittest.TestCase):
+    """
+    A rested request must say so, not read as silently absent.
+
+    The whole point of cfbabd4's stats fields: without them, a channel
+    the executor stood down after repeated faults is indistinguishable
+    on the panel from one that is healthy but slow. Wired only after the
+    branch merged, so the tab never rendered a field the runtime did not
+    send.
+    """
+
+    def test_the_report_carries_rest_state(self):
+        from bmwdiag.mapping import load_text, MappingRegistry
+        from bmwdiag.mapping.registry import AllCapabilities
+
+        class Nack(Exception):
+            pass
+
+        class Refusing:
+            def request(self, payload, *, dst, timeout=None):
+                raise Nack("gateway will not route to 0x18")
+
+        mapping = load_text(
+            "schema_version: 1\n"
+            "mapping: {id: t, version: 1, production: false}\n"
+            "ecu: {target: 0x18}\n"
+            "requests:\n"
+            "  probe:\n"
+            "    protocol: uds\n"
+            "    service: 0x22\n"
+            "    did: 0xDA2E\n"
+            "    response: {data_length: 2}\n"
+            "    signals:\n"
+            "      g: {label: G, unit: '', decode: {type: uint8}}\n",
+            "test",
+        )
+        profile = MappingRegistry([mapping]).resolve(AllCapabilities())
+        executor = MappingExecutor(profile, transport=Refusing())
+
+        for _ in range(3):
+            executor.execute(profile.requests)
+
+        diag = live.Diagnostics()
+        diag.publish(profile=profile, executor=executor)
+        row = next(
+            r for r in diag.report()["requests"] if r["id"] == "probe"
+        )
+
+        self.assertGreater(row["resting_for"], 0)
+        self.assertEqual(row["consecutive_faults"], 3)
+
+    def test_a_healthy_request_reports_zero_rest(self):
+        registry = engine_registry()
+        profile = registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+        diag = live.Diagnostics()
+        diag.publish(profile=profile, executor=MappingExecutor(profile))
+
+        row = diag.report()["requests"][0]
+
+        self.assertEqual(row["resting_for"], 0.0)
+        self.assertEqual(row["consecutive_faults"], 0)
+
+
 class NotOnTheShareSurface(unittest.TestCase):
     def test_diagnostics_is_not_share_visible(self):
         """

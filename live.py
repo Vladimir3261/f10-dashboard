@@ -1358,6 +1358,14 @@ class Diagnostics:
                 "ok": ok,
                 "failed": st.get("failed", 0),
                 "kinds": st.get("kinds", {}),
+                #: From the resting mechanism (cfbabd4): seconds this
+                #: request is standing down after repeated faults, and
+                #: the consecutive-fault count that caused it. A snapshot
+                #: at report time - the page must render it as a state
+                #: ("resting ~5s"), never as a live countdown, or a
+                #: cached value reads as a hung page.
+                "resting_for": st.get("resting_for", 0.0),
+                "consecutive_faults": st.get("consecutive_faults", 0),
                 #: None, not 0, until something has actually been asked -
                 #: "0% success" on an unpolled request would read as a
                 #: failure rather than as no data yet.
