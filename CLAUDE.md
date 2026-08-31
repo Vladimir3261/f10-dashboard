@@ -179,7 +179,13 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   a bounded chance, every run records `clock_synced`, and a mid-run step
   ends the run so none spans a discontinuity. **Anything time-derived
   must filter `sessions.clock_synced = 1`.**
-- 542 tests, no car / no network / no BMW data required.
+- **Stage 1 data quality is live** (2026-08-31): the decoder returns
+  `Reading(value, quality)`; sentinel/saturated/clipped values keep their
+  bit-exact number plus a label through SQLite, the wire and the lake
+  (`samples.quality`); the display suppresses them and derived channels
+  drop with their flagged inputs. engine.yaml v4 declares lambda's
+  0xFFFF sentinel and MAP's 255 saturation. See `docs/DATA_QUALITY.md`.
+- 619 tests, no car / no network / no BMW data required.
 
 ## Repo map
 

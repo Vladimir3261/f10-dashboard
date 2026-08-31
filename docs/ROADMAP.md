@@ -60,21 +60,15 @@ dashboard," it is over-built for what it delivers.
    operating point means a wide, lossy, expensive time-join. There is no
    trip concept, no materialized operating-point, no per-sample context.
    **Everything in the analytics vision is blocked on this.**
-2. **No data-quality flags in storage. (Still open — now the top item.)**
-   A saturated MAP (255 kPa), a sentinel value (lambda 2.0), and a real
-   reading are indistinguishable once stored. `decoder.py` returns `None`
-   for anything outside `valid_min`/`valid_max` or listed in `invalid`,
-   so the value is *dropped* — which makes "the sensor said
-   not-available" identical to "we never polled it". The `quality` enum
-   exists in ClickHouse and **nothing has ever written it**.
-
-   Two cases are already identified and waiting: `lambda` sits at exactly
-   2.0 — the no-value sentinel — for 5,773 of 7,797 samples and is stored
-   as if it were a reading, so any average over it is wrong today; and
-   the OBD MAP saturation was found by hand, which is exactly what this
-   layer exists to flag. A third was exposed by the diagnostics view: a
-   request can succeed while the decoder discards the value, so a channel
-   can report 100% success and store nothing.
+2. ~~**No data-quality flags in storage.**~~ **FIXED — Stage 1 shipped
+   2026-08-31** (built by F10-VM, reviewed here; `docs/DATA_QUALITY.md`).
+   The decoder returns `Reading(value, quality)`; a flagged value keeps
+   its bit-exact number and its label (`sentinel`/`saturated`/`clipped`)
+   through SQLite, the wire and the lake; the display suppresses it and
+   derived channels leave the view with their flagged inputs. Proven on
+   drive 11: 716 labelled rows — saturated MAP under boost, lambda
+   sentinels, and 63 `gear=10` clipped rows that had been invisible for
+   the entire project because the old decoder dropped them silently.
 3. ~~**No mapping/software version per run.**~~ **FIXED.** Every sample
    carries `mapping_ver`, every run carries the `id@version` fingerprint
    of the whole set — mode table included — and `mappings/VERSIONS.lock`
@@ -120,7 +114,7 @@ dashboard," it is over-built for what it delivers.
 ### Under-engineered (updated 2026-08-31)
 
 - **Analytics** — still nonexistent, and still the whole point.
-- **Data-quality tagging** — still nonexistent. Now the top item.
+- ~~Data-quality tagging~~ — done (Stage 1, 2026-08-31).
 - **Trip segmentation + operating context** — still nonexistent.
 - ~~Collector observability into the DB~~ — done: faults, per-request
   success rates, and a resolution report.
@@ -177,9 +171,9 @@ Stage status against the plan below:
 | stage | state |
 |---|---|
 | 0 — data model | **mostly done.** Versions stamped end to end and test-enforced. Trip segmentation still weak: a run is a connection, not a trip, and many `sessions` rows never get `ended` |
-| 1 — data quality | **not started, and now the only thing in front of analytics.** The `quality` enum exists in the lake; nothing writes it. The decoder *drops* sentinel and out-of-range values, so "sensor unavailable" and "not polled" are identical in storage |
+| 1 — data quality | **done (2026-08-31).** `Reading(value, quality)` end to end, lambda sentinel + MAP saturation declared in engine.yaml v4, proven by 716 labelled rows on drive 11 — including a value (`gear=10`) the old pipeline had silently discarded all project long |
 | 2 — DDE telemetry | **done enough.** ~23 verified proprietary channels. The DPF ones are decorative on this car — no filter |
-| 3 — analytics | **unblocked, not started.** Needs a new flagship: DPF ΔP is void, boost actual-vs-setpoint is the proposed replacement |
+| 3 — analytics | **NOW THE FRONT OF THE QUEUE — nothing blocks it.** Flagship: boost actual-vs-setpoint (DPF ΔP is void on this car) |
 | 5 — drift/anomaly | the goal; needs 1 and 3 |
 
 ### Fixed on 2026-08-30/31

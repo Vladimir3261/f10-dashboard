@@ -426,3 +426,25 @@ right IP (`make inventory` regenerates it).
   can swap in another provider (or a bare VM) and still `make deploy`.
 - **First `make ping`/`deploy` may retry** while the fresh droplet finishes
   booting — the playbook waits up to 5 minutes for SSH.
+
+## Known issue: compose warns `The "..." variable is not set`
+
+Every `docker compose` call on the server prints warnings like
+`The "h1I" variable is not set. Defaulting to a blank string.`
+
+**Cause:** `GF_ADMIN_PASSWORD` in `infra/.env` contains a literal `$`,
+and compose treats `$word` inside .env values as a variable reference.
+The Grafana container therefore receives a mangled
+`GF_SECURITY_ADMIN_PASSWORD` — which does not matter, because that env
+var only applies on first database init and the deploy explicitly resets
+the real admin password afterwards via `grafana cli
+admin reset-admin-password`, reading `.env` directly (no interpolation).
+
+**Impact:** cosmetic noise only. Everything authenticates correctly.
+
+**Permanent fix, when convenient:** rotate `GF_ADMIN_PASSWORD` to a
+value without `$` (in your local `infra/.env`, then `make deploy`).
+Do **not** "fix" it by escaping to `$$` in the file — the shell scripts
+(`lake_status.sh`, `lake_migrate.sh`) and Ansible read `.env` raw and
+would then use the wrong literal value.
+
