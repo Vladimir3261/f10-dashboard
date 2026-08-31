@@ -188,12 +188,12 @@ Switch from the dashboard's `mode` chip, or start in one with
 
 ## Order the remaining work probably wants doing in
 
-1. **Stage-1 data quality** — populate the `quality` column
-   (saturated / sentinel / stale); nothing writes it today, and it is now
-   the only thing standing in front of the analytics layer.
+1. ~~Stage-1 data quality~~ — **done** (2026-08-31, proven on drive 11).
 2. **Fault rates per mode** — free, since the drives record them now.
-3. **A genuine cold start** — the last unproven part of the temperature
-   scales, and still never captured.
+3. ~~A genuine cold start~~ — **captured** (session 9, 21 °C, one
+   unbroken run; four independent temperature channels agreed within
+   0.6 °C). The load-driven oil-lag signature still wants a cold start
+   followed by driving.
 
 *(The overnight battery test used to head this list. It is cancelled —
 see §1: the Pi runs from a powerbank.)*

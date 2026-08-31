@@ -227,9 +227,10 @@ health. Rail actual-vs-setpoint and EGR deviation are the next two.
   needed, same as the EGR case:** with ignition on and engine off,
   record the raw PID `0x10` response bytes. Until then, treat MAF at
   rpm = 0 as unusable and gate MAF analytics on engine-running.
-- **`lambda`** sits at exactly 2.0 for 5,773 of 7,797 samples — the
-  "no value" sentinel. Either find the DDE's real lambda DID or mark the
-  OBD channel unusable so it stops polluting reports.
+- **~~`lambda` sentinel pollution~~ — FIXED (Stage 1, 2026-08-31).**
+  0xFFFF is declared `invalid:` in engine.yaml v4; the rows now carry
+  `quality='sentinel'` and are excluded from display and analysis.
+  Finding the DDE's real lambda DID remains open as a nice-to-have.
 - **`egs_da2e_b0`** is still constant 0. Retire it or explain it.
 - **P/R/N/D selector and reverse encoding** remain unfound (needs a
   `0x18`/`0x63` DID scan).

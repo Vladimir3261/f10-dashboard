@@ -81,7 +81,7 @@ analysis/            read-only session analytics
 research/            the N47 evidence/import pipeline (offline only):
                      pinned source manifest, importers, normalized
                      records, conflict detection, reports
-tests/               542 tests; no car and no network required
+tests/               619 tests; no car and no network required
 tools/               read-only research and analysis tools
 docs/                architecture and research-process documentation
 local/               gitignored; scratch, captures, notes, exports,
