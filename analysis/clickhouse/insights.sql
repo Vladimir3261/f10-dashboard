@@ -86,16 +86,51 @@ FROM (
 WHERE obd IS NOT NULL
 GROUP BY session_id HAVING pairs>20 ORDER BY session_id;
 
--- 6. Data quality: OBD MAP saturation + lambda sentinel --------------
-SELECT '=== 6. data quality flags ===' AS _;
-SELECT 'OBD MAP pinned at 255 kPa' AS flag,
-       countIf(channel='engine.manifold_pressure.absolute' AND value>=255) AS hits,
-       count()                                                            AS of_channel
+-- 6. Data quality: what the decoder flagged -------------------------
+--
+-- These used to be hard-coded value tests (value>=255, value>=2.0) that
+-- rediscovered MAP saturation and the lambda sentinel by hand, in the
+-- report, every time. The mapping now declares both, and the recorder
+-- stores the verdict, so the query reads the label instead of guessing
+-- at the number. A new sentinel gets declared once in the mapping and
+-- appears here without anyone editing this file.
+--
+-- CAVEAT for longitudinal work: rows recorded before the data-quality
+-- layer landed are all 'ok', because nothing was labelling them - not
+-- because they were clean. Anything comparing flagged rates ACROSS that
+-- boundary is comparing two different questions. Filter on the era, or
+-- restrict to sessions recorded after it.
+SELECT '=== 6. data quality flags (declared, not guessed) ===' AS _;
+-- The percentage is of the WHOLE channel, so totals come from a
+-- separate aggregate: a window over the filtered rows would divide the
+-- flagged count by itself and print 100% every time.
+SELECT s.channel                                   AS channel,
+       s.quality                                   AS quality,
+       count()                                     AS rows,
+       round(100.0 * count() / any(t.total), 2)    AS pct_of_channel,
+       min(s.value)                                AS vmin,
+       max(s.value)                                AS vmax
+FROM telemetry.samples s
+INNER JOIN (
+    SELECT channel, count() AS total
+    FROM telemetry.samples
+    WHERE vehicle_id={vin:String}
+    GROUP BY channel
+) t ON t.channel = s.channel
+WHERE s.vehicle_id={vin:String} AND s.quality != 'ok'
+GROUP BY s.channel, s.quality
+ORDER BY rows DESC;
+
+-- 6b. Channels answering nothing usable ------------------------------
+--
+-- The case a request-level success rate cannot show: every exchange
+-- succeeded and not one reading was a measurement.
+SELECT '=== 6b. channels with no usable readings ===' AS _;
+SELECT channel,
+       count()                        AS total,
+       countIf(quality = 'ok')        AS usable
 FROM telemetry.samples
-WHERE vehicle_id={vin:String} AND channel='engine.manifold_pressure.absolute'
-UNION ALL
-SELECT 'lambda at 2.0 sentinel',
-       countIf(channel='engine.lambda' AND value>=2.0),
-       count()
-FROM telemetry.samples
-WHERE vehicle_id={vin:String} AND channel='engine.lambda';
+WHERE vehicle_id={vin:String}
+GROUP BY channel
+HAVING usable = 0
+ORDER BY total DESC;

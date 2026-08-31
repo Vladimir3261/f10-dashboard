@@ -49,8 +49,27 @@ WARM_C = 80.0         # coolant target for warm-up timing
 # ----------------------------------------------------------- loading
 
 
-def load_run(db_path: str, run_id: Optional[int]) -> Dict:
-    """Pull one run's series out of the DB, read-only. Never returns VIN."""
+def _has_column(db, table: str, column: str) -> bool:
+    return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
+
+
+def load_run(db_path: str, run_id: Optional[int],
+             include_flagged: bool = False) -> Dict:
+    """
+    Pull one run's series out of the DB, read-only. Never returns VIN.
+
+    **Non-OK samples are excluded by default.** A sentinel the ECU
+    returned to mean "no value", a sensor pinned on its rail and a real
+    reading are all numbers, and averaging them together is how a health
+    model learns something false. They are counted (see `flagged_counts`)
+    so the report can say what it left out, and `include_flagged=True`
+    puts them back for anyone deliberately studying them.
+
+    Databases recorded before quality existed have no column, or NULL in
+    it. Those are treated as OK - which claims only "the decoder of the
+    day accepted this", not that the value is verified good. See
+    docs/DATA_QUALITY.md.
+    """
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     try:
@@ -69,8 +88,12 @@ def load_run(db_path: str, run_id: Optional[int]) -> Dict:
         if meta is None:
             raise SystemExit(f"no run {run_id}")
 
+        qual = (
+            "COALESCE(s.quality, 'ok')" if _has_column(db, "samples", "quality")
+            else "'ok'"
+        )
         rows = db.execute(
-            "SELECT p.key, s.ts, s.value FROM samples s "
+            f"SELECT p.key, s.ts, s.value, {qual} FROM samples s "
             "JOIN params p ON p.id = s.param_id WHERE s.run_id=? ORDER BY s.ts",
             (run_id,),
         ).fetchall()
@@ -84,8 +107,16 @@ def load_run(db_path: str, run_id: Optional[int]) -> Dict:
         db.close()
 
     series: Dict[str, List[Tuple[float, float]]] = {}
+    flagged_counts: Dict[str, Dict[str, int]] = {}
 
-    for key, ts, value in rows:
+    for key, ts, value, quality in rows:
+        if quality != "ok":
+            counts = flagged_counts.setdefault(key, {})
+            counts[quality] = counts.get(quality, 0) + 1
+
+            if not include_flagged:
+                continue
+
         series.setdefault(key, []).append((ts, value))
 
     started, ended, ecu, ecu_addr = meta
@@ -97,6 +128,10 @@ def load_run(db_path: str, run_id: Optional[int]) -> Dict:
         "ecu": ecu,                       # NOT the VIN
         "ecu_addr": ecu_addr,
         "series": series,
+        #: key -> {label: count} for everything excluded (or, with
+        #: include_flagged, everything that WOULD have been).
+        "flagged_counts": flagged_counts,
+        "include_flagged": include_flagged,
         "units": {k: u for k, u, _ in params},
         "is_obd": {k: (pid is not None) for k, _, pid in params},
     }
@@ -514,16 +549,32 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
 
 
 def quality(run: Dict) -> List[Dict]:
-    """Per-channel coverage + saturation/gap flags."""
+    """
+    Per-channel coverage, plus what the recorder flagged and what it did not.
+
+    Two different things live here and they should not be confused:
+
+    `flagged` is what the DECODER declared - sentinel, saturated, clipped -
+    from the mapping's own `invalid:`/`saturated:`/range declarations. It
+    is authoritative and needs no interpretation.
+
+    `pinned_at_max` is a heuristic over what is LEFT after those are
+    removed. It used to be the only saturation detector, and it is kept
+    for a different job now: finding cases nobody has declared yet. A
+    channel that still shows a hard pin after the declared ones are gone
+    is a candidate for investigation - which is exactly how the MAF
+    222.22 g/s artifact surfaced. It is a lead, never a conclusion.
+    """
     out = []
+    flagged_counts = run.get("flagged_counts", {})
 
     for key, s in sorted(run["series"].items()):
         ts = [t for t, _ in s]
         vals = [v for _, v in s]
         gaps = [b - a for a, b in zip(ts, ts[1:])]
-        # crude saturation flag: many samples pinned at the max value
         vmax = max(vals)
         pinned = sum(1 for v in vals if v == vmax)
+        flags = flagged_counts.get(key, {})
         out.append({
             "key": key,
             "obd": run["is_obd"].get(key, False),
@@ -531,6 +582,30 @@ def quality(run: Dict) -> List[Dict]:
             "max_gap_s": round(max(gaps), 1) if gaps else None,
             "unit": run["units"].get(key, ""),
             "pinned_at_max": pinned if pinned > max(3, 0.2 * len(vals)) else 0,
+            #: declared by the mapping, excluded from `samples` above
+            #: unless the report was run with --include-flagged
+            "flagged": flags,
+            "flagged_total": sum(flags.values()),
+        })
+
+    #
+    # A channel can be flagged into silence - every reading a sentinel,
+    # nothing usable left. It then has no series at all, so the loop
+    # above never sees it, and omitting it would recreate the very
+    # confusion this layer exists to end: "no data" looking identical to
+    # "not polled".
+    #
+    for key in sorted(set(flagged_counts) - set(run["series"])):
+        flags = flagged_counts[key]
+        out.append({
+            "key": key,
+            "obd": run["is_obd"].get(key, False),
+            "samples": 0,
+            "max_gap_s": None,
+            "unit": run["units"].get(key, ""),
+            "pinned_at_max": 0,
+            "flagged": flags,
+            "flagged_total": sum(flags.values()),
         })
 
     return out
@@ -731,17 +806,41 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
     else:
         L.append("_no DPF channels captured_")
 
-    L += ["", "## Data quality / coverage", "",
-          "| channel | src | samples | max gap | pinned@max |",
-          "|---|---|---|---|---|"]
+    total_flagged = sum(q["flagged_total"] for q in ql)
+
+    L += ["", "## Data quality / coverage", ""]
+
+    if run.get("include_flagged"):
+        L += ["**--include-flagged is on**: readings the decoder flagged as "
+              "not-measurements are INCLUDED in every statistic above. "
+              f"{total_flagged} such samples. Do not read the numbers as "
+              "physical observations.", ""]
+    elif total_flagged:
+        L += [f"{total_flagged} samples were flagged by the decoder and "
+              "excluded from every statistic above - sentinels the ECU "
+              "returned to mean \"no value\", sensors pinned on a rail, "
+              "and values outside a declared range. They are counted per "
+              "channel below rather than silently dropped.", ""]
+
+    L += ["| channel | src | samples | max gap | flagged | pinned@max |",
+          "|---|---|---|---|---|---|"]
 
     for q in ql:
         src = "OBD" if q["obd"] else "DDE"
         pin = q["pinned_at_max"] or ""
+        flags = ", ".join(
+            f"{label} {n}" for label, n in sorted(q["flagged"].items())
+        )
+        gap = "—" if q["max_gap_s"] is None else f"{q['max_gap_s']}s"
         L.append(f"| {q['key']} | {src} | {q['samples']} | "
-                 f"{q['max_gap_s']}s | {pin} |")
+                 f"{gap} | {flags} | {pin} |")
 
-    L += ["", "---",
+    L += ["",
+          "`flagged` is declared by the mapping and is authoritative. "
+          "`pinned@max` is a heuristic over what remains, kept to surface "
+          "saturation nobody has declared **yet** - a lead to investigate, "
+          "not a finding.",
+          "", "---",
           "_Read-only analysis; no baselines across sessions claimed yet._",
           ""]
 
@@ -756,9 +855,16 @@ def main() -> int:
     ap.add_argument("--db", required=True)
     ap.add_argument("--run", type=int, default=None)
     ap.add_argument("--out", default=os.path.join(_ROOT, "drive-sessions"))
+    ap.add_argument(
+        "--include-flagged", action="store_true",
+        help="include samples the decoder flagged (sentinel, saturated, "
+             "clipped). Off by default: they are not measurements, and "
+             "averaging them with real readings is how a health model "
+             "learns something false. Turn on only to study them.",
+    )
     args = ap.parse_args()
 
-    run = load_run(args.db, args.run)
+    run = load_run(args.db, args.run, include_flagged=args.include_flagged)
 
     wu = warmup(run)
     cc = crosschecks(run)
