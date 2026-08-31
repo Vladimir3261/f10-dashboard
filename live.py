@@ -2080,6 +2080,42 @@ def poll_loop(
                 for key in flagged:
                     values.pop(key, None)
 
+                #
+                # ...and neither must anything COMPUTED from it. Popping
+                # the input alone left boost frozen at its last healthy
+                # value for as long as MAP stayed railed - the sustained
+                # full-throttle window, on the hero gauge - which is the
+                # same silently-stale failure one layer up. A derived
+                # channel whose required input is flagged goes too;
+                # fallback-satisfied inputs do not count, so boost
+                # survives a flagged baro (it declares a fallback for
+                # it) but not a flagged map. Iterated, so a derived
+                # channel feeding another cascades through.
+                #
+                if flagged:
+                    dropped_keys = set(flagged)
+
+                    while True:
+                        grew = False
+
+                        for definition in profile.derived:
+                            if definition.key in dropped_keys:
+                                continue
+
+                            fallbacks = definition.fallback_map()
+                            needed = [
+                                name for role, name in definition.inputs
+                                if role not in fallbacks
+                            ]
+
+                            if any(name in dropped_keys for name in needed):
+                                values.pop(definition.key, None)
+                                dropped_keys.add(definition.key)
+                                grew = True
+
+                        if not grew:
+                            break
+
                 derived = profile.apply_derived(values, fresh)
                 values.update(derived)
                 fresh.update(derived)

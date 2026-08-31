@@ -297,3 +297,170 @@ class ThroughTheExecutor(RecorderCase):
              "gone": (255.0, "sentinel"),
              "rail": (255.0, "saturated")},
         )
+
+
+class FlaggedInputsCascadeToDerived(unittest.TestCase):
+    """
+    A derived channel must leave the carried view with its input.
+
+    The gap the Stage 1 review found, reproduced as the two-cycle case:
+    popping a flagged MAP from `values` while leaving `boost` standing
+    froze the hero gauge at its last healthy number for exactly as long
+    as MAP stayed railed - sustained full throttle. The same
+    silently-stale failure the pop exists to prevent, one layer up.
+    Display-only (no stale derived row was ever written), which is why
+    615 tests passed around it: nothing exercised the carried view
+    across a flag transition.
+    """
+
+    def setUp(self):
+        from bmwdiag.mapping import MappingRegistry, load_file
+        from bmwdiag.mapping.registry import AllCapabilities
+        from tests import support
+
+        registry = MappingRegistry([load_file(support.OBD_MAPPING)])
+        self.profile = registry.resolve(
+            AllCapabilities(), config={"tank": 70.0},
+            targets={"discovered_engine": 0x12},
+        )
+
+    def cycle(self, values, pids):
+        """The poll loop body, as live.py runs it."""
+        from bmwdiag.mapping import MappingExecutor
+        from tests.test_mapping_requests import FakeObdReader
+
+        executor = MappingExecutor(
+            self.profile, obd_reader=FakeObdReader(pids)
+        )
+        readings = executor.execute_readings([
+            self.profile.request("obd.mode01.0C"),
+            self.profile.request("obd.mode01.0B"),
+            self.profile.request("obd.mode01.33"),
+            self.profile.request("obd.mode01.2F"),
+        ])
+        fresh = {k: r.value for k, r in readings.items() if r.usable}
+        flagged = {k: r for k, r in readings.items() if not r.usable}
+        values.update(fresh)
+
+        for key in flagged:
+            values.pop(key, None)
+
+        if flagged:
+            dropped = set(flagged)
+
+            while True:
+                grew = False
+
+                for definition in self.profile.derived:
+                    if definition.key in dropped:
+                        continue
+
+                    fallbacks = definition.fallback_map()
+                    needed = [
+                        name for role, name in definition.inputs
+                        if role not in fallbacks
+                    ]
+
+                    if any(name in dropped for name in needed):
+                        values.pop(definition.key, None)
+                        dropped.add(definition.key)
+                        grew = True
+
+                if not grew:
+                    break
+
+        derived = self.profile.apply_derived(values, fresh)
+        values.update(derived)
+
+        return values
+
+    HEALTHY = {0x0C: b"\x0c\x3c", 0x0B: b"\x9e", 0x33: b"\x63",
+               0x2F: b"\xa0"}
+
+    def test_boost_leaves_the_view_when_map_saturates(self):
+        values = {}
+        self.cycle(values, self.HEALTHY)
+
+        self.assertEqual(values["map"], 158.0)
+        self.assertEqual(values["boost"], 0.59)
+
+        #: Cycle 2: MAP rails at 255. Both the input AND the derived
+        #: channel must be gone - a frozen boost is the failure.
+        self.cycle(values, {**self.HEALTHY, 0x0B: b"\xff"})
+
+        self.assertNotIn("map", values)
+        self.assertNotIn("boost", values)
+
+    def test_boost_survives_a_flagged_input_it_has_a_fallback_for(self):
+        """
+        boost declares a fallback for baro, so losing baro must not take
+        boost with it - the fallback exists precisely so boost can run
+        without a live barometric reading.
+        """
+        values = {}
+        self.cycle(values, self.HEALTHY)
+
+        #: baro goes unusable; use the sentinel-free saturation path by
+        #: making it out of range instead (baro has no declarations, so
+        #: simulate by dropping the PID and flagging nothing - instead
+        #: verify directly: pop baro as a flagged key and run the cascade)
+        flagged = {"baro"}
+        values.pop("baro", None)
+        dropped = set(flagged)
+
+        for definition in self.profile.derived:
+            fallbacks = definition.fallback_map()
+            needed = [
+                name for role, name in definition.inputs
+                if role not in fallbacks
+            ]
+
+            if any(name in dropped for name in needed):
+                values.pop(definition.key, None)
+
+        self.assertIn("boost", values)
+
+    def test_recovery_is_immediate(self):
+        """When MAP comes back usable, boost comes back the same cycle."""
+        values = {}
+        self.cycle(values, self.HEALTHY)
+        self.cycle(values, {**self.HEALTHY, 0x0B: b"\xff"})
+        self.cycle(values, self.HEALTHY)
+
+        self.assertEqual(values["map"], 158.0)
+        self.assertEqual(values["boost"], 0.59)
+
+    def test_a_chain_of_derived_channels_cascades(self):
+        """fuel_l depends on fuel; a flagged fuel takes fuel_l too."""
+        values = {}
+        self.cycle(values, self.HEALTHY)
+
+        self.assertIn("fuel_l", values)
+
+        flagged = {"fuel"}
+        values.pop("fuel", None)
+        dropped = set(flagged)
+
+        while True:
+            grew = False
+
+            for definition in self.profile.derived:
+                if definition.key in dropped:
+                    continue
+
+                fallbacks = definition.fallback_map()
+                needed = [
+                    name for role, name in definition.inputs
+                    if role not in fallbacks
+                ]
+
+                if any(name in dropped for name in needed):
+                    values.pop(definition.key, None)
+                    dropped.add(definition.key)
+                    grew = True
+
+            if not grew:
+                break
+
+        self.assertNotIn("fuel_l", values)
+
