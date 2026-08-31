@@ -53,6 +53,12 @@ def _has_column(db, table: str, column: str) -> bool:
     return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
 
 
+def _has_table(db, table: str) -> bool:
+    return db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
 def load_run(db_path: str, run_id: Optional[int],
              include_flagged: bool = False) -> Dict:
     """
@@ -98,11 +104,30 @@ def load_run(db_path: str, run_id: Optional[int],
             (run_id,),
         ).fetchall()
 
-        params = db.execute(
-            "SELECT p.key, p.unit, p.pid FROM params p "
-            "WHERE p.id IN (SELECT DISTINCT param_id FROM samples WHERE run_id=?)",
-            (run_id,),
-        ).fetchall()
+        #
+        # Unit comes from THIS run's snapshot where there is one. `params`
+        # is first-seen channel identity, so p.unit is whatever was loaded
+        # the first time this database ever saw the channel - a mapping
+        # that later corrects a unit would otherwise make an old report
+        # display the wrong one. Same join and same fallback as the sync
+        # agent uses; see docs/DATA_VERSIONING.md.
+        #
+        if _has_table(db, "run_channels"):
+            params = db.execute(
+                "SELECT p.key, COALESCE(rc.unit, p.unit), p.pid FROM params p "
+                "LEFT JOIN run_channels rc "
+                "  ON rc.param_id = p.id AND rc.run_id = ? "
+                "WHERE p.id IN "
+                "  (SELECT DISTINCT param_id FROM samples WHERE run_id=?)",
+                (run_id, run_id),
+            ).fetchall()
+        else:
+            params = db.execute(
+                "SELECT p.key, p.unit, p.pid FROM params p "
+                "WHERE p.id IN "
+                "  (SELECT DISTINCT param_id FROM samples WHERE run_id=?)",
+                (run_id,),
+            ).fetchall()
     finally:
         db.close()
 

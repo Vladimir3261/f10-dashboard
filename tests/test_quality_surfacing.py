@@ -235,3 +235,42 @@ class PreQualityDatabasesStillAnalyse(unittest.TestCase):
 
         self.assertEqual([v for _t, v in run["series"]["good"]], [10.0])
         self.assertEqual(run["flagged_counts"], {})
+
+
+class UnitsComeFromTheRunSnapshot(unittest.TestCase):
+    """
+    Follow-on from #5: `params` is first-seen channel identity, so its
+    unit is whatever was loaded the first time the database ever saw the
+    channel. A later mapping that corrects a unit must not make an older
+    report display the new one, and a newer run must not display the old.
+    """
+
+    def test_each_run_reports_its_own_unit(self):
+        db = os.path.join(tempfile.mkdtemp(), "tele.db")
+
+        for version, unit in ((1, "rpm"), (2, "1/min")):
+            mapping = load_text(
+                "schema_version: 1\n"
+                f"mapping: {{id: u-test, version: {version}, production: false}}\n"
+                "ecu: {target: 0x12}\n"
+                "requests:\n"
+                "  probe:\n"
+                "    protocol: uds\n"
+                "    service: 0x22\n"
+                "    did: 0xDA2E\n"
+                "    response: {data_length: 1}\n"
+                "    signals:\n"
+                f"      good: {{label: G, unit: '{unit}',"
+                " decode: {type: uint8}}\n",
+                "u-test",
+            )
+            rec = live.Recorder(db, chunk=1, interval=0.05)
+            rec.set_metadata(MappingRegistry([mapping]).resolve(AllCapabilities()))
+            rec.open()
+            rec.start_run("VINREDACTED", "gw", "DDE", 0x12)
+            time.sleep(0.05)
+            rec.write(time.time(), {"good": 10.0})
+            rec.close()
+
+        self.assertEqual(session_report.load_run(db, 1)["units"]["good"], "rpm")
+        self.assertEqual(session_report.load_run(db, 2)["units"]["good"], "1/min")
