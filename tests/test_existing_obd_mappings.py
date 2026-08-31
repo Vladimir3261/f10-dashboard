@@ -12,7 +12,8 @@ the last float digit.
 import unittest
 
 from . import support
-from bmwdiag.mapping import decode_signal, load_file
+from bmwdiag.mapping import decode_signal, load_file, read_value
+from bmwdiag.mapping.decoder import match_prefix
 from bmwdiag.mapping.polling import PollingPlan, resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities, MappingRegistry
 
@@ -144,7 +145,25 @@ class TestEveryLegacyPidIsMapped(ObdRegressionCase):
 
 
 class TestFormulasAreUnchanged(ObdRegressionCase):
+    def _read(self, key, data):
+        """
+        The full reading, value and label.
+
+        The sweeps below compare the *arithmetic* against the legacy
+        formulas, which is the contract: every input byte must still
+        decode to the same float. Whether a mapping then declares that
+        value unusable is a separate question, checked explicitly in
+        TestDeclaredQuality rather than folded in here - otherwise
+        declaring a sentinel would look like a formula change.
+        """
+        signal = self.registry.find_signal(key)
+        request = self.registry.find_request(signal.request_id)
+        response = bytes([0x41, request.pid]) + data
+
+        return read_value(signal.decode, match_prefix(request, response))
+
     def _decode(self, key, data):
+        """The narrow view - None for anything not usable."""
         signal = self.registry.find_signal(key)
         request = self.registry.find_request(signal.request_id)
         response = bytes([0x41, request.pid]) + data
@@ -162,7 +181,7 @@ class TestFormulasAreUnchanged(ObdRegressionCase):
                     data = bytes([raw])
 
                     self.assertEqual(
-                        self._decode(key, data),
+                        self._read(key, data).value,
                         round(decode(data), 3),
                         f"{key} diverged at 0x{raw:02X}",
                     )
@@ -177,7 +196,7 @@ class TestFormulasAreUnchanged(ObdRegressionCase):
                     data = bytes([raw >> 8, raw & 0xFF])
 
                     self.assertEqual(
-                        self._decode(key, data),
+                        self._read(key, data).value,
                         round(decode(data), 3),
                         f"{key} diverged at 0x{raw:04X}",
                     )
@@ -192,7 +211,7 @@ class TestFormulasAreUnchanged(ObdRegressionCase):
                 for raw in range(0x10000):
                     data = bytes([raw >> 8, raw & 0xFF])
 
-                    if self._decode(key, data) != round(decode(data), 3):
+                    if self._read(key, data).value != round(decode(data), 3):
                         self.fail(f"{key} diverged at 0x{raw:04X}")
 
     def test_lambda_four_byte_response(self):
@@ -204,8 +223,53 @@ class TestFormulasAreUnchanged(ObdRegressionCase):
             data = bytes([raw >> 8, raw & 0xFF, 0x12, 0x34])
 
             self.assertEqual(
-                self._decode("lambda", data), round(decode(data), 3)
+                self._read("lambda", data).value, round(decode(data), 3)
             )
+
+
+class TestDeclaredQuality(TestFormulasAreUnchanged):
+    """
+    What the production mapping declares unusable, and what that costs.
+
+    Separate from the formula sweeps on purpose: the arithmetic did not
+    change, the interpretation did.
+    """
+
+    def test_lambda_sentinel_is_flagged_but_still_decodes_to_2(self):
+        #
+        # 114,138 rows in the lake - 57.4% of the channel - were this
+        # sentinel stored as if the mixture really were 2.0.
+        #
+        reading = self._read("lambda", bytes([0xFF, 0xFF, 0x12, 0x34]))
+
+        self.assertEqual(reading.value, 2.0)
+        self.assertEqual(reading.quality, "sentinel")
+        self.assertIsNone(self._decode("lambda", bytes([0xFF, 0xFF, 0x12, 0x34])))
+
+    def test_lambda_below_the_sentinel_is_untouched(self):
+        reading = self._read("lambda", bytes([0xFF, 0xFE, 0x12, 0x34]))
+
+        self.assertEqual(reading.quality, "ok")
+
+    def test_map_is_saturated_only_on_the_byte_ceiling(self):
+        self.assertEqual(self._read("map", bytes([255])).quality, "saturated")
+        self.assertEqual(self._read("map", bytes([254])).quality, "ok")
+        self.assertEqual(self._read("map", bytes([255])).value, 255.0)
+        self.assertIsNone(self._decode("map", bytes([255])))
+
+    def test_nothing_else_in_the_production_set_is_flagged(self):
+        #
+        # Only two channels declare anything. If a third appears, it
+        # should be a deliberate edit with lake evidence behind it, not a
+        # copied line - so this fails until someone updates the list.
+        #
+        flagged = {
+            key for key in (row[1] for row in LEGACY_PIDS)
+            if (self.registry.find_signal(key).decode.invalid
+                or self.registry.find_signal(key).decode.saturated)
+        }
+
+        self.assertEqual(flagged, {"lambda", "map"})
 
 
 class TestMetadataIsUnchanged(ObdRegressionCase):

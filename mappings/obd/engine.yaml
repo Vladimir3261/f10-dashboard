@@ -2,7 +2,7 @@ schema_version: 1
 
 mapping:
   id: sae-obd-engine
-  version: "3"
+  version: "4"
   description: >
     Standard SAE OBD-II Mode 01 current-data telemetry for the engine ECU.
     Every request and formula here is the one this application has been
@@ -100,7 +100,13 @@ requests:
         label: Intake manifold
         unit: kPa
         display: {digits: 0, min: 0, max: 300}
-        decode: {type: uint8}
+        # One byte, so the channel cannot report above 255 kPa - and this
+        # car goes past it: the proprietary flow channel recorded boost
+        # actual at 2786 hPa = 278.6 kPa. In the lake 6,756 samples sit on
+        # exactly 255 against ~180 on each of 250..254, a 36x spike at the
+        # byte boundary. So 255 means "255 or more" and the true value is
+        # not recoverable - it is labelled, not repaired.
+        decode: {type: uint8, saturated: [255]}
 
   obd.mode01.0D:
     pid: 0x0D
@@ -201,7 +207,13 @@ requests:
         label: Lambda (O2 S1)
         unit: ""
         display: {digits: 3, min: 0.5, max: 2.0}
-        decode: {type: uint16_be, offset: 0, divide: 32768.0}
+        # 0xFFFF is the ECU saying "no value". It decodes to exactly 2.0,
+        # the top of this channel's own range, and was stored as if the
+        # mixture really were 2.0 - 114,138 rows, 57.4% of every lambda
+        # sample in the lake, silently wrong in every average taken over
+        # them. Listed raw rather than as 2.0 so the test cannot drift if
+        # the scale is ever corrected.
+        decode: {type: uint16_be, offset: 0, divide: 32768.0, invalid: [0xFFFF]}
 
   # -- slow: every 10 s ------------------------------------------
 

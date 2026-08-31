@@ -32,11 +32,22 @@ from bmwdiag.mapping import MappingRegistry, decode_signal, load_file
 #: retired in favour of a single unit, `seconds`, so `{hz: 10}` became
 #: `{seconds: 0.1}`. Identical rates, identical schedule.
 #:
-#: Neither bump changed a request, decode step, signal or unit, which the
-#: decode tests below and the exhaustive sweeps in
+#: v3 -> v4 (2026-08-31): two quality declarations, no arithmetic. `map`
+#: gained `saturated: [255]` and `lambda` gained `invalid: [0xFFFF]`.
+#: Neither touches a formula - every input byte still decodes to exactly
+#: the float it did, which the exhaustive sweeps in
+#: tests/test_existing_obd_mappings.py assert against the legacy
+#: reference. What changed is the interpretation: those two raw values
+#: are now recorded as `saturated` / `sentinel` instead of being stored
+#: as if they were measurements. 114,138 lambda rows in the lake - 57.4
+#: percent of the channel - were that sentinel; 6,756 MAP rows sat on the
+#: byte ceiling. See docs/DATA_QUALITY.md.
+#:
+#: None of these bumps changed a request, decode step, signal or unit,
+#: which the decode tests below and the exhaustive sweeps in
 #: tests/test_existing_obd_mappings.py still prove byte for byte.
 ENGINE_YAML_SHA256 = (
-    "e962d32c8d8705bb1d3838dc8d09854a9c31080ab07bf9362de5d537fba4dc78"
+    "8a71ee898e80bcc76d2a8c3dac9bd6e5b06241e6494fe3cbc7857c6ddadb4233"
 )
 
 
