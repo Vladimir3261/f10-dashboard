@@ -2,16 +2,20 @@
 """
 live.py - real-time engine telemetry for a BMW F10 over ENET.
 
-Read-only. It speaks HSFZ (BMW's diagnostic-over-IP framing) to the
-central gateway on TCP 6801, routes standard OBD-2 service 01 requests
-to the DDE, and serves a live HTML dashboard over SSE.
+Observational. It speaks HSFZ (BMW's diagnostic-over-IP framing) to the
+central gateway on TCP 6801, sends mapping-defined diagnostic reads to
+the DDE (and EGS), and serves a live HTML dashboard over SSE.
 
     python3 live.py                 # discover car, serve on :8080
     python3 live.py --ip 169.254.x.x
     python3 live.py --demo          # no car needed, simulated data
 
-Nothing is written to the vehicle: only service 0x01 (current data)
-requests are sent, plus HSFZ alive-check replies.
+Nothing state-changing is ever sent to the vehicle. Every outgoing
+diagnostic frame passes the observational allowlist in
+bmwdiag/protocol/safety.py - OBD services 0x01/0x09, UDS reads 0x22/
+0x19/0x3E and the 0x2C define/clear subfunctions that arm the dynamic
+DIDs - plus HSFZ alive-check replies. Write/control services abort
+before any I/O.
 
 Which channels exist, how their bytes decode and how often they are read
 is not in this file: it comes from the versioned mapping files under
@@ -54,6 +58,7 @@ from bmwdiag.mapping.model import PollingClassDef
 from bmwdiag.mapping.modes import DEFAULT_MODE_CONFIG, ModeTable, load_modes
 from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
+from bmwdiag.protocol import ObservationalTransport, assert_observational
 from bmwdiag.obd import (
     OBD_SUPPORT_PIDS,
     ObdCapabilitySet,
@@ -334,12 +339,20 @@ class HsfzClient:
         src: int = TESTER_ADDR,
         dst: int = DDE_ADDR,
         timeout: float = 3.0,
+        permit_session_control: bool = False,
     ):
         self.ip = ip
         self.local_ip = local_ip
         self.src = src
         self.dst = dst
         self.timeout = timeout
+        #: Research-tool escape hatch, and the ONLY one: a client built
+        #: with permit_session_control=True may additionally send service
+        #: 0x10 (DiagnosticSessionControl). Everything else on the write/
+        #: control list stays rejected even then. The production runtime
+        #: and run_car.sh never set this - tools/egs.py sets it for its
+        #: opt-in --session probe, and a test pins the default to False.
+        self.permit_session_control = permit_session_control
         self.sock: Optional[socket.socket] = None
         self.buf = bytearray()
 
@@ -464,6 +477,8 @@ class HsfzClient:
         expect_src: Optional[int] = None,
     ) -> bytes:
         """Send a UDS/OBD payload, return the ECU's response bytes."""
+        self._gate(bytes(data))
+
         if self.sock is None:
             raise HsfzError("not connected")
 
@@ -539,8 +554,26 @@ class HsfzClient:
 
             return body
 
+    def _gate(self, payload: bytes) -> None:
+        """
+        The safety gate, shared by BOTH diagnostic send paths - request()
+        and the collect() broadcast - so every outgoing diagnostic frame
+        in this process passes it: mapped requests, setup frames, OBD
+        batches, functional discovery, the ECU scan, ident probes and
+        variant probes. Called before ANY I/O, including the
+        not-connected error, so an unsafe payload can never reach the
+        wire and the property does not depend on call sites remembering
+        to validate. See bmwdiag/protocol/safety.py.
+        """
+        if self.permit_session_control and payload[:1] == b"\x10":
+            return
+
+        assert_observational(payload)
+
     def collect(self, data: bytes, dst: int, window: float) -> List[Tuple[int, bytes]]:
         """Broadcast a payload and gather every ECU that answers."""
+        self._gate(bytes(data))
+
         if self.sock is None:
             raise HsfzError("not connected")
 
@@ -1957,7 +1990,12 @@ def poll_loop(
 
             executor = MappingExecutor(
                 profile,
-                transport=HsfzTransport(client),
+                #: Defence in depth: HsfzClient.request is the real choke
+                #: point today, but the executor seam is where a FUTURE
+                #: transport plugs in, and wrapping here means that
+                #: transport inherits the policy without anyone
+                #: remembering to add it.
+                transport=ObservationalTransport(HsfzTransport(client)),
                 obd_reader=session,
                 on_error=note_fault,
             )
