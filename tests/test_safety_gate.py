@@ -200,9 +200,10 @@ class TheRuntimeIsGated(unittest.TestCase):
 
     def test_the_hsfz_client_gates_before_any_io(self):
         """
-        HsfzClient.request is the funnel every frame in the process
-        passes - OBD batches, the ECU scan, ident probes and the variant
-        probes that bypass HsfzTransport. Proven by ordering: on a client
+        HsfzClient.request carries almost all traffic - OBD batches,
+        the ECU scan, ident probes and the variant probes that bypass
+        HsfzTransport; collect() is the one other send path, gated in
+        the test below. Proven by ordering: on a client
         that has never connected, an unsafe payload raises UnsafePayload
         while a safe one raises "not connected" - so the check precedes
         ALL I/O, socket errors included.
@@ -214,6 +215,52 @@ class TheRuntimeIsGated(unittest.TestCase):
 
         with self.assertRaises(live.HsfzError):
             client.request(bytes([0x22, 0xF1, 0x90]))
+
+    def test_collect_gates_before_any_io(self):
+        """
+        collect() is the SECOND diagnostic send path - the functional
+        broadcast ECU discovery uses it, and it transmits via _send()
+        without going through request(). Review of the first cut of
+        this gate found it unprotected. Same never-connected ordering
+        proof: unsafe raises UnsafePayload, safe raises "not connected",
+        so the gate precedes all I/O here too.
+        """
+        client = live.HsfzClient("169.254.0.1")
+
+        with self.assertRaises(UnsafePayload):
+            client.collect(bytes([0x2E, 0xF1, 0x90]), 0xDF, window=0.1)
+
+        with self.assertRaises(live.HsfzError):
+            client.collect(bytes([0x01, 0x00]), 0xDF, window=0.1)
+
+    def test_session_control_is_rejected_by_default(self):
+        """The production runtime never sets the opt-in."""
+        client = live.HsfzClient("169.254.0.1")
+
+        self.assertFalse(client.permit_session_control)
+
+        with self.assertRaises(UnsafePayload):
+            client.request(bytes([0x10, 0x03]))
+
+    def test_the_session_control_opt_in_is_exactly_one_service(self):
+        """
+        tools/egs.py --session builds its client with
+        permit_session_control=True. That grant covers service 0x10 and
+        NOTHING else - every other write/control service stays rejected
+        on an opted-in client.
+        """
+        client = live.HsfzClient(
+            "169.254.0.1", permit_session_control=True
+        )
+
+        #: 0x10 passes the gate - proven by reaching "not connected".
+        with self.assertRaises(live.HsfzError):
+            client.request(bytes([0x10, 0x03]))
+
+        for service in sorted(set(WRITE_SERVICES) - {0x10}):
+            with self.subTest(service=hex(service)):
+                with self.assertRaises(UnsafePayload):
+                    client.request(bytes([service, 0x01]))
 
     def test_variant_probes_cannot_bypass_the_gate(self):
         """
