@@ -83,77 +83,21 @@ from bmwdiag.protocol.request import build_payload             # noqa: E402
 # ------------------------------------------------------- read-only gate
 
 
-#: The only diagnostic services this tool will ever transmit. Everything
-#: here reads or is transport housekeeping; nothing changes ECU state.
-#:
-#:   0x01 OBD Mode 01 current data      0x09 OBD Mode 09 vehicle info
-#:   0x22 ReadDataByIdentifier          0x19 ReadDTCInformation
-#:   0x3E TesterPresent
-#:   0x2C DynamicallyDefineDataIdentifier - INCLUDED, but only the
-#:        read-only subfunctions 0x01 (defineByIdentifier), 0x02
-#:        (defineByMemoryAddress) and 0x03 (clearDynamicallyDefinedDID).
-#:        These define/clear a *tester-local* DID so it can be read with
-#:        0x22; they do not write anything in the ECU. Subfunction 0x10
-#:        (the DDE7 KWP local-id read) is a read on those ECUs.
-READ_ONLY_SERVICES = {0x01, 0x09, 0x22, 0x19, 0x3E}
-
-#: 0x2C is allowed only with these subfunctions.
-DDD_READ_SUBFUNCTIONS = {0x01, 0x02, 0x03, 0x10}
-
-#: Services that must NEVER be sent by this tool, named for a clear abort
-#: message if a candidate file somehow carries one.
-WRITE_SERVICES = {
-    0x2E: "WriteDataByIdentifier",
-    0x2F: "InputOutputControlByIdentifier",
-    0x31: "RoutineControl",
-    0x14: "ClearDiagnosticInformation",
-    0x27: "SecurityAccess",
-    0x10: "DiagnosticSessionControl",   # a mode change; opt-in elsewhere, never here
-    0x11: "ECUReset",
-    0x34: "RequestDownload",
-    0x35: "RequestUpload",
-    0x36: "TransferData",
-    0x37: "RequestTransferExit",
-    0x28: "CommunicationControl",
-    0x3D: "WriteMemoryByAddress",
-    0x85: "ControlDTCSetting",
-}
-
-
-class UnsafePayload(Exception):
-    """A payload is not on the read-only allowlist. The run aborts."""
-
-
-def assert_read_only(payload: bytes) -> None:
-    """Raise UnsafePayload unless `payload` is a permitted read."""
-    if not payload:
-        raise UnsafePayload("empty payload")
-
-    service = payload[0]
-
-    if service in WRITE_SERVICES:
-        raise UnsafePayload(
-            f"service 0x{service:02X} ({WRITE_SERVICES[service]}) is a "
-            "write/control service and is never sent by this tool"
-        )
-
-    if service == 0x2C:
-        if len(payload) < 2 or payload[1] not in DDD_READ_SUBFUNCTIONS:
-            sub = payload[1] if len(payload) > 1 else None
-            raise UnsafePayload(
-                f"service 0x2C subfunction "
-                f"{('0x%02X' % sub) if sub is not None else '(none)'} is "
-                "not a permitted define/clear/read subfunction "
-                f"{sorted(hex(s) for s in DDD_READ_SUBFUNCTIONS)}"
-            )
-
-        return
-
-    if service not in READ_ONLY_SERVICES:
-        raise UnsafePayload(
-            f"service 0x{service:02X} is not on the read-only allowlist "
-            f"{sorted(hex(s) for s in READ_ONLY_SERVICES | {0x2C})}"
-        )
+#
+# The allowlist itself lives in bmwdiag/protocol/safety.py and is shared
+# with the normal in-car runtime - one policy, one implementation. This
+# tool used to carry its own copy, which meant the supervised validation
+# path was protected while live.py was not, and the two lists could
+# drift. The local names are kept as aliases so this file reads as it
+# always has; a test asserts they ARE the shared objects, not copies.
+#
+from bmwdiag.protocol.safety import (                           # noqa: E402
+    DDD_SUBFUNCTIONS as DDD_READ_SUBFUNCTIONS,
+    OBSERVATIONAL_SERVICES as READ_ONLY_SERVICES,
+    WRITE_SERVICES,
+    UnsafePayload,
+    assert_observational as assert_read_only,
+)
 
 
 # ------------------------------------------------------------ transport
