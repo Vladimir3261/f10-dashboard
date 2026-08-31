@@ -88,7 +88,13 @@ class DecodedResponse:
 
     request_id: str
     raw: bytes
+    #: Usable values only - what a caller that cannot carry a quality
+    #: label should look at. Unchanged since before quality existed.
     values: Dict[str, Any] = field(default_factory=dict)
+    #: Every signal the response carried, as key -> Reading, including the
+    #: ones `values` leaves out because they are not measurements. This is
+    #: what lets storage record that the ECU answered and said no-value.
+    readings: Dict[str, Any] = field(default_factory=dict)
 
 
 def build_payload(request: RequestDef) -> bytes:

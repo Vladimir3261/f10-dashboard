@@ -2058,15 +2058,54 @@ def poll_loop(
                 # The plan schedules requests, not channel names, so two
                 # signals decoded from one reply cost one exchange.
                 #
-                fresh = executor.execute(plan.due(cycle, started))
+                readings = executor.execute_readings(plan.due(cycle, started))
+                fresh = {
+                    key: r.value for key, r in readings.items() if r.usable
+                }
+                flagged = {
+                    key: r for key, r in readings.items() if not r.usable
+                }
                 values.update(fresh)
+
+                #
+                # A channel that answered with something unusable this
+                # cycle must not leave its last good value standing. The
+                # carried-forward view feeds both the dashboard and the
+                # derived channels, and showing a MAP from thirty seconds
+                # ago as if it were current - or computing boost from it -
+                # is worse than showing nothing. The reading itself is
+                # still recorded below, with the label saying what
+                # happened.
+                #
+                for key in flagged:
+                    values.pop(key, None)
 
                 derived = profile.apply_derived(values, fresh)
                 values.update(derived)
                 fresh.update(derived)
 
-                if rec is not None and fresh:
-                    rec.write(time.time(), numeric_only(fresh, profile))
+                if rec is not None and (fresh or flagged):
+                    #
+                    # Flagged readings are stored, not shown. That is the
+                    # whole change: "the ECU said no-value" becomes a row
+                    # instead of an absence, while the display keeps
+                    # suppressing exactly what it suppressed before.
+                    #
+                    # A derived channel carries no label because it is
+                    # only computed from usable inputs - when an input is
+                    # flagged it is gone from `values` above, so the
+                    # derived value is not produced at all rather than
+                    # produced from a poisoned one.
+                    #
+                    stored = dict(fresh)
+                    stored.update(
+                        {key: r.value for key, r in flagged.items()}
+                    )
+                    rec.write(
+                        time.time(),
+                        numeric_only(stored, profile),
+                        {key: r.quality for key, r in readings.items()},
+                    )
 
                 latency = (time.monotonic() - started) * 1000.0
                 hz_count += 1
