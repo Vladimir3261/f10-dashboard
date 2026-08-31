@@ -175,12 +175,18 @@ class Decode:
     last float digit moving with them:
 
         raw = primitive(window)
-        raw is in `invalid`               -> None
+        raw is in `invalid`               -> quality 'sentinel'
+        raw is in `saturated`             -> quality 'saturated'
         enum                              -> string
         lookup                            -> piecewise-linear interpolation
         otherwise  ((raw + pre_add) * scale) / divide + add
-        result outside valid_min/max      -> None
+        result outside valid_min/max      -> quality 'clipped'
         round to `round` digits
+
+    `invalid` and `saturated` are raw-domain: they list bit patterns, not
+    decoded values, so a sentinel stays a sentinel if the scale is ever
+    corrected. They label the reading rather than discard it - the narrow
+    `decode_value` still returns None for anything not usable.
     """
 
     type: str
@@ -198,6 +204,7 @@ class Decode:
     enum_default: Optional[str] = None
     lookup: Optional[Tuple[Tuple[float, float], ...]] = None
     invalid: Tuple[int, ...] = ()
+    saturated: Tuple[int, ...] = ()
     valid_min: Optional[float] = None
     valid_max: Optional[float] = None
     encoding: str = "ascii"
