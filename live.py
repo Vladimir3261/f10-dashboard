@@ -1361,7 +1361,20 @@ class Diagnostics:
                 #: None, not 0, until something has actually been asked -
                 #: "0% success" on an unpolled request would read as a
                 #: failure rather than as no data yet.
-                "success_pct": None if not sent else round(100.0 * ok / sent, 1),
+                #
+                # Never rounded UP to 100 while a failure exists.
+                # 6963/6964 rounds to 100.0, and "100%" printed beside
+                # "failed: 1" is exactly what makes someone stop
+                # trusting a panel whose only job is telling them what
+                # is broken. Floored instead, so the number can be
+                # optimistic by a tenth but never claim perfection the
+                # data does not support.
+                #
+                "success_pct": (
+                    None if not sent
+                    else 100.0 if ok == sent
+                    else math.floor(1000.0 * ok / sent) / 10.0
+                ),
                 "last_ok_age": (
                     None if not st.get("last_ok")
                     else round(now - st["last_ok"], 1)
