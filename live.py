@@ -54,6 +54,7 @@ from bmwdiag.mapping.model import PollingClassDef
 from bmwdiag.mapping.modes import DEFAULT_MODE_CONFIG, ModeTable, load_modes
 from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
+from bmwdiag.protocol import ObservationalTransport, assert_observational
 from bmwdiag.obd import (
     OBD_SUPPORT_PIDS,
     ObdCapabilitySet,
@@ -464,6 +465,17 @@ class HsfzClient:
         expect_src: Optional[int] = None,
     ) -> bytes:
         """Send a UDS/OBD payload, return the ECU's response bytes."""
+        #
+        # The safety gate, at the one point every diagnostic frame in
+        # this process funnels through: mapped requests, setup frames,
+        # OBD batches, the ECU scan, ident probes and variant probes all
+        # end up here. Checked before ANY I/O - including the
+        # not-connected error - so an unsafe payload can never reach the
+        # wire and the property does not depend on call sites
+        # remembering to validate. See bmwdiag/protocol/safety.py.
+        #
+        assert_observational(bytes(data))
+
         if self.sock is None:
             raise HsfzError("not connected")
 
@@ -1957,7 +1969,12 @@ def poll_loop(
 
             executor = MappingExecutor(
                 profile,
-                transport=HsfzTransport(client),
+                #: Defence in depth: HsfzClient.request is the real choke
+                #: point today, but the executor seam is where a FUTURE
+                #: transport plugs in, and wrapping here means that
+                #: transport inherits the policy without anyone
+                #: remembering to add it.
+                transport=ObservationalTransport(HsfzTransport(client)),
                 obd_reader=session,
                 on_error=note_fault,
             )

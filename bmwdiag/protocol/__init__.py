@@ -13,11 +13,19 @@ from .request import (
     ObdPidReader,
     build_request,
 )
+from .safety import (
+    ObservationalTransport,
+    UnsafePayload,
+    assert_observational,
+)
 
 __all__ = [
     "DecodedResponse",
     "DiagnosticRequest",
     "DiagnosticTransport",
     "ObdPidReader",
+    "ObservationalTransport",
+    "UnsafePayload",
+    "assert_observational",
     "build_request",
 ]
