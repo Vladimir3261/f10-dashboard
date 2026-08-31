@@ -1834,10 +1834,12 @@ function renderCar(d) {
         : `<span class="badge rej">${escape_(m.verification)}</span>`}
     </div>`).join("");
 
-  /* Failing first: that is the order you debug in. */
+  /* Failing first: that is the order you debug in. A resting request
+     is mid-story - the executor stood it down after repeated faults -
+     so it sorts with the failures, not the healthy rows. */
   const reqs = (d.requests || []).slice().sort((a, b) => {
-    const fa = a.sent && !a.ok ? 0 : a.failed ? 1 : 2;
-    const fb = b.sent && !b.ok ? 0 : b.failed ? 1 : 2;
+    const fa = a.resting_for ? 0 : a.sent && !a.ok ? 0 : a.failed ? 1 : 2;
+    const fb = b.resting_for ? 0 : b.sent && !b.ok ? 0 : b.failed ? 1 : 2;
     return fa - fb || a.id.localeCompare(b.id);
   });
 
@@ -1853,13 +1855,21 @@ function renderCar(d) {
         const what = q.pid ? `${escape_(q.address)} pid ${escape_(q.pid)}`
           : q.did ? `${escape_(q.address)} did ${escape_(q.did)}`
           : escape_(q.address);
+        /* "resting, ~5s after 3 x transport_nack" - an approximate
+           state, deliberately not a countdown: the value is a snapshot
+           taken when the tab loaded, and a ticking number that froze
+           would read as a hung page. */
+        const resting = q.resting_for
+          ? `resting ~${Math.ceil(q.resting_for)}s after `
+            + `${q.consecutive_faults} fault${q.consecutive_faults === 1 ? "" : "s"} · `
+          : "";
         return `<tr class="${dead ? "rowbad" : ""}">
           <td class="k">${escape_(q.id)}</td>
           <td>${what}</td>
           <td>${q.period_s == null ? "—" : q.period_s + "s"}</td>
           <td>${q.sent}</td><td>${q.ok}</td><td>${q.failed}</td>
           <td class="${cls}">${rate}</td>
-          <td>${escape_(q.last_error || "")}</td></tr>`;
+          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
       }).join("")
     + `</tbody>`;
 
