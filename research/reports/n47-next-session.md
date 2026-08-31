@@ -216,6 +216,17 @@ health. Rail actual-vs-setpoint and EGR deviation are the next two.
   to the decode would stop it being stored as truth, but would currently
   *drop* it silently — which is why this wants the Stage-1 quality flag
   work rather than a clamp.
+
+- **`maf` reads exactly 222.22 g/s with the engine stopped** (found by
+  F10-VM in the lake, 2026-08-31): 13,622 samples at exactly 222.22
+  (raw 22222), **13,601 of them at rpm = 0**, where the channel
+  alternates between ~1.1 g/s and this value. 222 g/s with the engine
+  off is impossible; it looks like a DDE default/init value, but 22222
+  is not a natural sentinel bit pattern and no source documents it, so
+  declaring it `invalid:` would be invented data. **Car-side capture
+  needed, same as the EGR case:** with ignition on and engine off,
+  record the raw PID `0x10` response bytes. Until then, treat MAF at
+  rpm = 0 as unusable and gate MAF analytics on engine-running.
 - **`lambda`** sits at exactly 2.0 for 5,773 of 7,797 samples — the
   "no value" sentinel. Either find the DDE's real lambda DID or mark the
   OBD channel unusable so it stops polluting reports.
