@@ -213,6 +213,9 @@ class MappingExecutor:
         # identical in the sample table; here they do not.
         #
         self._stats: Dict[str, Dict[str, Any]] = {}
+        #: channel key -> {quality label: count}. Signal-level, unlike
+        #: _stats which is request-level; see _record_quality().
+        self._quality: Dict[str, Dict[str, int]] = {}
         #
         # Consecutive per-request transport faults. One ECU that is slow or
         # absent must not tear down a link that is otherwise fine, but a link
@@ -290,6 +293,34 @@ class MappingExecutor:
                         **self._rest_fields(rid),
                     }
                     for rid, st in self._stats.items()
+                }
+            except RuntimeError:                # changed size during iteration
+                continue
+
+        return {}
+
+    def _record_quality(self, readings: Dict[str, Any]) -> None:
+        """
+        Count how each signal's quality came out, per channel.
+
+        Request-level counters answer "did the exchange work". They cannot
+        answer "did anything usable come back", because a positive
+        response can still decode to a sentinel or sit on a sensor's rail.
+        Those are different questions and the diagnostics view needs both:
+        a channel at 100% request success and 100% sentinel is broken in a
+        way no request counter can show.
+        """
+        for key, reading in readings.items():
+            counts = self._quality.setdefault(key, {})
+            counts[reading.quality] = counts.get(reading.quality, 0) + 1
+
+    def quality_stats(self) -> Dict[str, Dict[str, int]]:
+        """Per-channel quality counters, for the diagnostics view. Copied."""
+        for _ in range(3):
+            try:
+                return {
+                    key: dict(counts)
+                    for key, counts in self._quality.items()
                 }
             except RuntimeError:                # changed size during iteration
                 continue
@@ -482,6 +513,7 @@ class MappingExecutor:
                 continue
 
             self._record_ok(request.id, time.time())
+            self._record_quality(readings)
             out.append(DecodedResponse(
                 request.id, response, _usable(readings), readings,
             ))
@@ -610,6 +642,7 @@ class MappingExecutor:
                 continue
 
             self._record_ok(request.id, time.time())
+            self._record_quality(readings)
             out.append(DecodedResponse(
                 request.id, bytes(response), _usable(readings), readings,
             ))
