@@ -158,8 +158,27 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         # p.mapping_ver only exists on databases recorded after mapping
         # versioning landed; fall back to '' for older ones.
         ver = "p.mapping_ver" if _has_column(con, "params", "mapping_ver") else "''"
+        #
+        # s.quality only exists post-data-quality, and is NULL for rows
+        # that were already in a database when the column was added.
+        #
+        # Both cases report 'ok', which needs stating precisely: it claims
+        # "the decoder of the day accepted this value", NOT "this value is
+        # verified good". Those rows come from the narrow decode path,
+        # which dropped every reading it could not use - so nothing
+        # rejected is in there. What IS in there is everything nobody had
+        # taught the decoder to reject yet, which on this car means every
+        # lambda sentinel and every saturated MAP.
+        #
+        # The alternative would be a seventh 'unknown' enum value, and the
+        # lake's Enum8 cannot express one without an ALTER MODIFY COLUMN.
+        # Not worth a schema migration to relabel history that is already
+        # described in docs/DATA_QUALITY.md.
+        #
+        qual = "s.quality" if _has_column(con, "samples", "quality") else "NULL"
         cur = con.execute(
-            f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, p.unit, s.value, {ver} "
+            f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, p.unit, s.value, "
+            f"{ver}, {qual} "
             "FROM samples s "
             "JOIN runs r   ON r.id = s.run_id "
             "JOIN params p ON p.id = s.param_id "
@@ -174,8 +193,8 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         {"_rowid": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, run_id),
          "ts": ts, "channel_raw": key, "unit": unit or "", "value": value,
-         "mapping_ver": mver or ""}
-        for rid, vin, run_id, ts, key, unit, value, mver in rows
+         "mapping_ver": mver or "", "quality": qual or "ok"}
+        for rid, vin, run_id, ts, key, unit, value, mver, qual in rows
     ]
 
 

@@ -797,7 +797,20 @@ CREATE TABLE IF NOT EXISTS samples (
     run_id   INTEGER NOT NULL,
     ts       REAL NOT NULL,
     param_id INTEGER NOT NULL,
-    value    REAL NOT NULL
+    value    REAL NOT NULL,
+    -- Why this value may not be a measurement: one of the lake's six
+    -- labels ('ok', 'saturated', 'sentinel', 'stale', 'clipped',
+    -- 'decode_fail'). Without it a sentinel the ECU returned to say
+    -- "no value" is indistinguishable from a real reading, and a value
+    -- the decoder rejected is indistinguishable from one never polled -
+    -- both were simply an absent row.
+    --
+    -- The label is written for every sample INCLUDING 'ok', so NULL keeps
+    -- one unambiguous meaning: recorded before quality was tracked. Same
+    -- convention as runs.clock_synced, and for the same reason - a NULL
+    -- that doubles as a default would make "fine" and "unknown" the same
+    -- row again, which is the defect this column exists to remove.
+    quality  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -934,9 +947,25 @@ class Recorder:
         except queue.Full:
             pass
 
-    def write(self, ts: float, values: Dict[str, float]) -> None:
+    def write(
+        self,
+        ts: float,
+        values: Dict[str, float],
+        qualities: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Record one cycle's values, optionally with a quality label each.
+
+        `qualities` is keyed like `values`; anything missing from it is
+        recorded as 'ok'. That default is honest rather than convenient:
+        a caller that does not pass labels is going through the narrow
+        decode path, which drops every reading that is not usable, so
+        what reaches here really is 'ok'.
+        """
         try:
-            self.q.put_nowait(("s", (ts, dict(values))))
+            self.q.put_nowait(
+                ("s", (ts, dict(values), dict(qualities or {})))
+            )
         except queue.Full:
             self.dropped += 1
 
@@ -981,6 +1010,9 @@ class Recorder:
                 "ALTER TABLE runs ADD COLUMN clock_synced INTEGER"
             )
 
+        if "quality" not in cols("samples"):
+            self.db.execute("ALTER TABLE samples ADD COLUMN quality TEXT")
+
         self.db.commit()
 
     def _param_id(self, key: str) -> int:
@@ -1021,7 +1053,8 @@ class Recorder:
             return
 
         self.db.executemany(
-            "INSERT INTO samples(run_id, ts, param_id, value) VALUES (?,?,?,?)",
+            "INSERT INTO samples(run_id, ts, param_id, value, quality) "
+            "VALUES (?,?,?,?,?)",
             pending,
         )
         self.db.commit()
@@ -1110,10 +1143,13 @@ class Recorder:
                 self.db.commit()
 
             elif kind == "s" and self.run_id is not None:
-                ts, values = payload
+                ts, values, qualities = payload
 
                 for key, value in values.items():
-                    pending.append((self.run_id, ts, self._param_id(key), value))
+                    pending.append((
+                        self.run_id, ts, self._param_id(key), value,
+                        qualities.get(key, "ok"),
+                    ))
 
             if len(pending) >= self.chunk or (
                 pending and time.monotonic() - last >= self.interval
