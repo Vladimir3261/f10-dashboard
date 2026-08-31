@@ -45,6 +45,8 @@ _spec = importlib.util.spec_from_file_location(
 live = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(live)
 
+from bmwdiag.protocol.safety import UnsafePayload  # noqa: E402
+
 
 #
 # Addresses BMW uses for the transmission across E/F platforms. `find`
@@ -69,7 +71,16 @@ def connect(args) -> live.HsfzClient:
         ip, vin = live.discover(local)
         print(f"[+] gateway {ip} (VIN {vin})")
 
-    client = live.HsfzClient(ip, local, timeout=args.timeout)
+    #
+    # --session is the one state-touching probe this tool offers (0x10
+    # 0x03, opt-in, printed loudly). The observational gate in
+    # live.HsfzClient rejects service 0x10 by default; the client is
+    # granted the explicit session-control opt-in ONLY when the operator
+    # passed --session. Every other write/control service stays blocked
+    # either way.
+    #
+    client = live.HsfzClient(ip, local, timeout=args.timeout,
+                             permit_session_control=args.session)
     client.connect()
 
     return client
@@ -80,6 +91,12 @@ def open_session(client: live.HsfzClient, addr: int, timeout: float = 2.0) -> bo
     try:
         resp = client.request(bytes([0x10, 0x03]), timeout=timeout, dst=addr)
         return bool(resp) and resp[0] == 0x50
+    except UnsafePayload:
+        # The client was built without permit_session_control - a
+        # programming error here, not a car answer. Returning False
+        # would report "the ECU refused" for a frame that was never
+        # sent; fail loudly instead.
+        raise
     except Exception:
         return False
 
