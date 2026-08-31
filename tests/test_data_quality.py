@@ -216,3 +216,84 @@ class ToTheLake(RecorderCase):
 
         for row in built:
             self.assertIn(row["quality"], QUALITIES)
+
+
+class ThroughTheExecutor(RecorderCase):
+    """
+    The runtime path: a flagged reading is stored, and only stored.
+
+    The narrow view stays exactly what it was, which is what keeps the
+    dashboard from suddenly displaying a sentinel as a measurement.
+    """
+
+    def _profile(self):
+        from bmwdiag.mapping import load_text, MappingRegistry
+        from bmwdiag.mapping.registry import AllCapabilities
+
+        mapping = load_text(
+            "schema_version: 1\n"
+            "mapping: {id: t, version: 1, production: false}\n"
+            "ecu: {target: 0x12}\n"
+            "requests:\n"
+            "  probe:\n"
+            "    protocol: uds\n"
+            "    service: 0x22\n"
+            "    did: 0xDA2E\n"
+            "    response: {data_length: 3}\n"
+            "    signals:\n"
+            "      good:  {label: G, unit: '', decode: {type: uint8, offset: 0}}\n"
+            "      gone:  {label: S, unit: '', decode: {type: uint8, offset: 1,"
+            " invalid: [255]}}\n"
+            "      rail:  {label: R, unit: '', decode: {type: uint8, offset: 2,"
+            " saturated: [255]}}\n",
+            "test",
+        )
+
+        return MappingRegistry([mapping]).resolve(AllCapabilities())
+
+    def _executor(self, profile):
+        class Answering:
+            def request(self, payload, *, dst, timeout=None):
+                #: good = 10, gone = the sentinel, rail = pinned
+                return bytes([0x62, 0xDA, 0x2E, 10, 255, 255])
+
+        return live.MappingExecutor(profile, transport=Answering())
+
+    def test_the_narrow_view_is_unchanged(self):
+        profile = self._profile()
+        values = self._executor(profile).execute(profile.requests)
+
+        self.assertEqual(values, {"good": 10.0})
+
+    def test_the_reading_view_labels_all_three(self):
+        profile = self._profile()
+        readings = self._executor(profile).execute_readings(profile.requests)
+
+        self.assertEqual(
+            {k: r.quality for k, r in readings.items()},
+            {"good": "ok", "gone": "sentinel", "rail": "saturated"},
+        )
+        self.assertEqual(readings["gone"].value, 255.0)
+
+    def test_a_flagged_reading_reaches_storage_with_its_reason(self):
+        #
+        # The defect in one assertion. Before this, `gone` and `rail`
+        # produced no rows at all and were indistinguishable from channels
+        # nobody polled.
+        #
+        profile = self._profile()
+        readings = self._executor(profile).execute_readings(profile.requests)
+
+        self.rec.write(
+            time.time(),
+            {k: r.value for k, r in readings.items()},
+            {k: r.quality for k, r in readings.items()},
+        )
+        self._settle()
+
+        self.assertEqual(
+            {k: (v, q) for k, v, q in self._rows()},
+            {"good": (10.0, "ok"),
+             "gone": (255.0, "sentinel"),
+             "rail": (255.0, "saturated")},
+        )

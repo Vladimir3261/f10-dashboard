@@ -27,7 +27,7 @@ from ..protocol.request import (
     DiagnosticRequest,
     build_request,
 )
-from .decoder import decode_response
+from .decoder import read_response
 from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
@@ -147,6 +147,15 @@ def _is_request_fault(exc: Exception) -> bool:
     # A negative acknowledgement: the gateway is alive and refused to route
     # to one target (e.g. "gateway will not route to 0x18" for the EGS).
     return exc.__class__.__name__.endswith("Nack")
+
+
+def _usable(readings: Dict[str, Any]) -> Dict[str, Any]:
+    """The measurement subset of a reading map, as plain values."""
+    return {
+        key: reading.value
+        for key, reading in readings.items()
+        if reading.usable
+    }
 
 
 class MappingExecutor:
@@ -377,11 +386,28 @@ class MappingExecutor:
     def execute(
         self, requests: Sequence[RequestDef]
     ) -> Dict[str, Any]:
-        """Run every request and merge the decoded signals."""
+        """
+        Run every request and merge the usable decoded signals.
+
+        Unchanged: only measurements come back, and a reading the ECU
+        flagged is simply absent. `execute_readings` is the view that
+        keeps it, for callers that can record why.
+        """
         out: Dict[str, Any] = {}
 
         for decoded in self.execute_detailed(requests):
             out.update(decoded.values)
+
+        return out
+
+    def execute_readings(
+        self, requests: Sequence[RequestDef]
+    ) -> Dict[str, Any]:
+        """Run every request and merge the signals as key -> Reading."""
+        out: Dict[str, Any] = {}
+
+        for decoded in self.execute_detailed(requests):
+            out.update(decoded.readings)
 
         return out
 
@@ -447,7 +473,7 @@ class MappingExecutor:
             self.last_responses[request.id] = response
 
             try:
-                values = decode_response(request, response)
+                readings = read_response(request, response)
             except (DecodeError, MappingError) as exc:
                 self._note(request.id, exc)
                 continue
@@ -456,7 +482,9 @@ class MappingExecutor:
                 continue
 
             self._record_ok(request.id, time.time())
-            out.append(DecodedResponse(request.id, response, values))
+            out.append(DecodedResponse(
+                request.id, response, _usable(readings), readings,
+            ))
 
         return out
 
@@ -573,7 +601,7 @@ class MappingExecutor:
             self.last_responses[request.id] = bytes(response)
 
             try:
-                values = decode_response(request, bytes(response))
+                readings = read_response(request, bytes(response))
             except (DecodeError, MappingError) as exc:
                 self._note(request.id, exc)
                 continue
@@ -582,6 +610,8 @@ class MappingExecutor:
                 continue
 
             self._record_ok(request.id, time.time())
-            out.append(DecodedResponse(request.id, bytes(response), values))
+            out.append(DecodedResponse(
+                request.id, bytes(response), _usable(readings), readings,
+            ))
 
         return out
