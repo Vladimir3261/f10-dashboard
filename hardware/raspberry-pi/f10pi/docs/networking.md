@@ -71,6 +71,34 @@ nmcli -f NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY connection show
 nmcli device wifi list
 ```
 
+### Regulatory domain must be ready before the first scan
+
+A second, less obvious boot failure was reproduced on Raspberry Pi 4 with the
+BCM43455 radio. The preferred profile was valid and had priority 200, but the
+AP used 2.4 GHz channel 13. With BCM43455 firmware `7.45.265`, `brcmfmac`
+logged `Firmware rejected country setting`; channel 13 was absent from the
+initial scan, so NetworkManager correctly chose the lower-priority fallback
+that it could actually see. The preferred network became visible only after a
+later regulatory refresh, by which time NetworkManager already had a healthy
+connection and did not switch.
+
+`bootstrap.sh` therefore runs
+[`configure-wifi-regulatory.sh`](../scripts/configure-wifi-regulatory.sh)
+**before** creating Wi-Fi profiles. It:
+
+- sets the installation country from `WIFI_COUNTRY`;
+- makes `cfg80211.ieee80211_regdom=<country>` part of the kernel command line
+  so legal channels are available before NetworkManager's first scan;
+- on BCM43455 only, replaces the specifically observed bad `7.45.265`
+  firmware with SHA-256-pinned Infineon `7.45.286` plus the matching CLM blob;
+- backs up anything it replaces and refuses to overwrite unknown/newer
+  firmware versions.
+
+A reboot is required if that step changes firmware or the kernel cmdline.
+Run [`verify-wifi-regulatory.sh`](../scripts/verify-wifi-regulatory.sh) after
+a cold boot. The complete sanitized investigation and rollback procedure is
+[`wifi-regulatory.md`](wifi-regulatory.md).
+
 ## eth0 — BMW ENET link
 
 `ipv4.method` **must be `link-local`**, not `auto`. The BMW ZGW serves no

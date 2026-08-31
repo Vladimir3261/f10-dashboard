@@ -67,7 +67,51 @@ cellular, parked:
 Far more than sync needs: the wire format measured **2.4 bytes/sample** in
 practice, so a full drive is a few MB.
 
-## 4. Cable reliability — the recurring failure
+## 4. Wi-Fi channel 13 cold-boot failure — fixed
+
+A later reboot exposed a separate Raspberry Pi Wi-Fi problem. NetworkManager
+had a preferred Wi-Fi profile at priority 200 and a fallback hotspot at
+priority 10, yet boot consistently landed on the fallback. The preferred
+profile, PSK, interface binding, and autoconnect settings were all correct.
+Manual activation worked once the AP was visible.
+
+The real difference was RF visibility during the **initial** scan. The
+preferred AP was on 2.4 GHz channel 13. The Pi 4's BCM43455 firmware was
+`7.45.265`; `dmesg` repeatedly logged:
+
+```text
+brcmf_cfg80211_reg_notifier: Firmware rejected country setting
+```
+
+The global regulatory country was configured correctly, but the preferred
+channel-13 AP was absent during the first scan. Once regulatory state was
+refreshed later, the AP appeared immediately. By then NetworkManager already
+had a healthy fallback connection and, correctly, did not abandon it merely
+because a higher-priority profile became visible.
+
+The working cold-boot fix was the combination of:
+
+1. replace only the known-bad BCM43455 `7.45.265` firmware with Infineon
+   `7.45.286` **and the matching CLM blob**;
+2. SHA-256 verify both files before installing them and keep backups;
+3. put `cfg80211.ieee80211_regdom=<installation-country>` in the kernel
+   command line so the country is available before NetworkManager's first
+   scan.
+
+After that reboot, NetworkManager auto-activated the preferred channel-13
+profile about one second after `wlan0` became ready. The old `Firmware
+rejected country setting` message disappeared.
+
+A separate router configuration issue also surfaced: after association the AP
+advertised a different Country IE, which changed the global regulatory domain.
+That did not block channel 13 but belongs in the AP/router configuration, not
+in the Pi workaround.
+
+The reusable, sanitized investigation, exact firmware hashes, provisioning
+script, verification commands, and rollback notes are in
+[`hardware/raspberry-pi/f10pi/docs/wifi-regulatory.md`](../hardware/raspberry-pi/f10pi/docs/wifi-regulatory.md).
+
+## 5. Cable reliability — the recurring failure
 
 A drive fragmented into 7 runs because the ENET cable lost carrier for
 2m46s mid-drive (`carrier-changed` in the NetworkManager journal),
@@ -79,14 +123,14 @@ interface.
 link-local interface on every reconnect attempt, so it recovers by itself
 once the cable seats again.
 
-## 5. Decode finding — OBD MAP saturates, the DDE does not
+## 6. Decode finding — OBD MAP saturates, the DDE does not
 
 Standard OBD MAP saturates at 255 kPa while the DDE reads true manifold
 pressure beyond it. The recurring boost cross-check warning in earlier
 reports is **generic-sensor saturation, not a decode error**, and
 `n47d_boost_act` is the accurate channel above 250 kPa.
 
-## 6. Open issues
+## 7. Open issues
 
 - **ClickHouse self-logging dwarfs the telemetry.** On a small box the
   `system.*` log tables (~88 MiB) far exceeded the actual telemetry
