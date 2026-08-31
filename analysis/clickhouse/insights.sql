@@ -2,6 +2,19 @@
 -- pass the vehicle with --param_vin=<VIN>. Run:
 --   clickhouse-client --param_vin=<VIN> --multiquery < insights.sql
 -- Analytics is PER VEHICLE by design; cross-vehicle mixing is noise.
+--
+-- EVERY query that interprets `value` as a physical measurement filters
+-- `quality = 'ok'`. A sentinel the ECU returned to mean "no value", a
+-- sensor pinned on its rail and a clipped reading are all numbers, and
+-- letting them into a health metric is how this turns into a confident
+-- wrong answer. The data-quality sections (6, 6b) deliberately do NOT
+-- filter - reporting on the flagged rows is their entire job.
+--
+-- Historical caveat, and it matters for every trend below: rows recorded
+-- before the data-quality layer landed are all 'ok' because nothing was
+-- labelling them, NOT because they were verified clean. That era
+-- contains unlabelled lambda sentinels and saturated MAP. Filtering on
+-- quality does not retroactively clean it.
 
 -- 1. Session inventory ------------------------------------------------
 SELECT '=== 1. drives (sessions) ===' AS _;
@@ -9,8 +22,10 @@ SELECT session_id,
        formatDateTime(min(ts),'%m-%d %H:%M') AS started,
        round(dateDiff('second', min(ts), max(ts))/60.0,1) AS min,
        count() AS samples,
-       round(max(if(channel='vehicle.speed', value, 0)),0) AS max_kmh,
-       round(max(if(channel='engine.rpm', value, 0)),0) AS max_rpm
+       -- count() is inventory and stays whole; the maxima are
+       -- measurements, so they take only usable readings.
+       round(maxIf(value, channel='vehicle.speed' AND quality='ok'),0) AS max_kmh,
+       round(maxIf(value, channel='engine.rpm'    AND quality='ok'),0) AS max_rpm
 FROM telemetry.samples
 WHERE vehicle_id = {vin:String}
 GROUP BY session_id HAVING samples > 2000
@@ -27,9 +42,9 @@ SELECT round(maf,-1) AS maf_gps,
 FROM (
   SELECT a.ts AS ts, a.value AS dp, b.value AS maf
   FROM (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='dpf.differential_pressure') a
+        WHERE vehicle_id={vin:String} AND channel='dpf.differential_pressure' AND quality='ok') a
   ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='engine.maf') b
+        WHERE vehicle_id={vin:String} AND channel='engine.maf' AND quality='ok') b
   ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts
 )
 WHERE maf IS NOT NULL
@@ -44,12 +59,12 @@ SELECT multiIf(rpm<1000,'idle',rpm<1800,'1000-1800',rpm<2600,'1800-2600','2600+'
 FROM (
   SELECT a.value - b.value AS dev, c.value AS rpm
   FROM (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='engine.boost.actual') a
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.actual' AND quality='ok') a
   ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint') b
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint' AND quality='ok') b
   ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts
   ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='engine.rpm') c
+        WHERE vehicle_id={vin:String} AND channel='engine.rpm' AND quality='ok') c
   ON a.vehicle_id=c.vehicle_id AND a.ts>=c.ts
 )
 WHERE rpm IS NOT NULL
@@ -62,9 +77,9 @@ SELECT round(dist,0) AS dist_km,
 FROM (
   SELECT a.value AS dist, b.value AS soot
   FROM (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='dpf.distance_since_regeneration') a
+        WHERE vehicle_id={vin:String} AND channel='dpf.distance_since_regeneration' AND quality='ok') a
   ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel='dpf.soot_mass.measured') b
+        WHERE vehicle_id={vin:String} AND channel='dpf.soot_mass.measured' AND quality='ok') b
   ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts
 )
 WHERE soot IS NOT NULL
@@ -78,9 +93,9 @@ SELECT session_id,
 FROM (
   SELECT a.session_id AS session_id, a.value AS dde, b.value AS obd
   FROM (SELECT vehicle_id, session_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel_raw='n47d_coolant') a
+        WHERE vehicle_id={vin:String} AND channel_raw='n47d_coolant' AND quality='ok') a
   ASOF LEFT JOIN (SELECT vehicle_id, ts, value FROM telemetry.samples
-        WHERE vehicle_id={vin:String} AND channel_raw='coolant') b
+        WHERE vehicle_id={vin:String} AND channel_raw='coolant' AND quality='ok') b
   ON a.vehicle_id=b.vehicle_id AND a.ts>=b.ts
 )
 WHERE obd IS NOT NULL
