@@ -1506,6 +1506,11 @@ class Diagnostics:
         executor = state.get("executor")
         plan = state.get("plan")
         stats = executor.stats() if executor is not None else {}
+        #: Signal-level, deliberately fetched separately from stats():
+        #: "the exchange worked" and "a usable value came back" are
+        #: different questions, and a channel can be perfect on the first
+        #: while answering nothing but sentinels on the second.
+        quality = executor.quality_stats() if executor is not None else {}
         extra_ids = set(state.get("extra_ids") or ())
         now = time.time()
 
@@ -1616,6 +1621,9 @@ class Diagnostics:
             signal = profile.signal(key)
             request_id = signal.request_id if signal is not None else ""
 
+            counts = quality.get(key, {})
+            flagged = sum(n for q, n in counts.items() if q != "ok")
+
             channels.append({
                 "key": key,
                 "label": meta.get("label", ""),
@@ -1625,6 +1633,17 @@ class Diagnostics:
                 "logged": profile.is_logged(key),
                 "version": profile.channel_version(key),
                 "value": values.get(key),
+                #: How this channel's readings came out, by quality label.
+                #: Empty until it has decoded at least once, which is
+                #: distinct from decoding only unusable values.
+                "quality": counts,
+                "flagged": flagged,
+                #: None until something decoded - "0% flagged" on a
+                #: channel that never answered would read as healthy.
+                "flagged_pct": (
+                    None if not counts
+                    else round(100.0 * flagged / sum(counts.values()), 1)
+                ),
             })
 
         mappings = []
