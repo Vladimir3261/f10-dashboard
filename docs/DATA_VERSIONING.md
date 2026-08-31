@@ -48,7 +48,8 @@ That version travels with the data:
 
 | store | what carries the version |
 |---|---|
-| SQLite `params.mapping_ver` | per-channel version (as text, `""` if unknown) |
+| SQLite `run_channels` | **per-run, per-channel provenance**: `mapping_id`, `mapping_version`, plus the label and unit in force for that run. This is the authoritative per-channel answer |
+| SQLite `params.mapping_ver` | the version seen the **first** time this database ever recorded the channel. Kept for databases written before `run_channels`, and never updated in place — see below |
 | SQLite `run_mappings` | one row per loaded file per run: `mapping_id, version, production, source_path` — the authoritative "what decoded this run" record |
 | SQLite `runs.mapping_set` | compact fingerprint `id@version,…` (sorted) for the whole run, **including `drive-modes@N`** |
 | ClickHouse `samples.mapping_ver` | per-sample version, filled by the ingest server from the client's per-channel value |
@@ -57,6 +58,40 @@ That version travels with the data:
 So in the lake you can filter or group by `mapping_ver`, and know from
 `sessions.mappings` exactly which revision of every mapping produced a
 drive.
+
+### Why provenance is scoped to the run
+
+`params` is channel *identity* and is written once, on first sight, with
+`INSERT OR IGNORE`. That makes `params.mapping_ver` a fact about the first
+run that ever saw the channel — which stops being true as soon as a
+mapping is revised and the same database is reused, as `telemetry.db` is
+for months. New samples would keep shipping under the old version while
+being decoded by the new one.
+
+Updating that row in place would be worse, not better: every historical
+sample would then claim it was decoded by a revision that did not exist
+when it was recorded. Provenance has to be **immutable once written**.
+
+So each run records one `run_channels` row per channel, and a sample
+resolves its version through `(run_id, param_id)`. A run has exactly one
+mapping configuration, so one row per channel per run is enough — the
+version does not need repeating on all 100k samples. Derived channels go
+through the same path and get the same guarantee.
+
+The sync agent resolves through `run_channels` and falls back to
+`params.mapping_ver` only when the **row** is missing, which means the
+sample predates the table. An empty `mapping_version` is not a fallback:
+the row exists, so that run's answer is known, and the answer is
+"unknown". `runs.mapping_set` remains the whole-run fingerprint — it says
+what was loaded, but cannot say which file owned one particular channel.
+
+That fallback is the **best available legacy provenance, not a
+guarantee**. A database that had already crossed a mapping revision
+*before* `run_channels` existed may already hold a stale
+`params.mapping_ver` — that is the original bug, and once it has happened
+there is nothing left to reconstruct the true version from. The value is
+reported because it is the only evidence there is, not because it is
+known to be correct.
 
 ### The drive mode is text; its version is in the fingerprint
 
@@ -127,6 +162,14 @@ content matches its version. Keep the discipline: content change ⇒ bump.
 Rows recorded before versioning landed keep `mapping_ver = ''` /
 `mappings = ''`; their exact mapping revision is not recoverable and is
 left blank rather than guessed. Everything recorded from now on is
-stamped. Applying the lake column to an already-deployed ClickHouse is a
+stamped.
+
+Databases written before `run_channels` gain the table simply by being
+opened — it is a `CREATE TABLE IF NOT EXISTS`, so the migration is
+idempotent — but their existing runs are deliberately **not** back-filled.
+The only version those rows could be given is today's, which is exactly
+the retroactive relabelling the table exists to prevent. They keep
+resolving through `params.mapping_ver`, with the caveat above: best
+available, not guaranteed. Applying the lake column to an already-deployed ClickHouse is a
 one-time migration — see
 `infra/clickhouse/migrations/2026-08-29_mapping_versioning.sql`.

@@ -150,14 +150,67 @@ def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})"))
 
 
+def _has_table(con: sqlite3.Connection, table: str) -> bool:
+    """Whether `table` exists (older dbs predate run-scoped provenance)."""
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+
+    return row is not None
+
+
 def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
     """Unsynced sample rows, resolved to VIN + channel key, read-only."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     try:
-        # p.mapping_ver only exists on databases recorded after mapping
-        # versioning landed; fall back to '' for older ones.
-        ver = "p.mapping_ver" if _has_column(con, "params", "mapping_ver") else "''"
+        #
+        # Provenance is resolved per RUN, not per channel-forever.
+        #
+        # params holds channel identity and is written once, on first
+        # sight, so params.mapping_ver records whichever version happened
+        # to be loaded the first time this database ever saw the channel.
+        # Reuse the same database across a mapping revision and every new
+        # sample would ship under the old version.
+        #
+        # run_channels answers it correctly: one row per (run, channel)
+        # carrying the version that decoded THAT run. The join is LEFT and
+        # falls back to params.mapping_ver, because rows recorded before
+        # this table existed have no run_channels row.
+        #
+        # That fallback is the BEST AVAILABLE legacy provenance, not a
+        # guarantee. A database that already crossed a mapping revision
+        # before run_channels existed may carry a stale params.mapping_ver
+        # for exactly the reason this change exists - and after the fact
+        # there is nothing left to reconstruct the true version from. It
+        # is reported rather than blanked because it is the only evidence
+        # there is, not because it is known to be right.
+        #
+        # An empty string in run_channels.mapping_version is NOT a
+        # fallback trigger: the row exists, so that run's answer is known
+        # and the answer is "unknown". Only a missing ROW defers.
+        #
+        has_run_channels = _has_table(con, "run_channels")
+        ver_col = (
+            "p.mapping_ver" if _has_column(con, "params", "mapping_ver")
+            else "''"
+        )
+        ver = (
+            f"COALESCE(rc.mapping_version, {ver_col})" if has_run_channels
+            else ver_col
+        )
+        #
+        # Unit is snapshotted per run for the same reason: a mapping
+        # revision that corrects a unit must not restate the units of
+        # samples recorded before the correction.
+        #
+        unit = "COALESCE(rc.unit, p.unit)" if has_run_channels else "p.unit"
+        join = (
+            "LEFT JOIN run_channels rc "
+            "  ON rc.run_id = s.run_id AND rc.param_id = s.param_id "
+            if has_run_channels else ""
+        )
         #
         # s.quality only exists post-data-quality, and is NULL for rows
         # that were already in a database when the column was added.
@@ -177,11 +230,12 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         #
         qual = "s.quality" if _has_column(con, "samples", "quality") else "NULL"
         cur = con.execute(
-            f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, p.unit, s.value, "
+            f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, {unit}, s.value, "
             f"{ver}, {qual} "
             "FROM samples s "
             "JOIN runs r   ON r.id = s.run_id "
             "JOIN params p ON p.id = s.param_id "
+            f"{join}"
             "WHERE s.rowid > ? ORDER BY s.rowid LIMIT ?",
             (after_rowid, limit),
         )
