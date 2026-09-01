@@ -56,19 +56,38 @@ class RunRow(NamedTuple):
     mode: str
     vehicle_hardware: str
     clock_synced: Optional[int]
+    #: Timestamp of this run's last recorded sample, when known. The
+    #: evidence that rescues a run whose process was killed.
+    last_sample_ts: Optional[float] = None
 
     @property
     def finished_at(self) -> float:
         """
         When this run stopped producing data.
 
-        `ended` is NULL when the process was killed rather than closed,
-        which is common enough that treating it as "still running" would
-        merge every subsequent drive into one. Falling back to `started`
-        makes the gap look LARGER, which splits rather than merges - the
-        safer direction when the evidence is missing.
+        `ended` is NULL whenever the process was killed rather than
+        closed - a crash, a power cut, systemd restarting it. That is not
+        an edge case, it is one of the exact causes of run fragmentation
+        this module exists to undo.
+
+        Falling straight back to `started` was wrong in the worst
+        direction for that case: a 40-minute run killed at 10:40 and
+        restarted 5 seconds later would be measured from 10:00, show a
+        2405-second gap, and split the drive it was supposed to rejoin.
+
+        So the last recorded SAMPLE is consulted first. The database
+        already knows the run was alive at 10:40; throwing forty minutes
+        of observations away to reach for a worse answer is not
+        conservative, it is just lossy. `started` remains the last resort
+        for a run that produced nothing at all.
         """
-        return self.started if self.ended is None else self.ended
+        if self.ended is not None:
+            return self.ended
+
+        if self.last_sample_ts is not None:
+            return self.last_sample_ts
+
+        return self.started
 
 
 class Trip(NamedTuple):
@@ -208,13 +227,22 @@ def load_runs(db_path: str) -> List[RunRow]:
                 "clock_synced" if "clock_synced" in have else "NULL",
             )
         ).fetchall()
+        #
+        # The last sample per run: what rescues a run whose process was
+        # killed before it could write ended_at. One grouped scan over
+        # the (run_id, param_id, ts) index rather than a query per run.
+        #
+        last_sample = dict(con.execute(
+            "SELECT run_id, MAX(ts) FROM samples GROUP BY run_id"
+        ).fetchall())
     finally:
         con.close()
 
     return [
         RunRow(run_id=r[0], session_uid=r[1] or "", started=r[2], ended=r[3],
                boot_id=r[4] or "", mode=r[5] or "",
-               vehicle_hardware=r[6] or "", clock_synced=r[7])
+               vehicle_hardware=r[6] or "", clock_synced=r[7],
+               last_sample_ts=last_sample.get(r[0]))
         for r in rows
     ]
 

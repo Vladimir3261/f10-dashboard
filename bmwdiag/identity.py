@@ -27,9 +27,9 @@ lake. That is the same rule as everywhere else here: history keeps the
 identity it was written with.
 """
 
+import hashlib
 import os
 import time
-import zlib
 
 __all__ = ["new_ulid", "is_ulid", "session_id_from_ulid", "ULID_LENGTH"]
 
@@ -87,14 +87,21 @@ def session_id_from_ulid(ulid: str) -> int:
     session's own durable identity rather than of its filename.
 
     Deterministic, so a re-sync of the same run produces the same id and
-    de-duplicates rather than doubling. 64 bits from a 128-bit input, so
-    collisions are possible in principle; at a few hundred sessions a year
-    they are not a practical concern, and `sessions.session_uid` carries
-    the full identity for anything that needs certainty.
-    """
-    digest = zlib.crc32(ulid.encode()) & 0xFFFFFFFF
-    tail = zlib.adler32(ulid.encode()) & 0xFFFFFFFF
+    de-duplicates rather than doubling.
 
-    #: Two independent 32-bit functions rather than one repeated, so the
-    #: high and low halves cannot agree by construction.
-    return (digest << 32) | tail
+    BLAKE2b, not a pair of checksums. An earlier version composed CRC32
+    and Adler32 into 64 bits, which was answering the filename-CRC32
+    problem with more CRC32: both are error-detecting codes with no
+    uniformity guarantee, and `samples` carry ONLY the numeric id - so a
+    collision there cannot be repaired afterwards from the full uid on
+    `sessions`. blake2b is stdlib, deterministic across processes and
+    versions, and gives a uniform 64-bit key. There was never a
+    dependency trade-off to justify the cheaper option.
+
+    64 bits from a 128-bit input still collides in principle; uniformly,
+    that is a ~50% chance somewhere after about 5 billion sessions, which
+    is not this car.
+    """
+    digest = hashlib.blake2b(ulid.encode(), digest_size=8).digest()
+
+    return int.from_bytes(digest, "big")

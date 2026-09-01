@@ -36,6 +36,7 @@ from bmwdiag.vehicle import (
 
 sys.path.insert(0, os.path.join(support.ROOT, "infra"))
 from sync import agent as sync_agent          # noqa: E402
+from ingest import server as ingest_server    # noqa: E402,F401
 
 EXAMPLE = os.path.join(support.ROOT, "config", "vehicle-events.example.yaml")
 
@@ -423,3 +424,162 @@ class VehicleEventsSegmentABaseline(unittest.TestCase):
         self.assertEqual(a.metadata, ())
         self.assertIsInstance(a.metadata, tuple)
         self.assertIs(type(a.metadata), type(b.metadata))
+
+
+class TheAgentStartsTheWayItIsDeployed(unittest.TestCase):
+    """
+    systemd and the docs run `python3 infra/sync/agent.py`, which puts
+    sys.path[0] at infra/sync - so neither `common` (infra/) nor
+    `bmwdiag` (repo root) is importable without the agent arranging it.
+
+    The unit tests hide this completely: the runner already has the repo
+    root on sys.path, so a broken import order still passes here while
+    failing on the Pi before the agent starts. This runs it the way it is
+    actually deployed, as a subprocess, from an unrelated directory.
+    """
+
+    def test_it_runs_as_a_script_from_an_unrelated_directory(self):
+        import subprocess
+
+        agent = os.path.join(support.ROOT, "infra", "sync", "agent.py")
+        result = subprocess.run(
+            [sys.executable, agent, "--help"],
+            cwd=tempfile.mkdtemp(), capture_output=True, text=True,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+    def test_repository_imports_come_after_the_path_setup(self):
+        #
+        # Structural, so the ordering cannot drift back: no import of a
+        # repository package may appear before sys.path is arranged.
+        #
+        with open(os.path.join(support.ROOT, "infra", "sync", "agent.py")) as fh:
+            lines = fh.read().splitlines()
+
+        path_setup = next(
+            i for i, line in enumerate(lines) if "sys.path.insert" in line
+        )
+
+        for i, line in enumerate(lines[:path_setup]):
+            self.assertNotRegex(
+                line, r"^\s*(from|import)\s+(bmwdiag|common)\b",
+                f"line {i + 1} imports a repo package before sys.path setup",
+            )
+
+
+class TheLakeSchemaDoesNotDrift(unittest.TestCase):
+    """
+    A fresh ClickHouse volume is built from init/001_schema.sql; an
+    existing one is patched by migrations. Both paths must arrive at the
+    same schema.
+
+    They had already drifted: #8's vehicle_label/vehicle_hardware were
+    added by migration only, so a fresh install would have accepted
+    uploads and silently DROPPED those columns - ClickHouse runs here
+    with input_format_skip_unknown_fields=1, which discards unknown
+    columns rather than rejecting them. Nothing would have complained.
+    """
+
+    def _init_sql(self):
+        path = os.path.join(support.ROOT, "infra", "clickhouse", "init",
+                            "001_schema.sql")
+
+        with open(path) as fh:
+            return fh.read()
+
+    def test_the_init_schema_has_every_column_the_ingest_sends(self):
+        from ingest import server as ingest_server
+
+        built = ingest_server.build_sessions({
+            "cols": {"vehicle_id": ["V"], "session_id": [1], "started": [1e9]},
+            "rows": 1,
+        })
+        sessions_block = self._init_sql().split("telemetry.sessions")[1]
+        sessions_block = sessions_block.split("ORDER BY")[0]
+
+        for column in built[0]:
+            with self.subTest(column=column):
+                self.assertIn(
+                    column, sessions_block,
+                    f"the ingest sends `{column}` but a fresh install has no "
+                    "such column - ClickHouse would silently drop it",
+                )
+
+    def test_every_migration_column_is_also_in_the_init_schema(self):
+        import re
+
+        migrations = os.path.join(support.ROOT, "infra", "clickhouse",
+                                  "migrations")
+        init = self._init_sql()
+
+        for name in sorted(os.listdir(migrations)):
+            if not name.endswith(".sql"):
+                continue
+
+            with open(os.path.join(migrations, name)) as fh:
+                body = fh.read()
+
+            for column in re.findall(
+                r"ADD COLUMN IF NOT EXISTS\s+(\w+)", body
+            ):
+                with self.subTest(migration=name, column=column):
+                    self.assertIn(
+                        column, init,
+                        f"{name} adds `{column}` to an existing lake, but a "
+                        "fresh install would not have it",
+                    )
+
+
+class AKilledRunIsRejoinedNotSplit(unittest.TestCase):
+    """
+    Process lifecycle is one of the causes of fragmentation #13 names, so
+    losing the drive to it is the failure this module exists to prevent.
+    """
+
+    def test_the_last_sample_is_used_when_ended_is_missing(self):
+        #
+        # 40-minute run, process killed at 10:40 so ended_at is NULL,
+        # systemd restarts 5 s later on the same boot. Measuring the gap
+        # from `started` would show 2405 s and split the drive.
+        #
+        trips = group_trips([
+            RunRow(1, "A" * 26, 36000.0, None, "boot1", "normal", "", 1,
+                   last_sample_ts=38400.0),
+            RunRow(2, "B" * 26, 38405.0, 38700.0, "boot1", "normal", "", 1),
+        ])
+
+        self.assertEqual(len(trips), 1)
+        self.assertEqual([r.run_id for r in trips[0].runs], [1, 2])
+
+    def test_a_run_with_no_evidence_at_all_still_splits(self):
+        #: `started` remains the last resort, and it is conservative
+        trips = group_trips([
+            RunRow(1, "A" * 26, 36000.0, None, "boot1", "normal", "", 1),
+            RunRow(2, "B" * 26, 38405.0, 38700.0, "boot1", "normal", "", 1),
+        ])
+
+        self.assertEqual(len(trips), 2)
+
+    def test_a_real_database_resolves_the_effective_end(self):
+        path = os.path.join(tempfile.mkdtemp(), "tele.db")
+        rec = live.Recorder(path, chunk=1, interval=0.05)
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12, clock_synced=True)
+        time.sleep(0.05)
+        rec.write(time.time(), {"coolant": 80.0})
+        rec.close()
+
+        #: simulate the killed process: no ended_at, but samples exist
+        con = sqlite3.connect(path)
+        con.execute("UPDATE runs SET ended_at = NULL WHERE id = 1")
+        con.commit()
+        con.close()
+
+        run = load_runs(path)[0]
+
+        self.assertIsNone(run.ended)
+        self.assertIsNotNone(run.last_sample_ts)
+        self.assertGreater(run.finished_at, run.started)
