@@ -370,6 +370,33 @@ class TheCommittedSqlKeepsTheContract(unittest.TestCase):
     def test_the_coverage_section_exists(self):
         self.assertIn("alignment coverage", self.sql())
 
+    def test_the_coverage_section_is_itself_clock_gated(self):
+        #
+        # A gap is a timestamp difference, so measuring it on a session
+        # whose clock stepped measures the step. It would be incoherent to
+        # say "only disciplined sessions support time-derived work" and
+        # then derive the headline alignment numbers from undisciplined
+        # ones immediately below it.
+        #
+        parts = re.split(r"\n-- (\d+[a-z]?)\. ", "\n" + self.sql())
+        sections = dict(zip(parts[1::2], parts[2::2]))
+
+        self.assertIn("clock_synced=1", sections["7b"])
+
+    def test_raw_schedule_diagnostics_are_separated_not_deleted(self):
+        #
+        # The ungated numbers answer a different question - how the poll
+        # schedule actually places two reads, across all history - so they
+        # are kept, in their own section, labelled as not evidence for a
+        # window.
+        #
+        parts = re.split(r"\n-- (\d+[a-z]?)\. ", "\n" + self.sql())
+        sections = dict(zip(parts[1::2], parts[2::2]))
+
+        self.assertIn("7c", sections)
+        self.assertNotIn("clock_synced=1", sections["7c"])
+        self.assertIn("NOT clock-gated", sections["7c"])
+
     def test_the_boost_panel_states_its_measured_window(self):
         #
         # The window is 1.0 s because the pair is sampled 0.56 s apart,
@@ -454,6 +481,52 @@ class UntrustedClockFailsClosed(unittest.TestCase):
 
         self.assertGreater(rows["coolant"]["samples"], 0)
         self.assertIsNone(rows["coolant"]["max_gap_s"])
+
+    def test_dpf_alignment_is_not_computed_on_an_unsynced_run(self):
+        #
+        # Missed first time round: findings() returned early on an
+        # untrusted run, so this number never became a key finding - but
+        # render_markdown reached into dp["mean_abs_diff"] independently
+        # and printed it anyway. One bounded time comparison was still
+        # escaping the fail-closed policy.
+        #
+        run = self._run(False)
+        run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
+        run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
+
+        dp = session_report.dpf(run)
+
+        self.assertNotIn("mean_abs_diff", dp)
+        self.assertNotIn("coverage_pct", dp)
+        self.assertIn("alignment_unavailable", dp)
+
+    def test_dpf_value_ranges_survive_an_unsynced_run(self):
+        run = self._run(False)
+        run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
+
+        self.assertIn("measured", session_report.dpf(run))
+
+    def test_the_rendered_report_never_prints_a_dpf_alignment_number(self):
+        run = self._run(False)
+        run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
+        run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
+
+        md = session_report.render_markdown(
+            run, session_report.warmup(run), session_report.crosschecks(run),
+            session_report.phase_mask(run),
+            session_report.load_behaviour(run, None), session_report.dpf(run),
+            session_report.quality(run),
+        )
+
+        self.assertNotIn("measured vs modelled mean", md)
+
+    def test_dpf_alignment_IS_computed_on_a_trusted_run(self):
+        """The control: the gate must not simply disable the feature."""
+        run = self._run(True)
+        run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
+        run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
+
+        self.assertIn("mean_abs_diff", session_report.dpf(run))
 
     def test_an_unknown_clock_fails_closed_too(self):
         #

@@ -291,10 +291,103 @@ FROM (SELECT session_id, any(clock_synced) AS clock_synced
       FROM telemetry.sessions
       WHERE vehicle_id={vin:String} GROUP BY session_id);
 
--- 7b. Per control pair: median gap, and the share inside its window.
+-- 7b. Per control pair, over the TRUSTED population only: median gap and
+--     the share inside its window.
+--
+--     Clock-gated like sections 2-5, and for the same reason: a gap is a
+--     timestamp difference, so measuring it on a session whose wall clock
+--     stepped is measuring the step. It would be incoherent to say "only
+--     disciplined sessions may support time-derived work" and then derive
+--     the headline alignment numbers from undisciplined ones.
+--
+--     These are the numbers the windows in analysis/alignment.py were
+--     chosen from. On this vehicle the trusted subset is tighter than the
+--     full population, not looser: boost act/set p50 0.53 s and 100%
+--     inside 1 s, against 0.56 s and 98.9% across everything.
+--
 --     A low pct_in_window is an ACQUISITION finding, not a data error -
 --     it means the two channels are never sampled close enough together
---     for the comparison to mean anything.
+--     for the comparison to mean anything. Section 7c reports the same
+--     gaps WITHOUT the clock gate, as raw schedule diagnostics.
+SELECT pair,
+       count()                                          AS candidate_pairs,
+       round(quantile(0.5)(gap_s), 2)                   AS median_gap_s,
+       max_age_s,
+       round(100.0 * countIf(gap_s <= max_age_s) / count(), 1) AS pct_in_window
+FROM (
+  SELECT 'boost act/set' AS pair, 1.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
+  FROM (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.actual'
+          AND quality='ok'
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String} AND clock_synced=1)) a
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='engine.boost.setpoint'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
+
+  UNION ALL
+
+  SELECT 'rail act/set' AS pair, 1.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
+  FROM (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.actual'
+          AND quality='ok'
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String} AND clock_synced=1)) a
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.setpoint'
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel='fuel.rail_pressure.setpoint'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
+
+  UNION ALL
+
+  SELECT 'DDE/OBD coolant' AS pair, 15.0 AS max_age_s,
+         least(dateDiff('millisecond', prev.ts, a.ts)/1000.0,
+               if(dateDiff('millisecond', a.ts, next.ts) >= 0,
+                  dateDiff('millisecond', a.ts, next.ts)/1000.0, 1e18)) AS gap_s
+  FROM (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel_raw='n47d_coolant'
+          AND quality='ok'
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String} AND clock_synced=1)) a
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel_raw='coolant'
+          AND quality='ok') prev
+    ON a.session_id=prev.session_id AND a.ts>=prev.ts
+  ASOF LEFT JOIN (SELECT session_id, ts FROM telemetry.samples
+        WHERE vehicle_id={vin:String} AND channel_raw='coolant'
+          AND quality='ok') next
+    ON a.session_id=next.session_id AND a.ts<=next.ts
+)
+GROUP BY pair, max_age_s
+ORDER BY pct_in_window;
+
+-- 7c. Raw schedule diagnostics: the same gaps WITHOUT the clock gate ---
+--
+-- Deliberately separate from 7b, and deliberately NOT evidence for a
+-- window. These numbers cover every session including undisciplined
+-- ones, so a gap here may be measuring a clock step rather than the poll
+-- schedule.
+--
+-- They are kept because the question they answer is different: "how does
+-- the acquisition schedule actually place these two reads", across all
+-- the history there is. Use 7b to choose or defend a window; use this to
+-- see the schedule.
+SELECT '=== 7c. raw schedule gaps (ALL sessions, NOT clock-gated) ===' AS _;
 SELECT pair,
        count()                                          AS candidate_pairs,
        round(quantile(0.5)(gap_s), 2)                   AS median_gap_s,
