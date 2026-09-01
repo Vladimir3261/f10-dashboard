@@ -25,6 +25,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from analysis.alignment import MIN_USEFUL_COVERAGE, align, pairing_for
+from bmwdiag.vehicle import VehicleProfile, load_profile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,7 +71,8 @@ def _has_table(db, table: str) -> bool:
 
 
 def load_run(db_path: str, run_id: Optional[int],
-             include_flagged: bool = False) -> Dict:
+             include_flagged: bool = False,
+             vehicle: Optional[VehicleProfile] = None) -> Dict:
     """
     Pull one run's series out of the DB, read-only. Never returns VIN.
 
@@ -105,9 +107,21 @@ def load_run(db_path: str, run_id: Optional[int],
         #
         clock_col = "clock_synced" if _has_column(db, "runs", "clock_synced") \
             else "NULL"
+        #
+        # What the car physically WAS when this run was recorded. The
+        # local profile describes the car TODAY, so using it to interpret
+        # an old drive would relabel history: a run recorded with the
+        # filter fitted would have its dP readings declared void once the
+        # filter is removed and the profile updated. Same defect as
+        # params.mapping_ver in #5, one layer over.
+        #
+        veh_label = ("vehicle_label" if _has_column(db, "runs", "vehicle_label")
+                     else "NULL")
+        veh_hw = ("vehicle_hardware"
+                  if _has_column(db, "runs", "vehicle_hardware") else "NULL")
         meta = db.execute(
-            f"SELECT started_at, ended_at, ecu, ecu_addr, {clock_col} "
-            "FROM runs WHERE id=?",
+            f"SELECT started_at, ended_at, ecu, ecu_addr, {clock_col}, "
+            f"{veh_label}, {veh_hw} FROM runs WHERE id=?",
             (run_id,),
         ).fetchone()
 
@@ -164,7 +178,34 @@ def load_run(db_path: str, run_id: Optional[int],
 
         series.setdefault(key, []).append((ts, value))
 
-    started, ended, ecu, ecu_addr, clock_synced = meta
+    (started, ended, ecu, ecu_addr, clock_synced,
+     veh_label, veh_hardware) = meta
+
+    #
+    # The run's own snapshot wins. The caller's profile is a fallback for
+    # runs recorded before this was tracked, and it is labelled as such -
+    # `source` says where the answer came from, and the report quotes it,
+    # so a present-day guess never reads as historical fact.
+    #
+    if veh_hardware:
+        vehicle_profile = VehicleProfile.from_fingerprint(
+            veh_label or "", veh_hardware,
+            source=f"recorded with run {run_id}",
+        )
+        vehicle_provenance = "run"
+    elif vehicle is not None and vehicle.configured:
+        vehicle_profile = VehicleProfile.from_fingerprint(
+            vehicle.label, vehicle.fingerprint(),
+            source=(
+                "the CURRENT vehicle profile - this run predates configuration "
+                "provenance, so this is what the car is TODAY, not necessarily "
+                "what it was when the run was recorded"
+            ),
+        )
+        vehicle_provenance = "current"
+    else:
+        vehicle_profile = VehicleProfile()
+        vehicle_provenance = "none"
 
     return {
         "run_id": run_id,
@@ -174,6 +215,14 @@ def load_run(db_path: str, run_id: Optional[int],
         "ecu_addr": ecu_addr,
         #: 1 trustworthy, 0 not, None recorded before this was tracked.
         "clock_synced": clock_synced,
+        #: What this car physically is. An unloaded profile reports every
+        #: subsystem as `unknown`, which withholds hardware conclusions
+        #: rather than assuming the part is fitted.
+        "vehicle": vehicle_profile,
+        #: "run" = snapshotted when recorded (authoritative for this
+        #: drive), "current" = today's profile standing in for a run that
+        #: predates the field, "none" = nothing configured.
+        "vehicle_provenance": vehicle_provenance,
         "series": series,
         #: key -> {label: count} for everything excluded (or, with
         #: include_flagged, everything that WOULD have been).
@@ -499,7 +548,24 @@ def load_behaviour(run: Dict, span) -> Dict:
 
 def dpf(run: Dict) -> Dict:
     """
-    Soot ranges, and the measured-vs-modelled alignment.
+    DPF channels, conditioned on whether this car HAS a particulate filter.
+
+    Three different kinds of thing get reported here and they must not be
+    confused, because only the first depends on the hardware existing:
+
+      physical sensing   `n47d_dpf_dp` measures pressure across the
+                         filter. With no filter it measures an empty
+                         pipe, so every restriction/health conclusion
+                         from it is VOID - not uncertain, impossible.
+      ECU model output   the two soot channels are the DDE's internal
+                         estimate. They keep reporting on a car with no
+                         filter, and what they describe is the model,
+                         never the hardware.
+      commanded action   regeneration count and distance-since-regen are
+                         things the ECU DID. They remain fully meaningful
+                         with no filter fitted - the regens still happen,
+                         still burn fuel and still dilute the oil, they
+                         just clean nothing. That cost is the finding.
 
     The ranges are pure value statistics and survive an untrusted clock.
     The alignment does not: it is a bounded time comparison like any
@@ -509,7 +575,13 @@ def dpf(run: Dict) -> Dict:
     """
     meas = run["series"].get("n47d_soot_meas")
     model = run["series"].get("n47d_soot_model")
-    out: Dict = {}
+    vehicle = run.get("vehicle") or VehicleProfile()
+    out: Dict = {
+        "filter_state": vehicle.state("dpf"),
+        "hardware_note": (
+            "" if vehicle.has("dpf") else vehicle.why_not("dpf")
+        ),
+    }
 
     if meas:
         out["measured"] = _stats([v for _, v in meas])
@@ -517,7 +589,19 @@ def dpf(run: Dict) -> Dict:
     if model:
         out["modelled"] = _stats([v for _, v in model])
 
+    if not vehicle.has("dpf"):
+        #
+        # The soot ranges above still describe the ECU's model and are
+        # kept as such. What is withheld is every conclusion ABOUT A
+        # FILTER: restriction, loading, differential-pressure health.
+        #
+        out["physical_conclusions_void"] = True
+
+        return out
+
     if not time_trusted(run):
+        #: hardware exists, but the alignment is still a bounded time
+        #: comparison and this run's timestamps cannot support one
         out["alignment_unavailable"] = TIME_UNTRUSTED
 
         return out
@@ -651,8 +735,26 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
             "its target; a growing deviation over future sessions would flag "
             "wear.")
 
-    # DPF
-    if dp.get("measured") and "mean_abs_diff" in dp:
+    # DPF - conditioned on the filter physically existing
+    vehicle = run.get("vehicle") or VehicleProfile()
+
+    if dp.get("physical_conclusions_void"):
+        #
+        # Never say differential-pressure sensing is healthy on a car with
+        # no filter to sense across. The soot numbers still describe the
+        # ECU's model and are reported as that, explicitly.
+        #
+        note = dp.get("hardware_note", "")
+
+        if dp.get("measured"):
+            out.append(
+                f"DPF soot {dp['measured']['min']}–{dp['measured']['max']} g "
+                "is the **ECU's internal model**, not a measurement of a "
+                f"filter. {note}. No filter-loading, restriction or "
+                "differential-pressure health conclusion is drawn.")
+        else:
+            out.append(f"DPF analytics withheld. {note}.")
+    elif dp.get("measured") and "mean_abs_diff" in dp:
         out.append(
             f"DPF soot measured vs modelled agree to {dp['mean_abs_diff']} g "
             f"(range {dp['measured']['min']}–{dp['measured']['max']} g) — "
@@ -665,12 +767,23 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
         return (min(v for _, v in s), max(v for _, v in s)) if s else None
 
     dpf_dp = rng("n47d_dpf_dp")
-    if dpf_dp:
+    if dpf_dp and vehicle.has("dpf"):
         out.append(
             f"[CANDIDATE] DPF differential pressure {dpf_dp[0]:.1f}–"
             f"{dpf_dp[1]:.1f} hPa — should read low warm-idle and rise with "
             "exhaust flow under load; a plausible spread validates the 0x44F8 "
             "scale. (Baseline for filter-restriction trending.)")
+    elif dpf_dp:
+        #
+        # The channel still reports, so say what it is reading rather than
+        # hiding it - but "rises with exhaust flow, validates the scale,
+        # baseline for restriction trending" is a claim about a filter.
+        #
+        out.append(
+            f"DPF differential pressure reads {dpf_dp[0]:.1f}–"
+            f"{dpf_dp[1]:.1f} hPa across an **empty pipe**. "
+            f"{dp.get('hardware_note', '')}. The values are real; they are "
+            "not a restriction baseline and must not be trended as one.")
 
     pre_dpf = rng("n47d_exh_temp_pre_dpf")
     pre_cat = rng("n47d_exh_temp_pre_cat")
@@ -697,6 +810,21 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
             f"{egr_dev[1]:.1f} % — should sit near 0 when the loop is happy; "
             "a persistent offset would flag EGR fouling. Baseline for "
             "EGR-health trending.")
+
+    if dp.get("physical_conclusions_void") and rng("n47d_regen_count"):
+        #
+        # Deliberately NOT suppressed. A commanded regeneration is
+        # something the ECU did, and it still happens on a car with no
+        # filter - burning fuel and diluting the oil to clean nothing.
+        # That cost is the real finding here, and it is the one thing in
+        # this section that got MORE interesting when the filter left.
+        #
+        lo, hi = rng("n47d_regen_count")
+        out.append(
+            f"Regeneration count {lo:.0f}–{hi:.0f}. This remains meaningful "
+            "with no filter fitted: the ECU still commands regens against "
+            "its internal model, at a real cost in fuel and oil dilution, "
+            "and they clean nothing. Trend the RATE, not the filter.")
 
     regen = run["series"].get("n47d_opmode")
     if regen:
@@ -855,6 +983,12 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         f"{sum(len(s) for s in run['series'].values())} samples across "
         f"{len(run['series'])} channels",
         f"- Started (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(run['started']))}",
+        f"- Vehicle: {(run.get('vehicle') or VehicleProfile()).describe()}"
+        + {
+            "run": " (configuration recorded with this run)",
+            "current": " — ⚠️ configuration is TODAY'S, not this run's",
+            "none": "",
+        }.get(run.get("vehicle_provenance", "none"), ""),
         "",
     ]
 
@@ -1016,6 +1150,11 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
             L.append(f"- soot modelled: {dp['modelled']['min']}–"
                      f"{dp['modelled']['max']} g")
 
+        if dp.get("physical_conclusions_void"):
+            L.append(f"- **{dp['hardware_note']}**")
+            L.append("- the soot figures above are the ECU's internal "
+                     "model, reported as that and nothing more")
+
         if "mean_abs_diff" in dp:
             L.append(f"- measured vs modelled mean |Δ|: {dp['mean_abs_diff']} g "
                      "(the two independent estimates should agree)")
@@ -1080,9 +1219,18 @@ def main() -> int:
              "averaging them with real readings is how a health model "
              "learns something false. Turn on only to study them.",
     )
+    ap.add_argument(
+        "--vehicle-profile", default=None,
+        help="path to the vehicle profile (default: local/vehicle-profile"
+             ".yaml). Describes what this car physically is; without it "
+             "every subsystem is unknown and hardware conclusions are "
+             "withheld rather than assumed. See "
+             "config/vehicle-profile.example.yaml.",
+    )
     args = ap.parse_args()
 
-    run = load_run(args.db, args.run, include_flagged=args.include_flagged)
+    run = load_run(args.db, args.run, include_flagged=args.include_flagged,
+                   vehicle=load_profile(args.vehicle_profile))
 
     wu = warmup(run)
     cc = crosschecks(run)

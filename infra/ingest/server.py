@@ -172,6 +172,17 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_db": meta.get("db", ""),
             # "id@version,..." fingerprint of the mapping set for this run.
             "mappings": r.get("mappings") or "",
+            # What the car physically WAS for this session: the stable
+            # VIN-free label, and a `subsystem=state,...` fingerprint of
+            # its hardware configuration. Snapshotted at record time, so
+            # lake analytics can condition on the configuration that was
+            # true for THIS session rather than on a present-day toggle
+            # that would reinterpret every historical drive.
+            #
+            # "" means the run predates the field - unknown, and it must
+            # not be read as "no hardware fitted".
+            "vehicle_label": r.get("vehicle_label") or "",
+            "vehicle_hardware": r.get("vehicle_hardware") or "",
             # Was the host clock NTP-disciplined when this run opened?
             # The Pi has no RTC. NULL means the run predates the flag -
             # never coerced to a guess, because "probably fine" is

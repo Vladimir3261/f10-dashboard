@@ -1,6 +1,24 @@
 -- Per-vehicle analytics on the telemetry lake. VIN-free (committable):
 -- pass the vehicle with --param_vin=<VIN>. Run:
 --   clickhouse-client --param_vin=<VIN> --multiquery < insights.sql
+--
+-- VEHICLE CONFIGURATION IS SESSION PROVENANCE, NOT A SETTING. Sections 2
+-- and 4 draw conclusions about a particulate filter, and on a car without
+-- one they are not uncertain, they are impossible -
+-- `dpf.differential_pressure` measures an empty pipe.
+--
+-- They are therefore restricted to sessions whose OWN recorded
+-- configuration declares a filter (`sessions.vehicle_hardware` contains
+-- `dpf=present`). This used to be a global --param_dpf_present toggle,
+-- which was wrong for the same reason a mutable params.mapping_ver was:
+-- flipping it would reinterpret every historical drive, declaring void a
+-- session recorded while the filter was still fitted.
+--
+-- `vehicle_hardware = ''` means the session predates configuration
+-- provenance: UNKNOWN, and excluded, because unknown is not "fitted".
+-- Every session recorded before 2026-09-01 is in that state, so these
+-- sections legitimately return nothing until a drive is recorded on the
+-- new code. That is the contract working. See docs/VEHICLE_PROFILE.md.
 -- Analytics is PER VEHICLE by design; cross-vehicle mixing is noise.
 --
 -- EVERY query that interprets `value` as a physical measurement filters
@@ -76,7 +94,11 @@ ORDER BY started;
 
 -- 2. DPF differential pressure vs exhaust flow (the restriction baseline)
 --    ASOF-join each dP reading to the nearest engine MAF, bin by flow.
-SELECT '=== 2. DPF dP vs MAF flow (median/p10/p90 hPa) ===' AS _;
+SELECT if(count() > 0,
+          '=== 2. DPF dP vs MAF flow (median/p10/p90 hPa) ===',
+          '=== 2. SKIPPED: no session declares a fitted particulate filter - a dP-vs-flow restriction baseline across an empty pipe measures nothing ===') AS _
+FROM telemetry.sessions
+WHERE vehicle_id={vin:String} AND position(vehicle_hardware, 'dpf=present') > 0;
 SELECT round(maf,-1) AS maf_gps,
        count() AS n,
        round(quantile(0.5)(dp),1)  AS med_dP,
@@ -92,6 +114,9 @@ FROM (
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='dpf.differential_pressure'
           AND quality='ok'
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String}
+                               AND position(vehicle_hardware, 'dpf=present') > 0)
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
   ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
@@ -170,7 +195,11 @@ WHERE least(sp_prev_gap, sp_next_gap) <= 1.0        -- measured separation 0.56 
 GROUP BY rpm_band ORDER BY n DESC;
 
 -- 4. DPF soot vs distance-since-regen (accumulation over the fleet-life)
-SELECT '=== 4. DPF soot vs distance-since-regen ===' AS _;
+SELECT if(count() > 0,
+          '=== 4. DPF soot vs distance-since-regen ===',
+          '=== 4. SKIPPED: no session declares a fitted filter - the soot channels model hardware that is not there, so this describes the model ===') AS _
+FROM telemetry.sessions
+WHERE vehicle_id={vin:String} AND position(vehicle_hardware, 'dpf=present') > 0;
 SELECT round(dist,0) AS dist_km,
        round(quantile(0.5)(soot),2) AS med_soot_g
 FROM (
@@ -183,6 +212,9 @@ FROM (
   FROM (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String}
           AND channel='dpf.distance_since_regeneration' AND quality='ok'
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String}
+                               AND position(vehicle_hardware, 'dpf=present') > 0)
           AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
   ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
@@ -448,3 +480,22 @@ FROM (
 )
 GROUP BY pair, max_age_s
 ORDER BY pct_in_window;
+
+-- 8. Regenerations commanded (meaningful with or without a filter) -----
+--
+-- Deliberately NOT gated on dpf_present. A commanded regeneration is
+-- something the ECU DID: it burns fuel and dilutes the oil whether or not
+-- there is a filter to clean. On a car with the filter removed this is
+-- the only DPF-adjacent number that still means anything, and it means
+-- something worse - cost with no benefit.
+SELECT '=== 8. regenerations commanded (valid with no filter) ===' AS _;
+SELECT session_id,
+       min(value) AS count_start,
+       max(value) AS count_end,
+       max(value) - min(value) AS regens
+FROM telemetry.samples
+WHERE vehicle_id={vin:String} AND channel='dpf.regeneration.count'
+  AND quality='ok'
+GROUP BY session_id
+HAVING regens > 0
+ORDER BY session_id;

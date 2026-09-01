@@ -269,9 +269,21 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
         # stays unknown rather than being assumed good.
         clk = ("clock_synced" if _has_column(con, "runs", "clock_synced")
                else "NULL")
+        #
+        # What the car physically WAS for this run. Snapshotted at record
+        # time, so the lake can condition on the configuration that was
+        # true for a session rather than on whatever the analyst's machine
+        # believes today. '' on runs recorded before it was tracked -
+        # unknown, and the lake side must not read that as "no hardware".
+        #
+        vlabel = ("vehicle_label" if _has_column(con, "runs", "vehicle_label")
+                  else "''")
+        vhw = ("vehicle_hardware"
+               if _has_column(con, "runs", "vehicle_hardware") else "''")
         rows = con.execute(
             f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, "
-            f"{mset}, {mode}, {clk} FROM runs WHERE id >= ? ORDER BY id",
+            f"{mset}, {mode}, {clk}, {vlabel}, {vhw} "
+            "FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
     finally:
@@ -283,9 +295,11 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
          "started": started, "ended": ended, "ecu": ecu or "",
          "ecu_addr": ecu_addr, "gateway": gateway or "",
          "mappings": mset_val or "", "mode": mode_val or "",
-         "clock_synced": clk_val}
+         "clock_synced": clk_val,
+         "vehicle_label": vlabel_val or "",
+         "vehicle_hardware": vhw_val or ""}
         for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val,
-        mode_val, clk_val in rows
+        mode_val, clk_val, vlabel_val, vhw_val in rows
     ]
 
 

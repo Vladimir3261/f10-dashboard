@@ -29,6 +29,7 @@ from analysis.alignment import (
     align,
     pairing_for,
 )
+from bmwdiag.vehicle import VehicleProfile
 
 SQL = os.path.join(support.ROOT, "analysis", "clickhouse", "insights.sql")
 DASHBOARD = os.path.join(
@@ -491,6 +492,9 @@ class UntrustedClockFailsClosed(unittest.TestCase):
         # escaping the fail-closed policy.
         #
         run = self._run(False)
+        #: a car that HAS a filter, so the clock is the only thing under
+        #: test here - the hardware gate is covered in test_vehicle_profile
+        run["vehicle"] = VehicleProfile(hardware={"dpf": True}, source="test")
         run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
         run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
 
@@ -508,6 +512,7 @@ class UntrustedClockFailsClosed(unittest.TestCase):
 
     def test_the_rendered_report_never_prints_a_dpf_alignment_number(self):
         run = self._run(False)
+        run["vehicle"] = VehicleProfile(hardware={"dpf": True}, source="test")
         run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
         run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
 
@@ -523,6 +528,7 @@ class UntrustedClockFailsClosed(unittest.TestCase):
     def test_dpf_alignment_IS_computed_on_a_trusted_run(self):
         """The control: the gate must not simply disable the feature."""
         run = self._run(True)
+        run["vehicle"] = VehicleProfile(hardware={"dpf": True}, source="test")
         run["series"]["n47d_soot_meas"] = [(1e9 + i, 9.0) for i in range(20)]
         run["series"]["n47d_soot_model"] = [(1e9 + i, 9.1) for i in range(20)]
 

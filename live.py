@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from bmwdiag.vehicle import load_profile
 from bmwdiag.mapping import (
     fault_kind,
     MappingError,
@@ -801,7 +802,23 @@ CREATE TABLE IF NOT EXISTS runs (
     -- timestamps that are simply wrong. 1 = trustworthy, 0 = not, NULL =
     -- recorded before this was tracked. Anything time-derived - rates,
     -- gradients, trends, which is most of the point - must filter on it.
-    clock_synced INTEGER
+    clock_synced INTEGER,
+    -- What the CAR PHYSICALLY WAS when this run was recorded: the stable
+    -- VIN-free label, and a deterministic `subsystem=state,...` summary
+    -- of its hardware configuration.
+    --
+    -- Snapshotted for the same reason mapping provenance is (see
+    -- run_channels): the configuration file is mutable and describes the
+    -- car TODAY. Analyse a drive recorded while the DPF was fitted, after
+    -- the filter is removed and the profile updated, and a live lookup
+    -- would declare that run's differential-pressure readings void - a
+    -- statement about hardware that did exist at the time. The reverse is
+    -- as bad after a part is restored.
+    --
+    -- NULL means the run predates this being tracked: unknown, and the
+    -- analysis says so rather than substituting today's answer silently.
+    vehicle_label    TEXT,
+    vehicle_hardware TEXT
 );
 
 CREATE TABLE IF NOT EXISTS params (
@@ -932,6 +949,8 @@ class Recorder:
         #: CURRENT run opened. Handed over in the run payload, never read
         #: from `meta_source` by the writer thread. See start_run().
         self.run_provenance: Dict[str, Tuple] = {}
+        #: The vehicle profile in force, or None. Snapshotted per run.
+        self.vehicle = None
         self.rows = 0
         self.dropped = 0
         self.db: Optional[sqlite3.Connection] = None
@@ -956,6 +975,16 @@ class Recorder:
         """
         self.meta_source = profile
         self.extra_versions = tuple(extra_versions)
+
+    def set_vehicle(self, vehicle) -> None:
+        """
+        Point the recorder at what this car physically is.
+
+        Snapshotted onto every run opened afterwards, so a drive keeps the
+        configuration that was true when it was recorded. See
+        bmwdiag/vehicle.py and docs/VEHICLE_PROFILE.md.
+        """
+        self.vehicle = vehicle
 
     # -- called from the poll thread --------------------------------
 
@@ -1003,6 +1032,15 @@ class Recorder:
             self._provenance_snapshot()
             if self.meta_source is not None else {}
         )
+        #
+        # Same discipline: taken here, on the calling thread, and carried
+        # in the payload. A live lookup later would answer for the car as
+        # it is then, not as it was when this run opened.
+        #
+        vehicle_label = getattr(self.vehicle, "label", "") or ""
+        vehicle_hardware = (
+            self.vehicle.fingerprint() if self.vehicle is not None else ""
+        )
 
         if not mapping_set:
             #
@@ -1017,7 +1055,8 @@ class Recorder:
             "run",
             (time.time(), vin, gateway, ecu, ecu_addr, mode,
              None if clock_synced is None else int(bool(clock_synced)),
-             mapping_set, manifest, channel_provenance),
+             mapping_set, manifest, channel_provenance,
+             vehicle_label, vehicle_hardware),
         ))
 
     def _provenance_snapshot(self) -> Dict[str, Tuple]:
@@ -1122,6 +1161,14 @@ class Recorder:
 
         if "quality" not in cols("samples"):
             self.db.execute("ALTER TABLE samples ADD COLUMN quality TEXT")
+
+        if "vehicle_label" not in cols("runs"):
+            self.db.execute("ALTER TABLE runs ADD COLUMN vehicle_label TEXT")
+
+        if "vehicle_hardware" not in cols("runs"):
+            self.db.execute(
+                "ALTER TABLE runs ADD COLUMN vehicle_hardware TEXT"
+            )
 
         #
         # `run_channels` needs no ALTER: it is a new table, and the
@@ -1271,14 +1318,16 @@ class Recorder:
 
                 (started, vin, gateway, ecu, ecu_addr, mode,
                  clock_synced, mapping_set, manifest,
-                 channel_provenance) = payload
+                 channel_provenance, vehicle_label,
+                 vehicle_hardware) = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
                     "(started_at, vin, gateway, ecu, ecu_addr, mapping_set,"
-                    " mode, clock_synced) VALUES (?,?,?,?,?,?,?,?)",
+                    " mode, clock_synced, vehicle_label, vehicle_hardware) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (started, vin, gateway, ecu, ecu_addr, mapping_set,
-                     mode, clock_synced),
+                     mode, clock_synced, vehicle_label, vehicle_hardware),
                 )
                 self.run_id = cur.lastrowid
                 self.run_channel_seen.clear()
@@ -2124,6 +2173,11 @@ def poll_loop(
             #
             if rec is not None:
                 rec.set_metadata(profile, [modes.table.fingerprint()])
+                #: what the car physically is, snapshotted onto every run
+                #: that follows, so a drive keeps the configuration that
+                #: was true when it was recorded rather than whatever the
+                #: profile file happens to say months later
+                rec.set_vehicle(load_profile())
                 rec.start_run(vin, ip, engine.label(), engine.addr,
                               modes.current, synced)
                 rec.event("connect", f"engine ECU {engine.label()}")
@@ -2431,6 +2485,9 @@ def demo_loop(
 
     if rec is not None:
         rec.set_metadata(profile, [modes.table.fingerprint()])
+        #: see the note at the other call site - configuration is
+        #: snapshotted per run, not looked up at analysis time
+        rec.set_vehicle(load_profile())
 
     tel.update(
         connected=True, status="live (demo)", ecu="demo",
