@@ -135,9 +135,13 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   rev bar, hero tach+speedo, big centre GEAR, M-tricolor, tiles), Detail
   (per-channel history graphs), All-data (dense table w/ min/max/age).
 - **Poll rates follow the channel, not the loop** (OBD mapping v2,
-  2026-08-30): four wall-clock tiers — `motion` 10 Hz (rpm/speed/map/
-  pedal), `context` and `slow` 1/10 s, `rare` 1/60 s — plus `dde_dyn`
-  (round-robin, ~1/11 s each) and `egs` 2 Hz. 7,740 → 2,735 requests/min.
+  2026-08-30; v5 2026-09-01): wall-clock tiers — `motion` 10 Hz (rpm/
+  speed/map/pedal), `control_ctx` 1 s (load/maf), `context` and `slow`
+  1/10 s, `rare` 1/60 s — plus `dde_dyn` (round-robin, ~1/11 s each) and
+  `egs` 2 Hz. 7,740 → 2,854 requests/min. Declared actual/setpoint pairs
+  share one rotation slot so they are sampled in the same cycle, and
+  non-staggered requests are phase-spread so same-period classes do not
+  burst together. See `docs/POLLING_AND_SAFETY.md`.
 - **Drive modes** scale those classes at runtime: `off` (connected but
   silent), `sampling` (120 s on / 600 s off, slow tiers exempt), `long`,
   `normal` (= the declared rates), `debug` (the pre-v2 behaviour).

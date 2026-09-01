@@ -46,12 +46,13 @@ schema_version: 1
 # recorded in each session's mapping set alongside every mapping file, so
 # one string identifies the whole sampling configuration of a drive.
 id: drive-modes
-version: 1
+version: 2
 
 # The declared rates - what `normal` means - live in the mapping files:
 #
 #   motion   10 Hz    rpm, speed, map, pedal
-#   context  1/10 s   load, throttle, relthr, torque, maf, rail, lambda
+#   control_ctx 1/1 s load, maf - the two that condition control-loop work
+#   context  1/10 s   throttle, relthr, torque, rail, lambda
 #   slow     1/10 s   temps, voltage, fuel rate, cat, EGR
 #   rare     1/60 s   ambient, baro, fuel level, runtime, distance
 #   dde_dyn  ~1/11 s each (22 requests, round-robin, one per 0.5 s)
@@ -91,6 +92,7 @@ modes:
     # kilometres, so the fast tier is nearly all duplicate rows.
     multipliers:
       motion: 5.0            # 10 Hz   -> 2 Hz
+      control_ctx: 3.0       # 1/1 s   -> 1/3 s
       context: 3.0           # 1/10 s  -> 1/30 s
       egs: 4.0               # 2 Hz    -> 0.5 Hz
       dde_dyn: 2.0           # ~1/11 s -> ~1/22 s
@@ -106,6 +108,7 @@ modes:
     # Reproduces the pre-2026-08-30 behaviour: the whole OBD set at the
     # loop rate, the DDE reads five times faster.
     multipliers:
+      control_ctx: 0.1       # 1/1 s   -> 10 Hz
       context: 0.01          # 1/10 s  -> 10 Hz
       slow: 0.1              # 1/10 s  -> 1 Hz
       rare: 0.1              # 1/60 s  -> 1/6 s

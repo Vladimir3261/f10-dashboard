@@ -201,9 +201,24 @@ class TestPollCycle(LiveWiringCase):
 
         self.cycle(executor, profile, plan, values, 0)
 
-        #: Ten seconds on: the 10 s tiers are due, the 60 s one is not.
-        fresh = self.cycle(executor, profile, plan, values, 100,
-                           now=self.T0 + 10.0)
+        #
+        # Phase spreading gives each request its own offset inside its
+        # period, so a channel is no longer guaranteed to arrive on the
+        # exact tick - it arrives somewhere in the period that follows.
+        # Gathered across the window the tiers behave as before, which is
+        # the property worth pinning; the burst on one tick is what went.
+        #
+        def over(seconds, cycles):
+            seen = set()
+
+            for i in range(cycles):
+                seen |= set(self.cycle(executor, profile, plan, values,
+                                       100 + i, now=self.T0 + seconds + i * 0.1))
+
+            return seen
+
+        #: Ten seconds on: the 10 s tiers come round, the 60 s one does not.
+        fresh = over(10.0, 100)
 
         self.assertIn("coolant", fresh)          # slow, 10 s
         self.assertIn("voltage", fresh)          # slow, 10 s
@@ -211,8 +226,7 @@ class TestPollCycle(LiveWiringCase):
         self.assertNotIn("fuel", fresh)          # rare, 60 s
 
         #: A minute on, everything.
-        fresh = self.cycle(executor, profile, plan, values, 600,
-                           now=self.T0 + 60.0)
+        fresh = over(60.0, 600)
 
         self.assertIn("baro", fresh)
         self.assertIn("fuel", fresh)
