@@ -347,7 +347,11 @@ class ProvenanceIsSnapshotWhenTheRunOpens(ProvenanceCase):
         rec.set_metadata(profile_at_version(2))
 
         kind, payload = rec.q.get_nowait()
-        provenance = payload[-1]
+        #: payload is (started, vin, gateway, ecu, ecu_addr, mode,
+        #: clock_synced, mapping_set, manifest, channel_provenance,
+        #: vehicle_label, vehicle_hardware) - indexed rather than taken
+        #: from the end, which broke when the vehicle snapshot was added.
+        provenance = payload[9]
 
         self.assertEqual(kind, "run")
         self.assertEqual(provenance["x"], ("prov-test", "1", "X", "rpm"))

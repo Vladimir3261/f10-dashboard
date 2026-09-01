@@ -1,19 +1,28 @@
 {
   "uid": "f10-health",
   "title": "F10 vehicle health",
-  "tags": ["f10", "telemetry"],
+  "tags": [
+    "f10",
+    "telemetry"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "time": { "from": "now-30d", "to": "now" },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "vin",
         "label": "Vehicle",
         "type": "query",
-        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
         "query": "SELECT DISTINCT vehicle_id FROM telemetry.samples WHERE vehicle_id != 'DEMO0000000000000' ORDER BY vehicle_id",
         "refresh": 1,
         "includeAll": false,
@@ -26,88 +35,265 @@
       "id": 1,
       "title": "Drives (sessions)",
       "type": "table",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT formatDateTime(min(ts),'%Y-%m-%d %H:%M') AS started, round(dateDiff('second',min(ts),max(ts))/60.0,1) AS minutes, count() AS samples, round(maxIf(value,channel='vehicle.speed' AND quality='ok'),0) AS max_kmh, round(maxIf(value,channel='engine.rpm' AND quality='ok'),0) AS max_rpm FROM telemetry.samples WHERE vehicle_id='$vin' GROUP BY session_id HAVING samples>2000 ORDER BY started DESC" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT formatDateTime(min(ts),'%Y-%m-%d %H:%M') AS started, round(dateDiff('second',min(ts),max(ts))/60.0,1) AS minutes, count() AS samples, round(maxIf(value,channel='vehicle.speed' AND quality='ok'),0) AS max_kmh, round(maxIf(value,channel='engine.rpm' AND quality='ok'),0) AS max_rpm FROM telemetry.samples WHERE vehicle_id='$vin' GROUP BY session_id HAVING samples>2000 ORDER BY started DESC"
+        }
+      ]
     },
     {
       "id": 2,
-      "title": "DPF ΔP vs exhaust flow (restriction baseline)",
-      "description": "Median differential pressure binned by engine MAF. Trend this up over months = filter loading up at comparable flow. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
+      "title": "DPF ΔP vs exhaust flow (VOID: no filter fitted)",
+      "description": "VOID ON THIS VEHICLE. The particulate filter was removed, so dpf.differential_pressure measures an empty pipe and a restriction baseline from it is not a measurement of anything. Gated on each SESSION'S OWN recorded configuration (sessions.vehicle_hardware contains dpf=present), not a global toggle - a toggle would reinterpret historical drives, declaring void a session recorded while the filter was still fitted. Sessions predating configuration provenance are '' = unknown, and unknown is not 'fitted', so this panel is legitimately empty until a drive is recorded declaring a filter. Median differential pressure binned by engine MAF. Trend this up over months = filter loading up at comparable flow. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
       "type": "barchart",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "continuous-BlYlRd" } }, "overrides": [] },
-      "options": { "xField": "maf_gps", "orientation": "auto", "showValue": "auto" },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT toString(round(maf,-1)) AS maf_gps, round(quantile(0.5)(dp),1) AS median_dP_hPa FROM (SELECT a.value AS dp, if(prev_gap<=next_gap,prev.value,next.value) AS maf, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.differential_pressure' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY maf_gps ORDER BY toFloat64(maf_gps)" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "continuous-BlYlRd"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "maf_gps",
+        "orientation": "auto",
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT toString(round(maf,-1)) AS maf_gps, round(quantile(0.5)(dp),1) AS median_dP_hPa FROM (SELECT a.value AS dp, if(prev_gap<=next_gap,prev.value,next.value) AS maf, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.differential_pressure' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND position(vehicle_hardware,'dpf=present')>0) AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY maf_gps ORDER BY toFloat64(maf_gps)"
+        }
+      ]
     },
     {
       "id": 3,
       "title": "Boost tracking |actual − setpoint| by RPM",
       "description": "Mean absolute boost deviation, conditioned on RPM. A growing baseline = actuator/wastegate wear. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md. Window 1.0 s: actual and setpoint are sampled 0.56 s apart on this car (p10-p90 0.52-0.59), so 1.0 s keeps 98.9% of pairs while 0.5 s would keep 4.6% - measuring the threshold, not the car. The residual 0.56 s is worth ~140 hPa (p90) of spurious deviation under hard transients, so trust this in aggregate and treat a single large excursion as possibly sampling. Co-scheduling the pair would remove it.",
       "type": "barchart",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
-      "options": { "xField": "rpm_band", "orientation": "auto", "showValue": "auto" },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT multiIf(rpm<1000,'0 idle',rpm<1800,'1 1000-1800',rpm<2600,'2 1800-2600','3 2600+') AS rpm_band, round(avg(abs(dev)),1) AS mean_abs_dev_hPa FROM (SELECT a.value-if(sp_prev_gap<=sp_next_gap,sp_prev.value,sp_next.value) AS dev, if(rpm_prev_gap<=rpm_next_gap,rpm_prev.value,rpm_next.value) AS rpm, dateDiff('millisecond',sp_prev.ts,a.ts)/1000.0 AS sp_prev_gap,if(dateDiff('millisecond',a.ts,sp_next.ts)>=0,dateDiff('millisecond',a.ts,sp_next.ts)/1000.0,1e18) AS sp_next_gap,dateDiff('millisecond',rpm_prev.ts,a.ts)/1000.0 AS rpm_prev_gap,if(dateDiff('millisecond',a.ts,rpm_next.ts)>=0,dateDiff('millisecond',a.ts,rpm_next.ts)/1000.0,1e18) AS rpm_next_gap FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.actual' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.setpoint' AND quality='ok') sp_prev ON a.session_id=sp_prev.session_id AND a.ts>=sp_prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.setpoint' AND quality='ok') sp_next ON a.session_id=sp_next.session_id AND a.ts<=sp_next.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.rpm' AND quality='ok') rpm_prev ON a.session_id=rpm_prev.session_id AND a.ts>=rpm_prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.rpm' AND quality='ok') rpm_next ON a.session_id=rpm_next.session_id AND a.ts<=rpm_next.ts) WHERE least(sp_prev_gap,sp_next_gap)<=1.0 AND least(rpm_prev_gap,rpm_next_gap)<=1.0 GROUP BY rpm_band ORDER BY rpm_band" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "rpm_band",
+        "orientation": "auto",
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT multiIf(rpm<1000,'0 idle',rpm<1800,'1 1000-1800',rpm<2600,'2 1800-2600','3 2600+') AS rpm_band, round(avg(abs(dev)),1) AS mean_abs_dev_hPa FROM (SELECT a.value-if(sp_prev_gap<=sp_next_gap,sp_prev.value,sp_next.value) AS dev, if(rpm_prev_gap<=rpm_next_gap,rpm_prev.value,rpm_next.value) AS rpm, dateDiff('millisecond',sp_prev.ts,a.ts)/1000.0 AS sp_prev_gap,if(dateDiff('millisecond',a.ts,sp_next.ts)>=0,dateDiff('millisecond',a.ts,sp_next.ts)/1000.0,1e18) AS sp_next_gap,dateDiff('millisecond',rpm_prev.ts,a.ts)/1000.0 AS rpm_prev_gap,if(dateDiff('millisecond',a.ts,rpm_next.ts)>=0,dateDiff('millisecond',a.ts,rpm_next.ts)/1000.0,1e18) AS rpm_next_gap FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.actual' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.setpoint' AND quality='ok') sp_prev ON a.session_id=sp_prev.session_id AND a.ts>=sp_prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.boost.setpoint' AND quality='ok') sp_next ON a.session_id=sp_next.session_id AND a.ts<=sp_next.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.rpm' AND quality='ok') rpm_prev ON a.session_id=rpm_prev.session_id AND a.ts>=rpm_prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.rpm' AND quality='ok') rpm_next ON a.session_id=rpm_next.session_id AND a.ts<=rpm_next.ts) WHERE least(sp_prev_gap,sp_next_gap)<=1.0 AND least(rpm_prev_gap,rpm_next_gap)<=1.0 GROUP BY rpm_band ORDER BY rpm_band"
+        }
+      ]
     },
     {
       "id": 4,
-      "title": "DPF soot vs distance since regen",
-      "description": "Soot accumulation. The slope (g/km) is a DPF-health baseline; a steeper slope over time points at injectors/EGR/combustion. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
+      "title": "DPF soot vs distance since regen (VOID: no filter)",
+      "description": "VOID ON THIS VEHICLE. With no filter fitted the soot channels report the ECU's internal model of hardware that is not there, so accumulation against distance describes the model. Gated on each session's own recorded configuration, not a global toggle. Sessions predating configuration provenance are unknown and excluded. Soot accumulation. The slope (g/km) is a DPF-health baseline; a steeper slope over time points at injectors/EGR/combustion. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
       "type": "barchart",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 17 },
-      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
-      "options": { "xField": "dist_km", "orientation": "auto", "showValue": "never" },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT toString(round(dist,0)) AS dist_km, round(quantile(0.5)(soot),2) AS soot_g FROM (SELECT a.value AS dist, if(prev_gap<=next_gap,prev.value,next.value) AS soot, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.distance_since_regeneration' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY dist_km ORDER BY toFloat64(dist_km)" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "dist_km",
+        "orientation": "auto",
+        "showValue": "never"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT toString(round(dist,0)) AS dist_km, round(quantile(0.5)(soot),2) AS soot_g FROM (SELECT a.value AS dist, if(prev_gap<=next_gap,prev.value,next.value) AS soot, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.distance_since_regeneration' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND position(vehicle_hardware,'dpf=present')>0) AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY dist_km ORDER BY toFloat64(dist_km)"
+        }
+      ]
     },
     {
       "id": 5,
       "title": "DDE vs OBD coolant agreement per drive",
       "description": "Mean |difference| between the proprietary and standard coolant reads. Should stay near 0; drifting up flags a sensor. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
       "type": "table",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 17 },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT formatDateTime(min_ts,'%Y-%m-%d %H:%M') AS drive, mean_abs_diff_degC, pairs FROM (SELECT session_id, min(ts) AS min_ts, round(avg(abs(dde-obd)),3) AS mean_abs_diff_degC, count() AS pairs FROM (SELECT a.session_id AS session_id, a.ts AS ts, a.value AS dde, if(prev_gap<=next_gap,prev.value,next.value) AS obd, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='n47d_coolant' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='coolant' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='coolant' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY session_id HAVING pairs>20) ORDER BY min_ts DESC" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT formatDateTime(min_ts,'%Y-%m-%d %H:%M') AS drive, mean_abs_diff_degC, pairs FROM (SELECT session_id, min(ts) AS min_ts, round(avg(abs(dde-obd)),3) AS mean_abs_diff_degC, count() AS pairs FROM (SELECT a.session_id AS session_id, a.ts AS ts, a.value AS dde, if(prev_gap<=next_gap,prev.value,next.value) AS obd, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='n47d_coolant' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='coolant' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel_raw='coolant' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY session_id HAVING pairs>20) ORDER BY min_ts DESC"
+        }
+      ]
     },
     {
       "id": 6,
       "title": "OBD MAP saturated (255 kPa)",
       "description": "Reads the quality label the decoder recorded, not a value threshold. CAVEAT: rows recorded before the data-quality layer landed are all 'ok' because nothing was labelling them, not because they were verified clean - so this understates the rate over history.",
       "type": "stat",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 26 },
-      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 10 } ] } }, "overrides": [] },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT 100.0*countIf(quality='saturated')/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.manifold_pressure.absolute'" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT 100.0*countIf(quality='saturated')/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.manifold_pressure.absolute'"
+        }
+      ]
     },
     {
       "id": 7,
       "title": "Lambda at 2.0 sentinel (no-value)",
       "description": "Reads the quality label the decoder recorded, not a value threshold. CAVEAT: rows recorded before the data-quality layer landed are all 'ok' because nothing was labelling them, not because they were verified clean - so this understates the rate over history.",
       "type": "stat",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 26 },
-      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 40 } ] } }, "overrides": [] },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT 100.0*countIf(quality='sentinel')/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.lambda'" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 40
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT 100.0*countIf(quality='sentinel')/count() AS pct FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.lambda'"
+        }
+      ]
     },
     {
       "id": 8,
       "title": "Total samples",
       "type": "stat",
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
-      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 26 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "targets": [ { "refId": "A", "queryType": "table",
-        "rawSql": "SELECT count() AS samples FROM telemetry.samples WHERE vehicle_id='$vin'" } ]
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT count() AS samples FROM telemetry.samples WHERE vehicle_id='$vin'"
+        }
+      ]
     }
   ]
 }
