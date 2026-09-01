@@ -498,6 +498,15 @@ def load_behaviour(run: Dict, span) -> Dict:
 
 
 def dpf(run: Dict) -> Dict:
+    """
+    Soot ranges, and the measured-vs-modelled alignment.
+
+    The ranges are pure value statistics and survive an untrusted clock.
+    The alignment does not: it is a bounded time comparison like any
+    other, and computing it on a run whose timestamps may not even be
+    ordered would emit exactly the "plausible number with a caveat" the
+    fail-closed policy exists to remove.
+    """
     meas = run["series"].get("n47d_soot_meas")
     model = run["series"].get("n47d_soot_model")
     out: Dict = {}
@@ -507,6 +516,11 @@ def dpf(run: Dict) -> Dict:
 
     if model:
         out["modelled"] = _stats([v for _, v in model])
+
+    if not time_trusted(run):
+        out["alignment_unavailable"] = TIME_UNTRUSTED
+
+        return out
 
     if meas and model:
         rule = pairing_for("n47d_soot_meas", "n47d_soot_model")
@@ -542,10 +556,6 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
             "anything involving elapsed time, gradients or channel "
             "alignment was skipped rather than reported with a caveat."
         ]
-
-    if not time_trusted(run):
-        #: value ranges survive; the measured-vs-modelled alignment does not
-        return {"unavailable": TIME_UNTRUSTED}
 
     out: List[str] = []
 
@@ -1009,6 +1019,8 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         if "mean_abs_diff" in dp:
             L.append(f"- measured vs modelled mean |Δ|: {dp['mean_abs_diff']} g "
                      "(the two independent estimates should agree)")
+        elif dp.get("alignment_unavailable"):
+            L.append(f"- measured vs modelled: {dp['alignment_unavailable']}")
     else:
         L.append("_no DPF channels captured_")
 
