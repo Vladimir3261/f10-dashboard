@@ -80,6 +80,26 @@ CREATE TABLE IF NOT EXISTS telemetry.sessions
     -- is most of the point of this lake) must filter on it:
     --     WHERE clock_synced = 1
     clock_synced Nullable(UInt8),
+    -- What the car PHYSICALLY WAS when this session was recorded: the
+    -- stable VIN-free label, and a deterministic `subsystem=state,...`
+    -- fingerprint of its hardware. Snapshotted at record time, because a
+    -- present-day setting would relabel history - a session recorded
+    -- while the DPF was fitted must not be declared void once it is
+    -- removed. '' = recorded before this was tracked: UNKNOWN, never
+    -- "no hardware". See docs/VEHICLE_PROFILE.md.
+    vehicle_label    String DEFAULT '',
+    vehicle_hardware String DEFAULT '',
+    -- Durable identity, minted when the run was created (a ULID) and
+    -- carried unchanged. `session_id` above is a 64-bit BLAKE2b
+    -- derivation of THIS for use as a join key; the uid is the one that
+    -- cannot collide and does not change when a file is renamed. ''
+    -- for sessions recorded before it existed, which keep the old
+    -- filename-derived id. See docs/TRIPS_AND_IDENTITY.md.
+    session_uid      String DEFAULT '',
+    -- Which boot of the host recorded the run. Two runs from different
+    -- boots cannot be one physical trip, which is the strongest cheap
+    -- evidence for grouping runs into drives.
+    boot_id          String DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)

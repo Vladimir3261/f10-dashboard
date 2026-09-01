@@ -1,0 +1,33 @@
+# Vehicle event history - things that change what came before.
+#
+# Copy to `local/vehicle-events.yaml` (gitignored) and edit.
+#
+# A longitudinal baseline is a claim about ONE configuration of ONE
+# vehicle. An oil change, a replaced sensor or a remap does not make the
+# earlier data wrong - it makes it a different population, and comparing
+# across the boundary silently pools two cars. Analytics asks
+# `events_between()` before treating two points as comparable.
+#
+# NO VIN, no private identifying data. Same rule as the vehicle profile.
+#
+# `at` takes YYYY-MM-DD or a unix timestamp. An event with no `at` is
+# skipped: it has no position on the timeline, and placing it at zero
+# would silently invalidate all history before it - which is everything.
+
+events:
+  - kind: dpf_removed
+    at: 2020-01-01
+    description: >
+      Date unknown; recorded at the start of the timeline so any baseline
+      is segmented at it. Discovered 2026-08-30 when a captured
+      regeneration falsified the soot decode.
+
+  - kind: oil_change
+    at: 2026-06-15
+    odometer: 201000
+    description: 5W-30 long-life, filter replaced
+
+# Kinds that segment a baseline are listed in bmwdiag/vehicle.py
+# (RESETS_BASELINE). The set is not closed - an unfamiliar kind still
+# segments, because the safe reading of "something was done to the car"
+# is that it mattered.
