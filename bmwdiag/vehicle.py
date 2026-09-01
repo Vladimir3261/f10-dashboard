@@ -37,7 +37,7 @@ stable label, `F10-520d-dev`.
 import os
 from typing import Any, Dict, Optional, Tuple
 
-from bmwdiag.mapping import yamlsubset
+from .mapping import yamlsubset
 
 __all__ = [
     "PRESENT",
@@ -153,6 +153,44 @@ class VehicleProfile:
                 return f"{kind}, {when}"
 
         return ""
+
+    def fingerprint(self) -> str:
+        """
+        Deterministic, VIN-free summary of the hardware configuration.
+
+        `subsystem=state,...`, sorted, e.g. `dpf=absent,egr=present`. This
+        string is what gets snapshotted onto a run, so it has to be stable
+        across processes and orderings - two runs recorded under the same
+        configuration must produce byte-identical fingerprints, or a
+        change of nothing would look like a change of something.
+
+        Only declared subsystems appear. An empty string means nothing was
+        declared, which is different from declaring everything unknown.
+        """
+        return ",".join(
+            f"{name}={self.state(name)}" for name in sorted(self._hardware)
+        )
+
+    @classmethod
+    def from_fingerprint(cls, label: str, fingerprint: str,
+                         source: str = "") -> "VehicleProfile":
+        """
+        Rebuild a profile from a snapshot taken when a run was recorded.
+
+        The inverse of `fingerprint()`, and the reason it is a flat string
+        rather than a nested structure: what is stored on a run has to be
+        readable back without carrying a schema along with it.
+        """
+        hardware: Dict[str, Any] = {}
+
+        for item in (fingerprint or "").split(","):
+            if "=" not in item:
+                continue
+
+            name, _, state = item.partition("=")
+            hardware[name.strip()] = state.strip()
+
+        return cls(label=label, hardware=hardware, source=source)
 
     @property
     def configured(self) -> bool:

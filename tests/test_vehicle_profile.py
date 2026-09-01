@@ -22,8 +22,9 @@ import unittest
 from tests import support  # noqa: F401
 
 import live
+import sys
 from analysis import session_report
-from analysis.vehicle_profile import (
+from bmwdiag.vehicle import (
     ABSENT,
     PRESENT,
     UNKNOWN,
@@ -301,3 +302,195 @@ class TheLakeConsumersAreGatedToo(unittest.TestCase):
                 sql = panel["targets"][0]["rawSql"]
                 self.assertIn("$dpf_present=1", sql)
                 self.assertIn("VOID", panel["title"] + panel["description"])
+
+
+class ConfigurationIsRunProvenance(unittest.TestCase):
+    """
+    A run keeps the configuration that was true WHEN IT WAS RECORDED.
+
+    The profile file describes the car today. Interpreting an old drive
+    through it relabels history: a run recorded with the filter fitted
+    would have its differential-pressure readings declared void the
+    moment the filter comes off and the profile is updated - a statement
+    about hardware that did exist at the time. The reverse is as bad
+    after a part is restored.
+
+    Same defect as params.mapping_ver in #5, one layer over, and fixed
+    the same way: snapshot at run start, resolve through the run.
+    """
+
+    def setUp(self):
+        self.db = os.path.join(tempfile.mkdtemp(), "tele.db")
+
+    def _record(self, profile, value):
+        rec = live.Recorder(self.db, chunk=1, interval=0.05)
+        rec.set_vehicle(profile)
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12, clock_synced=True)
+        time.sleep(0.05)
+        base = time.time()
+
+        for i in range(10):
+            rec.write(base + i, {"n47d_dpf_dp": value,
+                                 "n47d_soot_meas": 9.4,
+                                 "n47d_soot_model": 9.5})
+
+        rec.close()
+
+    def _record_both(self):
+        """Run 1 with a filter fitted; run 2, same DB, after removal."""
+        self._record(VehicleProfile(label="F10-520d-dev",
+                                    hardware={"dpf": True}, source="x"), 12.0)
+        self._record(VehicleProfile(label="F10-520d-dev",
+                                    hardware={"dpf": False}, source="x"), -11.0)
+
+    def test_the_snapshot_is_stored_on_the_run(self):
+        self._record_both()
+
+        import sqlite3
+        con = sqlite3.connect(self.db)
+
+        try:
+            rows = con.execute(
+                "SELECT id, vehicle_label, vehicle_hardware FROM runs ORDER BY id"
+            ).fetchall()
+        finally:
+            con.close()
+
+        self.assertEqual(rows, [
+            (1, "F10-520d-dev", "dpf=present"),
+            (2, "F10-520d-dev", "dpf=absent"),
+        ])
+
+    def test_the_earlier_run_keeps_present_semantics(self):
+        self._record_both()
+        run = session_report.load_run(self.db, 1)
+
+        self.assertEqual(run["vehicle_provenance"], "run")
+        self.assertTrue(run["vehicle"].has("dpf"))
+        self.assertNotIn("physical_conclusions_void", session_report.dpf(run))
+
+    def test_the_later_run_is_void(self):
+        self._record_both()
+        run = session_report.load_run(self.db, 2)
+
+        self.assertTrue(run["vehicle"].is_absent("dpf"))
+        self.assertTrue(session_report.dpf(run)["physical_conclusions_void"])
+
+    def test_todays_profile_cannot_relabel_an_old_run(self):
+        #
+        # The regression in one assertion. Analysing run 1 while the
+        # CURRENT profile says the filter is gone must still yield
+        # filter-present semantics, because that is what was true then.
+        #
+        self._record_both()
+        today = VehicleProfile(hardware={"dpf": False}, source="today")
+
+        run = session_report.load_run(self.db, 1, vehicle=today)
+
+        self.assertTrue(run["vehicle"].has("dpf"))
+        self.assertEqual(run["vehicle_provenance"], "run")
+
+    def test_nor_can_it_relabel_in_the_other_direction(self):
+        #
+        # The mirror case, after a part is restored: today's profile
+        # saying the filter is BACK must not resurrect conclusions for a
+        # run recorded while it was missing.
+        #
+        self._record_both()
+        today = VehicleProfile(hardware={"dpf": True}, source="today")
+
+        run = session_report.load_run(self.db, 2, vehicle=today)
+
+        self.assertTrue(run["vehicle"].is_absent("dpf"))
+
+    def test_a_run_predating_the_field_is_labelled_as_such(self):
+        #
+        # The fallback is allowed, but must never read as historical
+        # truth. `source` says where the answer came from and the report
+        # quotes it.
+        #
+        import sqlite3
+        self._record(VehicleProfile(hardware={"dpf": True}, source="x"), 12.0)
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE runs SET vehicle_hardware = '' WHERE id = 1")
+        con.commit()
+        con.close()
+
+        today = VehicleProfile(label="now", hardware={"dpf": False},
+                               source="today")
+        run = session_report.load_run(self.db, 1, vehicle=today)
+
+        self.assertEqual(run["vehicle_provenance"], "current")
+        self.assertIn("TODAY", run["vehicle"].source)
+
+    def test_the_report_warns_when_configuration_is_not_the_runs_own(self):
+        import sqlite3
+        self._record(VehicleProfile(hardware={"dpf": True}, source="x"), 12.0)
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE runs SET vehicle_hardware = '' WHERE id = 1")
+        con.commit()
+        con.close()
+
+        run = session_report.load_run(
+            self.db, 1,
+            vehicle=VehicleProfile(hardware={"dpf": False}, source="today"))
+        md = session_report.render_markdown(
+            run, session_report.warmup(run), session_report.crosschecks(run),
+            session_report.phase_mask(run),
+            session_report.load_behaviour(run, None), session_report.dpf(run),
+            session_report.quality(run),
+        )
+
+        self.assertIn("TODAY'S", md)
+
+    def test_the_lake_representation_preserves_the_distinction(self):
+        #
+        # Requirement 8: the per-session distinction has to survive the
+        # wire and the ingest, or lake analytics is back to a global
+        # toggle that reinterprets every historical drive.
+        #
+        sys.path.insert(0, os.path.join(support.ROOT, "infra"))
+        from sync import agent as sync_agent
+        from ingest import server as ingest_server
+        from common import wire
+
+        self._record_both()
+
+        rows = sync_agent.read_sessions(self.db, 0)
+        built = ingest_server.build_sessions(
+            wire.decode(wire.encode(wire.columnar(
+                "sessions",
+                [{k: v for k, v in r.items() if k != "_id"} for r in rows],
+            )))
+        )
+
+        self.assertEqual(
+            sorted((b["vehicle_hardware"] for b in built)),
+            ["dpf=absent", "dpf=present"],
+        )
+        self.assertTrue(all(b["vehicle_label"] == "F10-520d-dev" for b in built))
+
+    def test_an_old_database_without_the_columns_still_syncs(self):
+        import sqlite3
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " started_at REAL, ended_at REAL, vin TEXT, gateway TEXT,"
+            " ecu TEXT, ecu_addr INTEGER);"
+            "CREATE TABLE params(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " key TEXT UNIQUE, pid INTEGER, label TEXT, unit TEXT);"
+            "CREATE TABLE samples(run_id INTEGER, ts REAL, param_id INTEGER,"
+            " value REAL);"
+        )
+        con.execute("INSERT INTO runs(id, started_at, vin) VALUES(1, 1e9, 'V')")
+        con.commit()
+        con.close()
+
+        sys.path.insert(0, os.path.join(support.ROOT, "infra"))
+        from sync import agent as sync_agent
+
+        rows = sync_agent.read_sessions(path, 0)
+
+        self.assertEqual(rows[0]["vehicle_hardware"], "")
