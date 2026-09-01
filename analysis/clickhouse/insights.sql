@@ -1,6 +1,19 @@
 -- Per-vehicle analytics on the telemetry lake. VIN-free (committable):
 -- pass the vehicle with --param_vin=<VIN>. Run:
---   clickhouse-client --param_vin=<VIN> --multiquery < insights.sql
+--   clickhouse-client --param_vin=<VIN> --param_dpf_present=0 \
+--                     --multiquery < insights.sql
+--
+-- VEHICLE CONFIGURATION IS AN INPUT. `dpf_present` says whether this car
+-- physically has a particulate filter. Sections 2 and 4 draw conclusions
+-- about a filter, and on a car without one they are not uncertain, they
+-- are impossible - `dpf.differential_pressure` measures an empty pipe.
+-- Pass 0 and those sections return a single explanatory row instead of a
+-- plausible-looking baseline.
+--
+-- THE TARGET CAR HAS NO FILTER: pass --param_dpf_present=0. It is a
+-- required parameter rather than a default precisely so that nobody
+-- reads section 2 without having answered the question. Keep it in step
+-- with local/vehicle-profile.yaml; see docs/VEHICLE_PROFILE.md.
 -- Analytics is PER VEHICLE by design; cross-vehicle mixing is noise.
 --
 -- EVERY query that interprets `value` as a physical measurement filters
@@ -76,7 +89,9 @@ ORDER BY started;
 
 -- 2. DPF differential pressure vs exhaust flow (the restriction baseline)
 --    ASOF-join each dP reading to the nearest engine MAF, bin by flow.
-SELECT '=== 2. DPF dP vs MAF flow (median/p10/p90 hPa) ===' AS _;
+SELECT if({dpf_present:UInt8} = 1,
+          '=== 2. DPF dP vs MAF flow (median/p10/p90 hPa) ===',
+          '=== 2. SKIPPED: no particulate filter on this vehicle - a dP-vs-flow restriction baseline across an empty pipe measures nothing ===') AS _;
 SELECT round(maf,-1) AS maf_gps,
        count() AS n,
        round(quantile(0.5)(dp),1)  AS med_dP,
@@ -104,6 +119,7 @@ FROM (
     ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- both slow channels; 15 s per the contract
+  AND {dpf_present:UInt8} = 1  -- no filter fitted -> no restriction baseline
 GROUP BY maf_gps ORDER BY maf_gps;
 
 -- 3. Boost actual-vs-setpoint deviation, conditioned on RPM ----------
@@ -170,7 +186,9 @@ WHERE least(sp_prev_gap, sp_next_gap) <= 1.0        -- measured separation 0.56 
 GROUP BY rpm_band ORDER BY n DESC;
 
 -- 4. DPF soot vs distance-since-regen (accumulation over the fleet-life)
-SELECT '=== 4. DPF soot vs distance-since-regen ===' AS _;
+SELECT if({dpf_present:UInt8} = 1,
+          '=== 4. DPF soot vs distance-since-regen ===',
+          '=== 4. SKIPPED: no particulate filter - the soot channels model hardware that is not fitted, so this describes the model, not a filter ===') AS _;
 SELECT round(dist,0) AS dist_km,
        round(quantile(0.5)(soot),2) AS med_soot_g
 FROM (
@@ -195,6 +213,7 @@ FROM (
     ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- two slow ECU model outputs
+  AND {dpf_present:UInt8} = 1  -- see the section header
 GROUP BY dist_km ORDER BY dist_km;
 
 -- 5. DDE-vs-OBD coolant agreement per drive (decode-path health) ------
@@ -448,3 +467,22 @@ FROM (
 )
 GROUP BY pair, max_age_s
 ORDER BY pct_in_window;
+
+-- 8. Regenerations commanded (meaningful with or without a filter) -----
+--
+-- Deliberately NOT gated on dpf_present. A commanded regeneration is
+-- something the ECU DID: it burns fuel and dilutes the oil whether or not
+-- there is a filter to clean. On a car with the filter removed this is
+-- the only DPF-adjacent number that still means anything, and it means
+-- something worse - cost with no benefit.
+SELECT '=== 8. regenerations commanded (valid with no filter) ===' AS _;
+SELECT session_id,
+       min(value) AS count_start,
+       max(value) AS count_end,
+       max(value) - min(value) AS regens
+FROM telemetry.samples
+WHERE vehicle_id={vin:String} AND channel='dpf.regeneration.count'
+  AND quality='ok'
+GROUP BY session_id
+HAVING regens > 0
+ORDER BY session_id;

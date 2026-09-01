@@ -1,5 +1,12 @@
 # The DPF soot channels — what they are not
 
+> **Enforced since 2026-09-01.** The fact that this car has no filter is
+> no longer only documented — it is configuration that the analytics
+> layer reads. See [`VEHICLE_PROFILE.md`](VEHICLE_PROFILE.md). A report
+> can no longer state that differential-pressure sensing is healthy on a
+> vehicle with no filter, because it asks first.
+
+
 > **Resolved, 2026-08-30.** **This vehicle has no particulate filter — it
 > was removed.** Every anomaly below follows from that, and the DPF
 > channels can only ever report the ECU's internal model, never physical
