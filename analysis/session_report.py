@@ -25,7 +25,13 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from analysis.alignment import MIN_USEFUL_COVERAGE, align, pairing_for
-from bmwdiag.vehicle import VehicleProfile, load_profile
+from analysis.trips import group_trips, load_runs
+from bmwdiag.vehicle import (
+    VehicleProfile,
+    events_between,
+    load_events,
+    load_profile,
+)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -165,6 +171,31 @@ def load_run(db_path: str, run_id: Optional[int],
     finally:
         db.close()
 
+    #
+    # Trip membership is computed from ALL the runs in this database, not
+    # stamped at record time - the grouping is a pure function so better
+    # evidence later re-groups the history rather than only new drives.
+    #
+    trip_summary = None
+    session_uid = ""
+
+    for trip in group_trips(load_runs(db_path)):
+        members = [r for r in trip.runs if r.run_id == run_id]
+
+        if not members:
+            continue
+
+        session_uid = members[0].session_uid
+        trip_summary = {
+            "trip_uid": trip.trip_uid,
+            "runs": [r.run_id for r in trip.runs],
+            "position": trip.runs.index(members[0]) + 1,
+            "of": len(trip.runs),
+            "reason": trip.reason,
+            "duration_min": round(trip.duration_s / 60.0, 1),
+        }
+        break
+
     series: Dict[str, List[Tuple[float, float]]] = {}
     flagged_counts: Dict[str, Dict[str, int]] = {}
 
@@ -223,6 +254,10 @@ def load_run(db_path: str, run_id: Optional[int],
         #: drive), "current" = today's profile standing in for a run that
         #: predates the field, "none" = nothing configured.
         "vehicle_provenance": vehicle_provenance,
+        #: Durable identity, and which physical trip this run belongs to.
+        #: A run is one connection; the drive is usually several.
+        "session_uid": session_uid or "",
+        "trip": trip_summary,
         "series": series,
         #: key -> {label: count} for everything excluded (or, with
         #: include_flagged, everything that WOULD have been).
@@ -983,6 +1018,7 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         f"{sum(len(s) for s in run['series'].values())} samples across "
         f"{len(run['series'])} channels",
         f"- Started (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(run['started']))}",
+        f"- Session: {run.get('session_uid') or '(no durable id - predates it)'}",
         f"- Vehicle: {(run.get('vehicle') or VehicleProfile()).describe()}"
         + {
             "run": " (configuration recorded with this run)",
@@ -1014,6 +1050,47 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
             ">",
             "> Value ranges and sample counts are unaffected and are "
             "reported below.",
+            "",
+        ]
+
+    events = run.get("events") or ()
+
+    if events:
+        #
+        # Baseline context. A comparison against an earlier drive is only
+        # valid if nothing happened to the car in between, so the report
+        # states what the most recent event was and flags anything that
+        # happened DURING the run itself.
+        #
+        before = [e for e in events if e.at <= run["started"]]
+        during = events_between(events, run["started"],
+                                run.get("ended") or run["started"])
+
+        if before:
+            L += [f"- Last vehicle event before this run: "
+                  f"{before[-1].describe()}"]
+
+        if during:
+            L += ["", "> ⚠️ **A vehicle event falls inside this run**: "
+                  + "; ".join(e.describe() for e in during)
+                  + ". Do not treat this drive as one population."]
+
+        L += [""]
+
+    trip = run.get("trip")
+
+    if trip and trip["of"] > 1:
+        #
+        # The distinction the trip model exists for. A reader comparing
+        # this report against another needs to know it is looking at part
+        # of a drive, not the drive.
+        #
+        L += [
+            f"> This run is **{trip['position']} of {trip['of']}** in one "
+            f"physical trip ({trip['duration_min']} min total, runs "
+            f"{', '.join(str(r) for r in trip['runs'])}). A run is one "
+            "connection; the drive is the trip. Comparing whole drives "
+            "means comparing trips.",
             "",
         ]
 
@@ -1220,6 +1297,13 @@ def main() -> int:
              "learns something false. Turn on only to study them.",
     )
     ap.add_argument(
+        "--vehicle-events", default=None,
+        help="path to the vehicle event history (default: "
+             "local/vehicle-events.yaml). Maintenance and configuration "
+             "changes segment a longitudinal baseline; see "
+             "config/vehicle-events.example.yaml.",
+    )
+    ap.add_argument(
         "--vehicle-profile", default=None,
         help="path to the vehicle profile (default: local/vehicle-profile"
              ".yaml). Describes what this car physically is; without it "
@@ -1231,6 +1315,7 @@ def main() -> int:
 
     run = load_run(args.db, args.run, include_flagged=args.include_flagged,
                    vehicle=load_profile(args.vehicle_profile))
+    run["events"] = load_events(args.vehicle_events)
 
     wu = warmup(run)
     cc = crosschecks(run)
