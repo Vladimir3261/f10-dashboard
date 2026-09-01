@@ -25,7 +25,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from analysis.alignment import MIN_USEFUL_COVERAGE, align, pairing_for
-from analysis.vehicle_profile import VehicleProfile, load_profile
+from bmwdiag.vehicle import VehicleProfile, load_profile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -107,9 +107,21 @@ def load_run(db_path: str, run_id: Optional[int],
         #
         clock_col = "clock_synced" if _has_column(db, "runs", "clock_synced") \
             else "NULL"
+        #
+        # What the car physically WAS when this run was recorded. The
+        # local profile describes the car TODAY, so using it to interpret
+        # an old drive would relabel history: a run recorded with the
+        # filter fitted would have its dP readings declared void once the
+        # filter is removed and the profile updated. Same defect as
+        # params.mapping_ver in #5, one layer over.
+        #
+        veh_label = ("vehicle_label" if _has_column(db, "runs", "vehicle_label")
+                     else "NULL")
+        veh_hw = ("vehicle_hardware"
+                  if _has_column(db, "runs", "vehicle_hardware") else "NULL")
         meta = db.execute(
-            f"SELECT started_at, ended_at, ecu, ecu_addr, {clock_col} "
-            "FROM runs WHERE id=?",
+            f"SELECT started_at, ended_at, ecu, ecu_addr, {clock_col}, "
+            f"{veh_label}, {veh_hw} FROM runs WHERE id=?",
             (run_id,),
         ).fetchone()
 
@@ -166,7 +178,34 @@ def load_run(db_path: str, run_id: Optional[int],
 
         series.setdefault(key, []).append((ts, value))
 
-    started, ended, ecu, ecu_addr, clock_synced = meta
+    (started, ended, ecu, ecu_addr, clock_synced,
+     veh_label, veh_hardware) = meta
+
+    #
+    # The run's own snapshot wins. The caller's profile is a fallback for
+    # runs recorded before this was tracked, and it is labelled as such -
+    # `source` says where the answer came from, and the report quotes it,
+    # so a present-day guess never reads as historical fact.
+    #
+    if veh_hardware:
+        vehicle_profile = VehicleProfile.from_fingerprint(
+            veh_label or "", veh_hardware,
+            source=f"recorded with run {run_id}",
+        )
+        vehicle_provenance = "run"
+    elif vehicle is not None and vehicle.configured:
+        vehicle_profile = VehicleProfile.from_fingerprint(
+            vehicle.label, vehicle.fingerprint(),
+            source=(
+                "the CURRENT vehicle profile - this run predates configuration "
+                "provenance, so this is what the car is TODAY, not necessarily "
+                "what it was when the run was recorded"
+            ),
+        )
+        vehicle_provenance = "current"
+    else:
+        vehicle_profile = VehicleProfile()
+        vehicle_provenance = "none"
 
     return {
         "run_id": run_id,
@@ -179,7 +218,11 @@ def load_run(db_path: str, run_id: Optional[int],
         #: What this car physically is. An unloaded profile reports every
         #: subsystem as `unknown`, which withholds hardware conclusions
         #: rather than assuming the part is fitted.
-        "vehicle": vehicle if vehicle is not None else VehicleProfile(),
+        "vehicle": vehicle_profile,
+        #: "run" = snapshotted when recorded (authoritative for this
+        #: drive), "current" = today's profile standing in for a run that
+        #: predates the field, "none" = nothing configured.
+        "vehicle_provenance": vehicle_provenance,
         "series": series,
         #: key -> {label: count} for everything excluded (or, with
         #: include_flagged, everything that WOULD have been).
@@ -940,7 +983,12 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         f"{sum(len(s) for s in run['series'].values())} samples across "
         f"{len(run['series'])} channels",
         f"- Started (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(run['started']))}",
-        f"- Vehicle: {(run.get('vehicle') or VehicleProfile()).describe()}",
+        f"- Vehicle: {(run.get('vehicle') or VehicleProfile()).describe()}"
+        + {
+            "run": " (configuration recorded with this run)",
+            "current": " — ⚠️ configuration is TODAY'S, not this run's",
+            "none": "",
+        }.get(run.get("vehicle_provenance", "none"), ""),
         "",
     ]
 

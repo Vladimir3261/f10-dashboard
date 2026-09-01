@@ -70,6 +70,45 @@ filter left: the ECU still commands regens against its internal model, at
 a real cost in fuel and oil dilution, and they now clean nothing. That
 cost is a finding, so it is deliberately never suppressed.
 
+## Configuration is provenance, not a setting
+
+The profile file describes the car **today**. Using it to interpret an
+old drive would relabel history:
+
+```text
+run A recorded while the DPF was fitted
+        ↓  filter removed, profile updated to dpf: false
+analyse run A again
+        ↓
+run A's differential-pressure readings declared VOID
+        - a statement about hardware that DID exist at the time
+```
+
+The reverse is as bad after a part is restored or replaced. This is the
+same defect as `params.mapping_ver` in #5, one layer over, and it is
+fixed the same way.
+
+**The configuration is snapshotted onto the run when it is recorded.**
+`runs.vehicle_label` and `runs.vehicle_hardware` hold the stable label
+and a deterministic `subsystem=state,…` fingerprint, frozen on the
+calling thread at `start_run()` exactly as mapping provenance is. The
+analysis resolves through the run:
+
+| `vehicle_provenance` | meaning |
+|---|---|
+| `run` | snapshotted when recorded — **authoritative for this drive** |
+| `current` | today's profile standing in for a run that predates the field — labelled as such in the report, never presented as historical fact |
+| `none` | nothing configured; every subsystem unknown |
+
+The fingerprint is a flat string on purpose: what is stored on a run has
+to be readable back without carrying a schema along with it, and two runs
+under the same configuration must produce byte-identical fingerprints or
+a change of nothing would look like a change of something.
+
+The same pair of fields rides to the lake on `sessions`, so ClickHouse
+analytics can condition on what was true for that session rather than on
+a present-day toggle that would reinterpret every historical drive.
+
 ## Where it is enforced
 
 - **`analysis/vehicle_profile.py`** — the profile, the three states, the
@@ -86,11 +125,24 @@ cost is a finding, so it is deliberately never suppressed.
   dashboard variable (default `0`) gates the two DPF panels, which are
   titled VOID.
 
-Keep the SQL parameter, the Grafana variable and the local profile in
-step. They are three consumers of one fact, and nothing enforces
-agreement between them automatically — that is the honest limitation of
-not putting hardware configuration in the lake, which would need a schema
-migration and is not worth one yet.
+The `{dpf_present:UInt8}` parameter and the `dpf_present` Grafana
+variable are named for the *query*, while the profile key is the generic
+`hardware.dpf` capability. They are the same fact in two vocabularies:
+
+    profile   hardware: {dpf: false}      -> capability `dpf` is absent
+    query     --param_dpf_present=0       -> section 2/4 skipped
+    Grafana   $dpf_present = 0            -> DPF panels void
+
+The generic key is deliberate, so the mechanism extends to any subsystem
+without inventing a new `*_present` flag per part. Do not let the two
+drift into independently maintained concepts: the query parameter is a
+*projection* of the capability, not a second source of truth.
+
+Once `sessions.vehicle_hardware` is populated in the lake (migration
+`2026-09-01_vehicle_configuration_provenance.sql`), lake-side gating
+should read the session's own snapshot instead of the global parameter,
+which removes the last place a present-day toggle can reinterpret an old
+drive.
 
 ## Adding a subsystem
 

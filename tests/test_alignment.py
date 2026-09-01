@@ -29,7 +29,7 @@ from analysis.alignment import (
     align,
     pairing_for,
 )
-from analysis.vehicle_profile import VehicleProfile
+from bmwdiag.vehicle import VehicleProfile
 
 SQL = os.path.join(support.ROOT, "analysis", "clickhouse", "insights.sql")
 DASHBOARD = os.path.join(
