@@ -116,33 +116,41 @@ a present-day toggle that would reinterpret every historical drive.
 - **`analysis/session_report.py`** — `dpf()` is capability-aware and
   `findings()` will not state that differential-pressure sensing is
   healthy on a car with no filter. `--vehicle-profile` overrides the path.
-- **`analysis/clickhouse/insights.sql`** — sections 2 and 4 are gated on
-  `{dpf_present:UInt8}` and return an explanatory row instead of a
-  baseline. Section 8 (regenerations) is deliberately **not** gated. The
-  parameter is required rather than defaulted, so nobody reads section 2
-  without having answered the question.
-- **`infra/grafana/dashboards/f10-health.json`** — a `dpf_present`
-  dashboard variable (default `0`) gates the two DPF panels, which are
-  titled VOID.
+- **`analysis/clickhouse/insights.sql`** — sections 2 and 4 are restricted
+  to sessions whose **own** recorded configuration declares a filter
+  (`sessions.vehicle_hardware` contains `dpf=present`), and print an
+  explanatory header when none does. Section 8 (regenerations) is
+  deliberately **not** gated.
+- **`infra/grafana/dashboards/f10-health.json`** — the two DPF panels gate
+  the same way and are titled VOID. There is deliberately **no**
+  `dpf_present` dashboard variable: a global toggle can reinterpret every
+  historical drive, which is the defect this issue exists to remove.
 
-The `{dpf_present:UInt8}` parameter and the `dpf_present` Grafana
-variable are named for the *query*, while the profile key is the generic
-`hardware.dpf` capability. They are the same fact in two vocabularies:
+**There is one source of truth, and it travels with the data.** An
+earlier draft gated the lake on a `--param_dpf_present` parameter and a
+Grafana variable. Both are gone: a present-day toggle reinterprets
+history exactly as a mutable `params.mapping_ver` did, and having the
+capability live in three places invited them to drift apart.
 
-    profile   hardware: {dpf: false}      -> capability `dpf` is absent
-    query     --param_dpf_present=0       -> section 2/4 skipped
-    Grafana   $dpf_present = 0            -> DPF panels void
+The chain is now:
 
-The generic key is deliberate, so the mechanism extends to any subsystem
-without inventing a new `*_present` flag per part. Do not let the two
-drift into independently maintained concepts: the query parameter is a
-*projection* of the capability, not a second source of truth.
+    profile      hardware: {dpf: false}
+      -> run     runs.vehicle_hardware = "dpf=absent"   (snapshot)
+      -> lake    sessions.vehicle_hardware              (shipped)
+      -> query   position(vehicle_hardware,'dpf=present') > 0
 
-Once `sessions.vehicle_hardware` is populated in the lake (migration
-`2026-09-01_vehicle_configuration_provenance.sql`), lake-side gating
-should read the session's own snapshot instead of the global parameter,
-which removes the last place a present-day toggle can reinterpret an old
-drive.
+The generic `dpf` key is deliberate, so the mechanism extends to any
+subsystem without inventing a `*_present` flag per part.
+
+Note the gate matches `dpf=present` **positively**. `''` (a session
+predating provenance) and `dpf=unknown` both fail it, because unknown is
+not "fitted". Every session recorded before 2026-09-01 is in that state,
+so the DPF sections and panels are legitimately empty until a drive is
+recorded declaring a filter — the contract working, not a broken query.
+
+The lake columns come from
+`infra/clickhouse/migrations/2026-09-01_vehicle_configuration_provenance.sql`
+(additive, `ADD COLUMN IF NOT EXISTS`, idempotent).
 
 ## Adding a subsystem
 

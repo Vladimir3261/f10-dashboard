@@ -1,19 +1,24 @@
 -- Per-vehicle analytics on the telemetry lake. VIN-free (committable):
 -- pass the vehicle with --param_vin=<VIN>. Run:
---   clickhouse-client --param_vin=<VIN> --param_dpf_present=0 \
---                     --multiquery < insights.sql
+--   clickhouse-client --param_vin=<VIN> --multiquery < insights.sql
 --
--- VEHICLE CONFIGURATION IS AN INPUT. `dpf_present` says whether this car
--- physically has a particulate filter. Sections 2 and 4 draw conclusions
--- about a filter, and on a car without one they are not uncertain, they
--- are impossible - `dpf.differential_pressure` measures an empty pipe.
--- Pass 0 and those sections return a single explanatory row instead of a
--- plausible-looking baseline.
+-- VEHICLE CONFIGURATION IS SESSION PROVENANCE, NOT A SETTING. Sections 2
+-- and 4 draw conclusions about a particulate filter, and on a car without
+-- one they are not uncertain, they are impossible -
+-- `dpf.differential_pressure` measures an empty pipe.
 --
--- THE TARGET CAR HAS NO FILTER: pass --param_dpf_present=0. It is a
--- required parameter rather than a default precisely so that nobody
--- reads section 2 without having answered the question. Keep it in step
--- with local/vehicle-profile.yaml; see docs/VEHICLE_PROFILE.md.
+-- They are therefore restricted to sessions whose OWN recorded
+-- configuration declares a filter (`sessions.vehicle_hardware` contains
+-- `dpf=present`). This used to be a global --param_dpf_present toggle,
+-- which was wrong for the same reason a mutable params.mapping_ver was:
+-- flipping it would reinterpret every historical drive, declaring void a
+-- session recorded while the filter was still fitted.
+--
+-- `vehicle_hardware = ''` means the session predates configuration
+-- provenance: UNKNOWN, and excluded, because unknown is not "fitted".
+-- Every session recorded before 2026-09-01 is in that state, so these
+-- sections legitimately return nothing until a drive is recorded on the
+-- new code. That is the contract working. See docs/VEHICLE_PROFILE.md.
 -- Analytics is PER VEHICLE by design; cross-vehicle mixing is noise.
 --
 -- EVERY query that interprets `value` as a physical measurement filters
@@ -89,9 +94,11 @@ ORDER BY started;
 
 -- 2. DPF differential pressure vs exhaust flow (the restriction baseline)
 --    ASOF-join each dP reading to the nearest engine MAF, bin by flow.
-SELECT if({dpf_present:UInt8} = 1,
+SELECT if(count() > 0,
           '=== 2. DPF dP vs MAF flow (median/p10/p90 hPa) ===',
-          '=== 2. SKIPPED: no particulate filter on this vehicle - a dP-vs-flow restriction baseline across an empty pipe measures nothing ===') AS _;
+          '=== 2. SKIPPED: no session declares a fitted particulate filter - a dP-vs-flow restriction baseline across an empty pipe measures nothing ===') AS _
+FROM telemetry.sessions
+WHERE vehicle_id={vin:String} AND position(vehicle_hardware, 'dpf=present') > 0;
 SELECT round(maf,-1) AS maf_gps,
        count() AS n,
        round(quantile(0.5)(dp),1)  AS med_dP,
@@ -108,6 +115,9 @@ FROM (
         WHERE vehicle_id={vin:String} AND channel='dpf.differential_pressure'
           AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String}
+                               AND position(vehicle_hardware, 'dpf=present') > 0)
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
   ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='engine.maf'
@@ -119,7 +129,6 @@ FROM (
     ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- both slow channels; 15 s per the contract
-  AND {dpf_present:UInt8} = 1  -- no filter fitted -> no restriction baseline
 GROUP BY maf_gps ORDER BY maf_gps;
 
 -- 3. Boost actual-vs-setpoint deviation, conditioned on RPM ----------
@@ -186,9 +195,11 @@ WHERE least(sp_prev_gap, sp_next_gap) <= 1.0        -- measured separation 0.56 
 GROUP BY rpm_band ORDER BY n DESC;
 
 -- 4. DPF soot vs distance-since-regen (accumulation over the fleet-life)
-SELECT if({dpf_present:UInt8} = 1,
+SELECT if(count() > 0,
           '=== 4. DPF soot vs distance-since-regen ===',
-          '=== 4. SKIPPED: no particulate filter - the soot channels model hardware that is not fitted, so this describes the model, not a filter ===') AS _;
+          '=== 4. SKIPPED: no session declares a fitted filter - the soot channels model hardware that is not there, so this describes the model ===') AS _
+FROM telemetry.sessions
+WHERE vehicle_id={vin:String} AND position(vehicle_hardware, 'dpf=present') > 0;
 SELECT round(dist,0) AS dist_km,
        round(quantile(0.5)(soot),2) AS med_soot_g
 FROM (
@@ -202,6 +213,9 @@ FROM (
         WHERE vehicle_id={vin:String}
           AND channel='dpf.distance_since_regeneration' AND quality='ok'
           AND session_id IN (SELECT session_id FROM telemetry.sessions
+                             WHERE vehicle_id={vin:String}
+                               AND position(vehicle_hardware, 'dpf=present') > 0)
+          AND session_id IN (SELECT session_id FROM telemetry.sessions
                              WHERE vehicle_id={vin:String} AND clock_synced=1)) a
   ASOF LEFT JOIN (SELECT session_id, ts, value FROM telemetry.samples
         WHERE vehicle_id={vin:String} AND channel='dpf.soot_mass.measured'
@@ -213,7 +227,6 @@ FROM (
     ON a.session_id=next.session_id AND a.ts<=next.ts
 )
 WHERE gap_s <= 15.0            -- two slow ECU model outputs
-  AND {dpf_present:UInt8} = 1  -- see the section header
 GROUP BY dist_km ORDER BY dist_km;
 
 -- 5. DDE-vs-OBD coolant agreement per drive (decode-path health) ------
