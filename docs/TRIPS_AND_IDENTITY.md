@@ -23,8 +23,18 @@ of randomness, no dependencies (see `bmwdiag/identity.py`).
 The lake keeps a numeric `session_id` as its join key, because rekeying
 `samples` to a string would rewrite every row and every query for no
 analytical gain — but it is now derived from the **ULID**, not the
-filename. `sessions.session_uid` carries the full identity for anything
-that needs certainty.
+filename, via `blake2b(..., digest_size=8)`.
+
+The hash choice matters: an earlier draft composed CRC32 and Adler32 into
+64 bits, which answered the filename-CRC32 problem with more CRC32. Both
+are error-detecting codes with no uniformity guarantee, and `samples`
+carry **only** the numeric id — so a collision there could not be
+repaired afterwards from the uid on `sessions`. BLAKE2b is stdlib and
+uniform; there was never a dependency trade-off to justify the cheaper
+option.
+
+`sessions.session_uid` carries the full identity for anything that needs
+certainty.
 
 **Runs recorded before this keep the filename derivation.** Their sessions
 are already in the lake under the old ids; re-deriving would not correct
@@ -55,6 +65,7 @@ Boundaries, strongest first:
 | vehicle configuration changed | whatever happened, it is not one drive |
 | clock not disciplined | a gap is a timestamp difference; on a stepped clock it is not evidence — **split rather than guess** |
 | gap > 300 s | a reconnect takes seconds; a real stop takes minutes |
+| *(no boundary)* | a run whose process was **killed** has no `ended_at`; the last recorded sample supplies the effective end, so a crash-and-restart rejoins the drive instead of splitting it |
 | overlapping runs | timestamps disagree with each other, so neither is trusted |
 
 Trip identity is **derived from the first run**, never minted, so

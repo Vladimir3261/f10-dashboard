@@ -37,10 +37,8 @@ import json
 import os
 import random
 import sqlite3
-import zlib
-
-from bmwdiag.identity import session_id_from_ulid
 import sys
+import zlib
 import threading
 import time
 import urllib.error
@@ -48,7 +46,22 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+#
+# Path setup MUST precede every repository import. systemd and the docs
+# start this as `python3 infra/sync/agent.py`, which puts sys.path[0] at
+# infra/sync - so neither `common` (infra/) nor `bmwdiag` (repo root) is
+# importable without help, and an import above this line fails before the
+# agent starts. Both directories are added, root included, because
+# `bmwdiag` is not under infra/.
+#
+_INFRA = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(_INFRA)
+
+for _path in (_INFRA, _ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from bmwdiag.identity import session_id_from_ulid  # noqa: E402
 from common import wire  # noqa: E402
 
 
