@@ -1,0 +1,32 @@
+# Vehicle profile - what this car physically is.
+#
+# Copy to `local/vehicle-profile.yaml` (gitignored) and edit. Analytics
+# reads it to decide which conclusions are physically possible: a health
+# system must know whether the component it is evaluating exists.
+#
+# NO VIN. The car is identified by its stable label; the label -> VIN
+# table lives in local/VEHICLES.md and is never committed.
+#
+# A subsystem that is not listed here is `unknown`, and unknown suppresses
+# conclusions rather than assuming the part is fitted.
+
+vehicle:
+  label: F10-520d-dev
+  model: BMW F10 520d
+  engine: N47
+
+hardware:
+  # false = not fitted. THIS CAR HAS NO PARTICULATE FILTER - it was
+  # removed. n47d_dpf_dp therefore measures an empty pipe and the two
+  # soot channels report an ECU model of hardware that is not there.
+  # See docs/DPF_SOOT.md.
+  dpf: false
+  egr: true
+
+modifications:
+  - type: dpf_removed
+    at: unknown
+    note: >
+      Predates this project. Discovered 2026-08-30 when a captured
+      regeneration falsified the soot decode - the channel never dropped
+      across a regen because there is nothing to burn off.
