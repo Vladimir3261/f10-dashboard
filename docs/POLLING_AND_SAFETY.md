@@ -93,7 +93,8 @@ common cadence to be correlated: ClickHouse joins on nearest timestamp
 | class | period | channels | why |
 |---|---|---|---|
 | `motion` | 0.1 s | rpm, speed, map, pedal | genuinely fast; the basis of load context |
-| `context` | 10 s | load, throttle, relthr, torque, maf, rail, lambda | characterises a driving phase, not a single transient |
+| `control_ctx` | 1 s | load, maf | conditions control-loop analysis, so it must be comparable against it — at 10 s these gave 19.2% coverage inside the 1 s alignment window, below the 50% the contract calls usable |
+| `context` | 10 s | throttle, relthr, torque, rail, lambda | characterises a driving phase, not a single transient |
 | `slow` | 10 s | coolant, oil, iat, voltage, fuelrate, cattemp, egr, egrerr | thermal mass and electrics: minutes, not seconds |
 | `rare` | 60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
 | `dde_dyn` | 0.5 s x 22 | the 22 proprietary DDE reads | round-robin: one per firing, so ~11 s per channel |
@@ -115,6 +116,7 @@ Measured over a simulated minute at the 10 Hz loop rate:
 |---|---|
 | before (v1 + EGS at 4 Hz + DDE) | 7,740 |
 | after (`normal`) | 2,735 |
+| after pair + medium tier (2026-09-01) | 2,854 |
 
 **A 65% cut**, with no channel lost and no decode changed. `long` mode
 takes it to 637/min (−92%).
@@ -197,3 +199,62 @@ Switch from the dashboard's `mode` chip, or start in one with
 
 *(The overnight battery test used to head this list. It is cancelled —
 see §1: the Pi runs from a powerbank.)*
+
+
+## Paired requests, and why ordering was not enough
+
+Two channels of a control loop — an actual and its setpoint — are only
+comparable if they were sampled close together. The staggered `dde_dyn`
+class sends one member per firing, so where a pair lands in the rotation
+decides whether the comparison means anything.
+
+That used to be an accident. `n47d_boost_act` and `n47d_boost_set`
+happened to land in adjacent slots (0.5 s apart, inside their 1 s
+window); `n47d_rail_act` and `n47d_rail_set` landed three slots apart
+(1.5 s), **outside** theirs — so rail act-vs-setpoint had ~0% usable
+coverage. Neither outcome was chosen: both fell out of the order the
+loader produced across files, and a reordering could have silently
+swapped which pair worked.
+
+A request may now declare a pair tag:
+
+```yaml
+polling: {class: dde_dyn, pair: rail}
+```
+
+Members sharing a tag occupy **one rotation slot** and go out in the same
+firing — therefore under the same recorded timestamp, so the gap is zero
+rather than merely small. The class still fires once per period, so
+pairing costs no extra firings; it shortens the rotation by one slot per
+pair, which raises that class's request rate in proportion. Measured:
++119 requests/min in `normal`, +4.4%.
+
+`long` mode is where this mattered most and was least obvious. Its
+`dde_dyn` multiplier of 2.0 doubles the class period, so even the
+adjacent boost pair sat 1.0 s apart — right on its window edge, at 34.6%
+coverage. Pairing fixes that too.
+
+## Phase spreading
+
+Every non-staggered request used to fire on the same wall-clock instant,
+because the first cycle armed them all together and they stayed in
+lockstep. `context` and `slow` (both 10 s) plus `rare` (60 s) piled into
+one cycle: **26 requests at every minute boundary against a baseline of
+4.**
+
+Each request now gets a deterministic phase offset inside its period,
+derived from a hash of its id — stable across hosts and restarts, and
+derived from the id rather than the position so adding a channel does not
+reshuffle everything else. **Not jitter: nothing here is random.**
+
+Two properties worth stating, because they are what make it safe:
+
+- the offset **lengthens** the first interval, never shortens it, so
+  phase spreading can only ever reduce request volume;
+- classes at or below `PHASE_MIN_PERIOD` (1 s) are never phased. Phasing
+  a class at the loop rate would push members onto alternate cycles and
+  halve their rate — the same failure `SCHEDULE_SLACK` exists to prevent.
+
+The first cycle still reads everything: a channel's opening value is
+worth more than a tidy startup, and deferring a 60 s class by up to a
+minute would cost real data. Steady-state burst measured 26 → 8.

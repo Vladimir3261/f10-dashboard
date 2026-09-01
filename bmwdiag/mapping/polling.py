@@ -15,6 +15,7 @@ It is applied here rather than beside here, so there remains exactly one
 place that decides whether a request is due.
 """
 
+import hashlib
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .errors import PollingError
@@ -35,6 +36,20 @@ __all__ = ["DEFAULT_POLLING_CLASSES", "resolve_classes", "PollingPlan"]
 #: the comment at its use in `due()`: without it a class asking for the
 #: loop rate itself silently runs at half that rate.
 SCHEDULE_SLACK = 0.001
+
+#: Requests slower than this get a deterministic phase offset so that
+#: same-period classes do not all fire on the same wall-clock instant.
+#:
+#: The threshold exists because phasing a class whose period is at or
+#: near the poll-loop rate would push members onto alternate cycles and
+#: HALVE their effective rate - exactly the bug SCHEDULE_SLACK exists to
+#: prevent. `motion` (0.1 s) and `egs` (0.5 s) are therefore never
+#: phased; they are meant to fire every cycle.
+PHASE_MIN_PERIOD = 1.0
+
+#: Resolution of the phase offset. A prime keeps the spread from
+#: aligning with any round period.
+_PHASE_STEPS = 997
 
 #: Fallback classes for a mapping that declares none of its own. Every
 #: shipped mapping declares its own, so these are a safety net rather
@@ -91,6 +106,11 @@ class PollingPlan:
         self._last: Dict[str, float] = {}
         #: Round-robin cursor per staggered class.
         self._rotation: Dict[str, int] = {}
+        #: Rotation slots per staggered class. A slot is the set of
+        #: requests sent on ONE firing: normally a single request, but a
+        #: declared pair is one slot holding both members. Built once,
+        #: after the sort, so the order is deterministic.
+        self._slots: Dict[str, List[List[RequestDef]]] = {}
         #: Wall clock the duty cycle is measured from; set on first use.
         self._duty_origin: Optional[float] = None
 
@@ -104,6 +124,49 @@ class PollingPlan:
         self.requests.sort(key=lambda r: (
             self.classes[r.polling_class].priority, r.order, r.id
         ))
+
+        for name, cls in self.classes.items():
+            if cls.stagger:
+                self._slots[name] = self._rotation_slots(name)
+
+    def _rotation_slots(self, name: str) -> List[List["RequestDef"]]:
+        """
+        Group a staggered class into firing slots, pairs kept together.
+
+        A pair group takes the rotation position of its FIRST member, so
+        the order is a function of the sorted request list and nothing
+        else - not of which member happens to be declared first.
+
+        This is why pairing is an explicit tag rather than an accident of
+        ordering. Before it, `n47d_boost_act` and `n47d_boost_set` landed
+        in adjacent slots and were 0.5 s apart, while `n47d_rail_act` and
+        `n47d_rail_set` landed three slots apart and were 1.5 s apart -
+        outside the 1.0 s window their alignment contract declares, so
+        rail act-vs-setpoint had ~0% usable coverage. Neither outcome was
+        chosen; both fell out of how the loader happened to order
+        requests across files. A reordering could have silently swapped
+        which pair worked.
+        """
+        slots: List[List[RequestDef]] = []
+        index: Dict[str, int] = {}
+
+        for request in self.requests:
+            if request.polling_class != name:
+                continue
+
+            tag = request.polling_pair
+
+            if tag:
+                if tag in index:
+                    slots[index[tag]].append(request)
+
+                    continue
+
+                index[tag] = len(slots)
+
+            slots.append([request])
+
+        return slots
 
     # -- modes ------------------------------------------------------
 
@@ -169,10 +232,10 @@ class PollingPlan:
             asleep = False
 
         out: List[RequestDef] = []
-        #: Members of a staggered class that are due this cycle, resolved
-        #: to a single round-robin pick after the eager pass so ordering
-        #: and the byte-pinned OBD behaviour are untouched.
-        staggered: Dict[str, List[RequestDef]] = {}
+        #: Staggered classes due this cycle, resolved to a single
+        #: round-robin slot after the eager pass so ordering and the
+        #: byte-pinned OBD behaviour are untouched.
+        staggered: List[str] = []
 
         #
         # A staggered class is timed as a WHOLE, not per request: the
@@ -197,28 +260,62 @@ class PollingPlan:
                 continue
 
             if cls.stagger:
-                if stagger_due.get(cls.name):
-                    staggered.setdefault(cls.name, []).append(request)
+                if stagger_due.get(cls.name) and cls.name not in staggered:
+                    staggered.append(cls.name)
 
                 continue
 
-            if self._is_due(request.id, cls.period, now):
+            if self._is_due(request.id, cls.period, now,
+                            self._phase(request.id, cls.period)):
                 out.append(request)
 
         #
-        # One member per staggered class per firing, cycling through them
-        # in declaration order. `self.requests` is already priority-sorted,
-        # so members come out in a stable order and the cursor advances
-        # only on firings the class actually gets.
+        # One SLOT per staggered class per firing, cycling through them in
+        # sorted order. A slot is usually one request; a declared pair is
+        # one slot holding both members, so an actual/setpoint pair goes
+        # out in the same cycle - and therefore under the same recorded
+        # timestamp - instead of seconds apart.
         #
-        for name, members in staggered.items():
+        # The class still fires once per period, so pairing costs no
+        # extra firings. It shortens the full rotation (one slot instead
+        # of two for a pair), which raises that class's request rate in
+        # proportion - measured and reported in the PR, not hand-waved.
+        #
+        for name in staggered:
+            slots = self._slots.get(name) or []
+
+            if not slots:
+                continue
+
             cursor = self._rotation.get(name, 0)
-            out.append(members[cursor % len(members)])
+            out.extend(slots[cursor % len(slots)])
             self._rotation[name] = cursor + 1
 
         return out
 
-    def _is_due(self, key: str, period: float, now: Optional[float]) -> bool:
+    def _phase(self, request_id: str, period: float) -> float:
+        """
+        A stable offset in [0, period) for one request.
+
+        Deterministic and reproducible: the same request id always gets
+        the same phase, on every host and every restart. NOT jitter -
+        nothing here is random, and two runs of the same configuration
+        produce the same schedule.
+
+        Derived from the request id rather than its position, so adding a
+        channel does not reshuffle the phases of everything else.
+
+        Classes at or below PHASE_MIN_PERIOD get no phase; see there.
+        """
+        if period < PHASE_MIN_PERIOD:
+            return 0.0
+
+        digest = hashlib.blake2b(request_id.encode(), digest_size=4).digest()
+
+        return period * (int.from_bytes(digest, "big") % _PHASE_STEPS) / _PHASE_STEPS
+
+    def _is_due(self, key: str, period: float, now: Optional[float],
+                phase: float = 0.0) -> bool:
         """
         Has `period` elapsed since `key` last fired?
 
@@ -238,7 +335,25 @@ class PollingPlan:
 
         last = self._last.get(key)
 
-        if last is None or now - last >= period - SCHEDULE_SLACK:
+        if last is None:
+            #
+            # First sight: fire NOW regardless of phase, because the
+            # opening value of every channel matters and deferring a
+            # 60-second class by up to a minute at startup would cost
+            # real data to buy tidiness.
+            #
+            # The phase is applied to the FIRST INTERVAL instead, which
+            # becomes `period + phase`; every interval after it is exactly
+            # `period`. Deliberately lengthened rather than shortened: a
+            # request must never fire sooner than its declared period, so
+            # phase spreading can only ever reduce request volume, never
+            # add to it. Steady-state cadence is untouched.
+            #
+            self._last[key] = now + phase
+
+            return True
+
+        if now - last >= period - SCHEDULE_SLACK:
             self._last[key] = now
 
             return True

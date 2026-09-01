@@ -717,10 +717,16 @@ def _request(
 
     polling = data.get("polling", defaults.get("polling"))
     polling_class = "slow"
+    polling_pair = ""
 
     if isinstance(polling, dict):
         polling_class = _as_str(
             polling.get("class", "slow"), source, f"{path}.polling.class"
+        )
+        #: Optional. Requests sharing a tag inside a staggered class are
+        #: sent together rather than in consecutive rotation slots.
+        polling_pair = _as_str(
+            polling.get("pair", ""), source, f"{path}.polling.pair"
         )
     elif isinstance(polling, str):
         polling_class = polling
@@ -811,6 +817,7 @@ def _request(
         payload=payload,
         setup=setup,
         polling_class=polling_class,
+        polling_pair=polling_pair,
         requires=requires,
         timeout=None if timeout is None else _as_float(
             timeout, source, f"{path}.timeout"
