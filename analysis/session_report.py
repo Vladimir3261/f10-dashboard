@@ -24,6 +24,8 @@ import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
+from analysis.alignment import MIN_USEFUL_COVERAGE, align, pairing_for
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Cross-check pairs: (proprietary key, OBD key, scale to apply to OBD to
@@ -41,6 +43,14 @@ SETPOINT_PAIRS = [
     ("n47d_boost_act", "n47d_boost_set", "boost"),
     ("n47d_rail_act", "n47d_rail_set", "rail pressure"),
 ]
+
+#: Why a time-derived metric was not evaluated. Kept as one string so the
+#: report, the JSON and the tests all say the same thing.
+TIME_UNTRUSTED = (
+    "not evaluated: the host clock was not NTP-disciplined for this run "
+    "(runs.clock_synced != 1), so every timestamp difference below it - "
+    "gradients, alignment windows, rates - is unsupported"
+)
 
 DRIVING_SPEED = 3.0   # km/h; above this the car is moving
 WARM_C = 80.0         # coolant target for warm-up timing
@@ -86,8 +96,18 @@ def load_run(db_path: str, run_id: Optional[int],
         if run_id is None:
             raise SystemExit("no runs in this database")
 
+        #
+        # clock_synced gates every time-derived number in this report.
+        # The Pi has no RTC and once corrected itself 76.5 min mid-run;
+        # a warm-up gradient or an alignment window computed across that
+        # is meaningless. NULL means the run predates the flag - unknown,
+        # not good.
+        #
+        clock_col = "clock_synced" if _has_column(db, "runs", "clock_synced") \
+            else "NULL"
         meta = db.execute(
-            "SELECT started_at, ended_at, ecu, ecu_addr FROM runs WHERE id=?",
+            f"SELECT started_at, ended_at, ecu, ecu_addr, {clock_col} "
+            "FROM runs WHERE id=?",
             (run_id,),
         ).fetchone()
 
@@ -144,7 +164,7 @@ def load_run(db_path: str, run_id: Optional[int],
 
         series.setdefault(key, []).append((ts, value))
 
-    started, ended, ecu, ecu_addr = meta
+    started, ended, ecu, ecu_addr, clock_synced = meta
 
     return {
         "run_id": run_id,
@@ -152,6 +172,8 @@ def load_run(db_path: str, run_id: Optional[int],
         "ended": ended,
         "ecu": ecu,                       # NOT the VIN
         "ecu_addr": ecu_addr,
+        #: 1 trustworthy, 0 not, None recorded before this was tracked.
+        "clock_synced": clock_synced,
         "series": series,
         #: key -> {label: count} for everything excluded (or, with
         #: include_flagged, everything that WOULD have been).
@@ -165,16 +187,26 @@ def load_run(db_path: str, run_id: Optional[int],
 # ----------------------------------------------------------- helpers
 
 
-def _nearest(series: List[Tuple[float, float]], t: float) -> Optional[float]:
+def _nearest(series: List[Tuple[float, float]], t: float,
+             max_age_s: float) -> Optional[float]:
+    """
+    The value nearest `t`, or None if the nearest one is too old.
+
+    `max_age_s` is mandatory. This used to be unbounded and returned the
+    closest sample however far away it was, which meant every caller got
+    a number and none of them could tell whether it meant anything. On
+    the staggered DDE class "however far away" is routinely twelve
+    seconds. See analysis/alignment.py.
+    """
     if not series:
         return None
 
-    best, bd = None, 1e18
+    best, bd = None, max_age_s
 
     for ts, v in series:
         d = abs(ts - t)
 
-        if d < bd:
+        if d <= bd:
             bd, best = d, v
 
     return best
@@ -194,22 +226,11 @@ def paired(a: List[Tuple[float, float]], b: List[Tuple[float, float]],
 
     Pairing with a tolerance, and averaging over the whole warm-up, is
     what actually answers "does oil lag coolant".
+
+    Kept as a thin wrapper so there is exactly one matching
+    implementation; `align` additionally reports how much was rejected.
     """
-    out: List[Tuple[float, float, float]] = []
-
-    for ts, av in a:
-        best, bd = None, tol
-
-        for bts, bv in b:
-            d = abs(bts - ts)
-
-            if d <= bd:
-                bd, best = d, bv
-
-        if best is not None:
-            out.append((ts, av, best))
-
-    return out
+    return align(a, b, tol).pairs
 
 
 def _stats(values: List[float]) -> Dict:
@@ -230,6 +251,22 @@ def _stats(values: List[float]) -> Dict:
     }
 
 
+def time_trusted(run: Dict) -> bool:
+    """
+    Whether this run's timestamps can carry a time-derived conclusion.
+
+    Fails closed. `clock_synced` is 1 only when NTP had disciplined the
+    host clock when the run opened; 0 means it had not, and NULL means the
+    run predates the flag. Unknown is not good enough - the Pi has no RTC
+    and once corrected itself 76.5 minutes mid-recording, so an
+    undisciplined run's timestamps may not even be ordered as recorded.
+
+    Warning the reader is not sufficient: a plausible number with a
+    caveat attached is exactly what gets quoted later without the caveat.
+    """
+    return run.get("clock_synced") == 1
+
+
 def elapsed(series, t0):
     return [(ts - t0, v) for ts, v in series]
 
@@ -239,6 +276,14 @@ def elapsed(series, t0):
 
 def warmup(run: Dict) -> Dict:
     """Coolant/oil rise from start; time to warm; oil-lags-coolant."""
+    if not time_trusted(run):
+        #
+        # Warm-up is entirely time-derived: seconds-to-warm, gradients,
+        # the oil-vs-coolant lag. None of it survives an undisciplined
+        # clock, so it is not computed rather than computed and captioned.
+        #
+        return {"unavailable": TIME_UNTRUSTED}
+
     t0 = run["started"]
     out: Dict = {}
 
@@ -300,7 +345,18 @@ def warmup(run: Dict) -> Dict:
 
             out["oil_vs_coolant_at_coolant80"] = {
                 "coolant": WARM_C,
-                "oil": round(_nearest(oil, warmed_t), 1),
+                #: bounded: an oil reading half a minute from the
+                #: crossing is not the oil temperature at the crossing
+                "oil": (
+                    None if _nearest(
+                        oil, warmed_t, pairing_for("n47d_oil_temp", "coolant")
+                        .max_age_s
+                    ) is None
+                    else round(_nearest(
+                        oil, warmed_t,
+                        pairing_for("n47d_oil_temp", "coolant").max_age_s
+                    ), 1)
+                ),
                 "delta": round(sum(deltas) / len(deltas), 2) if deltas else None,
                 "pairs": len(deltas),
                 "delta_min": round(min(deltas), 2) if deltas else None,
@@ -315,6 +371,10 @@ def warmup(run: Dict) -> Dict:
 
 def crosschecks(run: Dict) -> List[Dict]:
     """Proprietary DDE read vs the standard OBD PID, sampled together."""
+    if not time_trusted(run):
+        #: every pair here is chosen by a time window
+        return []
+
     out = []
 
     for prop_key, obd_key, scale, label in CROSSCHECKS:
@@ -324,15 +384,9 @@ def crosschecks(run: Dict) -> List[Dict]:
         if not prop or not obd:
             continue
 
-        diffs = []
-
-        for ts, pv in prop:
-            ov = _nearest(obd, ts)
-
-            if ov is None:
-                continue
-
-            diffs.append(pv - ov * scale)
+        rule = pairing_for(prop_key, obd_key)
+        result = align(prop, obd, rule.max_age_s)
+        diffs = [pv - ov * scale for _ts, pv, ov in result.pairs]
 
         if not diffs:
             continue
@@ -341,6 +395,13 @@ def crosschecks(run: Dict) -> List[Dict]:
         out.append({
             "label": label, "proprietary": prop_key, "obd": obd_key,
             "pairs": len(diffs),
+            #: How much of the input was temporally comparable at all.
+            #: A high mean_abs_diff on 5% coverage says nothing about
+            #: the sensors and everything about the schedule.
+            "max_age_s": rule.max_age_s,
+            "coverage_pct": result.coverage_pct,
+            "median_gap_s": result.median_gap_s,
+            "usable": result.usable,
             "mean_abs_diff": round(mad, 2),
             "max_abs_diff": round(max(abs(d) for d in diffs), 2),
             "agree": mad < 3.0,      # within a few units/percent
@@ -391,6 +452,13 @@ def load_behaviour(run: Dict, span) -> Dict:
         if s:
             out["ranges"][key] = _stats([v for _, v in s])
 
+    if not time_trusted(run):
+        #: ranges above are pure value statistics and stay; anything that
+        #: needs two channels lined up in time does not
+        out["setpoint_tracking_unavailable"] = TIME_UNTRUSTED
+
+        return out
+
     for act_key, set_key, label in SETPOINT_PAIRS:
         act = _in_span(run["series"].get(act_key, []), span)
         setp = run["series"].get(set_key, [])
@@ -398,22 +466,47 @@ def load_behaviour(run: Dict, span) -> Dict:
         if not act or not setp:
             continue
 
-        devs = [av - _nearest(setp, ts) for ts, av in act
-                if _nearest(setp, ts) is not None]
+        #
+        # The pair this whole contract exists for. Actual and setpoint sit
+        # in the same staggered DDE class, so post-hoc matching routinely
+        # pairs values ~12 s apart - and the difference between them is
+        # then mostly the engine having moved, reported as control error.
+        #
+        rule = pairing_for(act_key, set_key)
+        result = align(act, setp, rule.max_age_s)
+        devs = [av - sv for _ts, av, sv in result.pairs]
+
+        entry = {
+            "label": label, "actual": act_key, "setpoint": set_key,
+            "pairs": len(devs),
+            "max_age_s": rule.max_age_s,
+            "coverage_pct": result.coverage_pct,
+            "median_gap_s": result.median_gap_s,
+            "usable": result.usable,
+        }
 
         if devs:
-            out["setpoint_tracking"].append({
-                "label": label, "actual": act_key, "setpoint": set_key,
-                "pairs": len(devs),
+            entry.update({
                 "mean_abs_deviation": round(
                     sum(abs(d) for d in devs) / len(devs), 1),
                 "max_abs_deviation": round(max(abs(d) for d in devs), 1),
             })
 
+        out["setpoint_tracking"].append(entry)
+
     return out
 
 
 def dpf(run: Dict) -> Dict:
+    """
+    Soot ranges, and the measured-vs-modelled alignment.
+
+    The ranges are pure value statistics and survive an untrusted clock.
+    The alignment does not: it is a bounded time comparison like any
+    other, and computing it on a run whose timestamps may not even be
+    ordered would emit exactly the "plausible number with a caveat" the
+    fail-closed policy exists to remove.
+    """
     meas = run["series"].get("n47d_soot_meas")
     model = run["series"].get("n47d_soot_model")
     out: Dict = {}
@@ -424,9 +517,19 @@ def dpf(run: Dict) -> Dict:
     if model:
         out["modelled"] = _stats([v for _, v in model])
 
+    if not time_trusted(run):
+        out["alignment_unavailable"] = TIME_UNTRUSTED
+
+        return out
+
     if meas and model:
-        diffs = [mv - _nearest(model, ts) for ts, mv in meas
-                 if _nearest(model, ts) is not None]
+        rule = pairing_for("n47d_soot_meas", "n47d_soot_model")
+        result = align(meas, model, rule.max_age_s)
+        diffs = [mv - sv for _ts, mv, sv in result.pairs]
+
+        out["max_age_s"] = rule.max_age_s
+        out["coverage_pct"] = result.coverage_pct
+        out["usable"] = result.usable
 
         if diffs:
             out["mean_abs_diff"] = round(
@@ -440,6 +543,20 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
     Human interpretation of the numbers - the point of the whole exercise.
     Distinguishes a real disagreement from an OBD limitation.
     """
+    if not time_trusted(run):
+        #
+        # Fails closed. Everything findings() would otherwise say - warm-up
+        # behaviour, cross-check agreement, setpoint tracking - rests on
+        # timestamp differences this run cannot support.
+        #
+        return [
+            "**Time-derived analysis was not performed for this run.** "
+            + TIME_UNTRUSTED
+            + ". Value ranges and sample counts below are still valid; "
+            "anything involving elapsed time, gradients or channel "
+            "alignment was skipped rather than reported with a caveat."
+        ]
+
     out: List[str] = []
 
     #
@@ -490,7 +607,7 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
 
     # ambient quantisation
     amb = next((c for c in cc if c["obd"] == "baro"), None)
-    if amb and amb["mean_abs_diff"] < 12:
+    if amb and amb.get("usable") and amb["mean_abs_diff"] < 12:
         out.append(
             f"Ambient/baro cross-check differs by only {amb['mean_abs_diff']} "
             "hPa on average — that is the standard OBD baro PID's 1 kPa integer "
@@ -508,11 +625,30 @@ def findings(run: Dict, wu, cc, lb, dp) -> List[str]:
 
     # setpoint tracking health
     for t in lb.get("setpoint_tracking", []):
+        if not t.get("usable"):
+            #
+            # The honest outcome, and the one this contract exists to
+            # produce. Actual and setpoint share the staggered DDE class,
+            # so almost no pair is close enough in time to be a control
+            # error rather than the engine having moved. Stating a
+            # deviation here would be describing the poll schedule.
+            #
+            out.append(
+                f"**{t['label'].capitalize()} act-vs-setpoint cannot be "
+                f"concluded from this session.** Only {t['coverage_pct']}% of "
+                f"actual readings had a setpoint within {t['max_age_s']} s "
+                f"(median gap {t['median_gap_s']} s), because both sit in the "
+                "same staggered DDE class. The deviation this would report is "
+                "mostly sampling misalignment. Co-scheduling the pair is the "
+                "fix; see docs/ALIGNMENT.md.")
+            continue
+
         out.append(
             f"{t['label'].capitalize()} closed-loop control tracked its "
             f"setpoint to {t['mean_abs_deviation']} mean deviation "
-            f"(max {t['max_abs_deviation']}) — the actuator is hitting its "
-            "target; a growing deviation over future sessions would flag "
+            f"(max {t['max_abs_deviation']}) over {t['coverage_pct']}% "
+            f"coverage within {t['max_age_s']} s — the actuator is hitting "
+            "its target; a growing deviation over future sessions would flag "
             "wear.")
 
     # DPF
@@ -592,11 +728,13 @@ def quality(run: Dict) -> List[Dict]:
     """
     out = []
     flagged_counts = run.get("flagged_counts", {})
+    #: sample counts are just counts; max_gap_s is a timestamp difference
+    trusted = time_trusted(run)
 
     for key, s in sorted(run["series"].items()):
         ts = [t for t, _ in s]
         vals = [v for _, v in s]
-        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        gaps = [b - a for a, b in zip(ts, ts[1:])] if trusted else []
         vmax = max(vals)
         pinned = sum(1 for v in vals if v == vmax)
         flags = flagged_counts.get(key, {})
@@ -720,6 +858,31 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         "",
     ]
 
+    #
+    # Every number below is time-derived: warm-up gradients, alignment
+    # windows, rates. The Pi has no RTC and once stepped its clock 76.5
+    # minutes mid-recording. A run whose clock was not disciplined cannot
+    # support any of it, and saying so at the top is the only place a
+    # reader will not miss it.
+    #
+    if not time_trusted(run):
+        state = (
+            "was NOT NTP-disciplined" if run.get("clock_synced") == 0
+            else "is UNKNOWN (this run predates the flag)"
+        )
+        L += [
+            f"> ⚠️ **The host clock {state} for this run, so every "
+            "time-derived metric has been SKIPPED** - warm-up, "
+            "cross-checks, setpoint tracking, sample gaps. They are not "
+            "computed and captioned; they are not computed. The Pi has no "
+            "RTC and once corrected itself 76.5 min mid-recording, which "
+            "can leave timestamps out of order, not merely offset.",
+            ">",
+            "> Value ranges and sample counts are unaffected and are "
+            "reported below.",
+            "",
+        ]
+
     fnd = findings(run, wu, cc, lb, dp)
     if fnd:
         L += ["## Key findings", ""]
@@ -779,12 +942,28 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
     L += ["", "## Proprietary DDE vs standard OBD (live cross-check)", ""]
 
     if cc:
-        L.append("| quantity | pairs | mean |Δ| | max |Δ| | agree |")
-        L.append("|---|---|---|---|---|")
+        L.append("| quantity | pairs | window | coverage | median gap | "
+                 "mean |Δ| | max |Δ| | agree |")
+        L.append("|---|---|---|---|---|---|---|---|")
 
         for c in cc:
-            L.append(f"| {c['label']} | {c['pairs']} | {c['mean_abs_diff']} | "
-                     f"{c['max_abs_diff']} | {'✅' if c['agree'] else '⚠️'} |")
+            verdict = (
+                "✅" if c["agree"] and c.get("usable")
+                else "⚠️" if c.get("usable") else "insufficient"
+            )
+            L.append(f"| {c['label']} | {c['pairs']} | {c['max_age_s']}s | "
+                     f"{c['coverage_pct']}% | {c['median_gap_s']}s | "
+                     f"{c['mean_abs_diff']} | {c['max_abs_diff']} | "
+                     f"{verdict} |")
+
+        L += ["",
+              "`coverage` is the share of proprietary readings that had an "
+              "OBD reading inside the window. A comparison below "
+              f"{MIN_USEFUL_COVERAGE:.0f}% is reported as insufficient rather "
+              "than averaged: the number would describe the poll schedule, "
+              "not the sensors."]
+    elif not time_trusted(run):
+        L.append(f"_{TIME_UNTRUSTED}_")
     else:
         L.append("_no cross-check pairs available_")
 
@@ -795,14 +974,26 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
                  f"{ph['driving_samples']} driving / {ph['idle_samples']} idle "
                  "samples (speed>3 km/h = driving).")
 
+    if lb.get("setpoint_tracking_unavailable"):
+        L.append("")
+        L.append(f"_setpoint tracking {lb['setpoint_tracking_unavailable']}_")
+
     if lb.get("setpoint_tracking"):
         L.append("")
-        L.append("| loop | pairs | mean |dev| | max |dev| |")
-        L.append("|---|---|---|---|")
+        L.append("| loop | pairs | window | coverage | median gap | "
+                 "mean |dev| | max |dev| |")
+        L.append("|---|---|---|---|---|---|---|")
 
         for t in lb["setpoint_tracking"]:
+            if t.get("usable"):
+                mean = t["mean_abs_deviation"]
+                mx = t["max_abs_deviation"]
+            else:
+                mean = mx = "insufficient"
+
             L.append(f"| {t['label']} (act−set) | {t['pairs']} | "
-                     f"{t['mean_abs_deviation']} | {t['max_abs_deviation']} |")
+                     f"{t['max_age_s']}s | {t['coverage_pct']}% | "
+                     f"{t['median_gap_s']}s | {mean} | {mx} |")
 
     if lb.get("ranges"):
         L.append("")
@@ -828,6 +1019,8 @@ def render_markdown(run: Dict, wu, cc, ph, lb, dp, ql) -> str:
         if "mean_abs_diff" in dp:
             L.append(f"- measured vs modelled mean |Δ|: {dp['mean_abs_diff']} g "
                      "(the two independent estimates should agree)")
+        elif dp.get("alignment_unavailable"):
+            L.append(f"- measured vs modelled: {dp['alignment_unavailable']}")
     else:
         L.append("_no DPF channels captured_")
 
