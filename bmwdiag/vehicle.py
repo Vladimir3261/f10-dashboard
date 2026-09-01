@@ -34,8 +34,17 @@ committed template. No VIN goes in either: the car is identified by its
 stable label, `F10-520d-dev`.
 """
 
+import calendar
 import os
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import (
+    Any,
+    Dict,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .mapping import yamlsubset
 
@@ -46,6 +55,12 @@ __all__ = [
     "VehicleProfile",
     "load_profile",
     "DEFAULT_PROFILE_PATH",
+    "VehicleEvent",
+    "load_events",
+    "events_between",
+    "baseline_is_valid_across",
+    "RESETS_BASELINE",
+    "DEFAULT_EVENTS_PATH",
 ]
 
 PRESENT = "present"
@@ -56,6 +71,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: Gitignored, because it describes one car. Absent is a valid state.
 DEFAULT_PROFILE_PATH = os.path.join(_ROOT, "local", "vehicle-profile.yaml")
+
+#: Gitignored for the same reason, and carries no VIN either.
+DEFAULT_EVENTS_PATH = os.path.join(_ROOT, "local", "vehicle-events.yaml")
 
 
 class VehicleProfile:
@@ -242,3 +260,144 @@ def load_profile(path: Optional[str] = None) -> VehicleProfile:
         modifications=tuple(m for m in mods if isinstance(m, dict)),
         source=source,
     )
+
+
+# ------------------------------------------------------- vehicle events
+
+
+class VehicleEvent(NamedTuple):
+    """
+    Something that happened to the car and changes what came before.
+
+    A longitudinal baseline is a claim about one configuration of one
+    vehicle. An oil change, a replaced sensor or a remap does not make
+    the earlier data wrong - it makes it a different population, and
+    comparing across the boundary silently mixes two cars.
+
+    `at` is a unix timestamp so it orders against samples without a
+    parse. `odometer` is optional because the value that matters is
+    usually the boundary, not the mileage.
+    """
+
+    kind: str
+    at: float
+    description: str = ""
+    odometer: Optional[float] = None
+    #: Tuple of pairs, not a dict: a NamedTuple's default is ONE object
+    #: shared by every instance that omits it, so a mutable default here
+    #: would be a single dict quietly shared across every event.
+    metadata: Tuple[Tuple[str, Any], ...] = ()
+
+    def describe(self) -> str:
+        when = time.strftime("%Y-%m-%d", time.gmtime(self.at))
+        odo = f" @ {self.odometer:.0f} km" if self.odometer else ""
+
+        return f"{when} {self.kind}{odo}" + (
+            f" - {self.description}" if self.description else ""
+        )
+
+
+#: Kinds that reset or segment a baseline. Not a closed set - an unknown
+#: kind is still recorded and still segments, because the safe reading of
+#: "something was done to the car" is that it mattered.
+RESETS_BASELINE = (
+    "oil_change",
+    "air_filter_change",
+    "fuel_filter_change",
+    "battery_replacement",
+    "injector_repair",
+    "sensor_replacement",
+    "software_change",
+    "remap",
+    "dpf_removed",
+    "dpf_restored",
+    "egr_delete",
+    "turbo_replacement",
+)
+
+
+def load_events(path: Optional[str] = None) -> Tuple[VehicleEvent, ...]:
+    """
+    Read the vehicle's event history, ordered by time. Missing file is fine.
+
+    Like the profile, this lives under gitignored `local/` because it
+    describes one car, and carries no VIN.
+    """
+    source = path or DEFAULT_EVENTS_PATH
+
+    if not os.path.exists(source):
+        return ()
+
+    document = yamlsubset.load(source)
+
+    if not isinstance(document, dict):
+        raise ValueError(f"{source}: expected a mapping at the top level")
+
+    out = []
+
+    for raw in document.get("events") or []:
+        if not isinstance(raw, dict):
+            continue
+
+        at = raw.get("at")
+
+        if at is None:
+            #
+            # An event with no date cannot segment anything - it has no
+            # position on the timeline. Skipped rather than placed at
+            # zero, which would silently invalidate all history before
+            # it, i.e. everything.
+            #
+            continue
+
+        out.append(VehicleEvent(
+            kind=str(raw.get("kind", "other")),
+            at=_as_timestamp(at),
+            description=str(raw.get("description", "")),
+            odometer=(
+                None if raw.get("odometer") is None
+                else float(raw["odometer"])
+            ),
+            metadata=tuple(
+                (k, v) for k, v in sorted(raw.items())
+                if k not in ("kind", "at", "description", "odometer")
+            ),
+        ))
+
+    return tuple(sorted(out, key=lambda e: e.at))
+
+
+def _as_timestamp(value: Any) -> float:
+    """Accept a unix timestamp or a plain `YYYY-MM-DD` date."""
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return float(calendar.timegm(time.strptime(text, fmt)))
+        except ValueError:
+            continue
+
+    raise ValueError(f"cannot read {value!r} as a date or timestamp")
+
+
+def events_between(events: Sequence[VehicleEvent],
+                   start: float, end: float) -> Tuple[VehicleEvent, ...]:
+    """
+    Events strictly inside (start, end].
+
+    The question a baseline asks before comparing two points: did anything
+    happen to the car in between? A non-empty answer means the two points
+    describe different configurations and must not be pooled.
+    """
+    lo, hi = (start, end) if start <= end else (end, start)
+
+    return tuple(e for e in events if lo < e.at <= hi)
+
+
+def baseline_is_valid_across(events: Sequence[VehicleEvent],
+                             start: float, end: float) -> bool:
+    """True when nothing happened to the car between the two points."""
+    return not events_between(events, start, end)

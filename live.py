@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from bmwdiag.identity import new_ulid
 from bmwdiag.vehicle import load_profile
 from bmwdiag.mapping import (
     fault_kind,
@@ -290,6 +291,22 @@ def polling_classes(registry: MappingRegistry, args) -> Dict[str, PollingClassDe
     and unlike a flag a mode is recorded with the data.
     """
     return resolve_classes(registry.polling_classes())
+
+
+def host_boot_id() -> str:
+    """
+    An identifier for this boot of the host, or "".
+
+    Evidence for trip grouping: two runs from different boots cannot
+    belong to the same physical drive, and the in-car Pi is powered down
+    between drives. Linux exposes one; anything else gets "" and the
+    grouping falls back to the time gap alone.
+    """
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
 
 
 def numeric_only(
@@ -818,7 +835,19 @@ CREATE TABLE IF NOT EXISTS runs (
     -- NULL means the run predates this being tracked: unknown, and the
     -- analysis says so rather than substituting today's answer silently.
     vehicle_label    TEXT,
-    vehicle_hardware TEXT
+    vehicle_hardware TEXT,
+    -- Durable identity, minted when the run is created and never
+    -- derived from where the file happens to live. The lake's numeric
+    -- session_id is a function of THIS, not of the database's basename:
+    -- renaming a file used to change the identity of every run in it,
+    -- and two drive files sharing a basename collided outright.
+    -- See bmwdiag/identity.py.
+    session_uid      TEXT,
+    -- Which boot of the host recorded this run. Evidence for grouping
+    -- runs into one physical trip: runs from different boots cannot be
+    -- the same drive, and the Pi reboots between drives. "" when the
+    -- host does not expose one.
+    boot_id          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS params (
@@ -1037,6 +1066,10 @@ class Recorder:
         # in the payload. A live lookup later would answer for the car as
         # it is then, not as it was when this run opened.
         #
+        #: Minted here, once, and carried with the run for the rest of
+        #: its life. Never recomputed from anything about the file.
+        session_uid = new_ulid()
+        boot_id = host_boot_id()
         vehicle_label = getattr(self.vehicle, "label", "") or ""
         vehicle_hardware = (
             self.vehicle.fingerprint() if self.vehicle is not None else ""
@@ -1056,7 +1089,7 @@ class Recorder:
             (time.time(), vin, gateway, ecu, ecu_addr, mode,
              None if clock_synced is None else int(bool(clock_synced)),
              mapping_set, manifest, channel_provenance,
-             vehicle_label, vehicle_hardware),
+             vehicle_label, vehicle_hardware, session_uid, boot_id),
         ))
 
     def _provenance_snapshot(self) -> Dict[str, Tuple]:
@@ -1169,6 +1202,21 @@ class Recorder:
             self.db.execute(
                 "ALTER TABLE runs ADD COLUMN vehicle_hardware TEXT"
             )
+
+        if "session_uid" not in cols("runs"):
+            self.db.execute("ALTER TABLE runs ADD COLUMN session_uid TEXT")
+
+        if "boot_id" not in cols("runs"):
+            self.db.execute("ALTER TABLE runs ADD COLUMN boot_id TEXT")
+
+        #
+        # Deliberately NOT back-filled. A ULID minted now would claim a
+        # creation time that is not the run's, and the numeric identity
+        # of already-synced sessions is derived from the filename - giving
+        # them a uid would change that derivation and duplicate every one
+        # of them in the lake. Old runs keep the identity they were
+        # written with; see bmwdiag/identity.py.
+        #
 
         #
         # `run_channels` needs no ALTER: it is a new table, and the
@@ -1319,15 +1367,17 @@ class Recorder:
                 (started, vin, gateway, ecu, ecu_addr, mode,
                  clock_synced, mapping_set, manifest,
                  channel_provenance, vehicle_label,
-                 vehicle_hardware) = payload
+                 vehicle_hardware, session_uid, boot_id) = payload
 
                 cur = self.db.execute(
                     "INSERT INTO runs"
                     "(started_at, vin, gateway, ecu, ecu_addr, mapping_set,"
-                    " mode, clock_synced, vehicle_label, vehicle_hardware) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    " mode, clock_synced, vehicle_label, vehicle_hardware,"
+                    " session_uid, boot_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (started, vin, gateway, ecu, ecu_addr, mapping_set,
-                     mode, clock_synced, vehicle_label, vehicle_hardware),
+                     mode, clock_synced, vehicle_label, vehicle_hardware,
+                     session_uid, boot_id),
                 )
                 self.run_id = cur.lastrowid
                 self.run_channel_seen.clear()
