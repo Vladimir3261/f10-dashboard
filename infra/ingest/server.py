@@ -183,6 +183,15 @@ def build_sessions(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             # not be read as "no hardware fitted".
             "vehicle_label": r.get("vehicle_label") or "",
             "vehicle_hardware": r.get("vehicle_hardware") or "",
+            # Durable identity, minted when the run was created and
+            # carried unchanged. `session_id` above is a 64-bit
+            # derivation of this for use as a join key; THIS is the one
+            # that cannot collide and does not change if the file is
+            # renamed. "" for runs recorded before it existed.
+            "session_uid": r.get("session_uid") or "",
+            # Which boot of the host recorded the run - evidence for
+            # grouping runs into one physical trip.
+            "boot_id": r.get("boot_id") or "",
             # Was the host clock NTP-disciplined when this run opened?
             # The Pi has no RTC. NULL means the run predates the flag -
             # never coerced to a guess, because "probably fine" is

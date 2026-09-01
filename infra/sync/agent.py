@@ -38,6 +38,8 @@ import os
 import random
 import sqlite3
 import zlib
+
+from bmwdiag.identity import session_id_from_ulid
 import sys
 import threading
 import time
@@ -130,18 +132,33 @@ class State:
 # ----------------------------------------------------------- reading
 
 
-def global_session_id(db_path: str, run_id: int) -> int:
+def global_session_id(db_path: str, run_id: int,
+                      session_uid: str = "") -> int:
     """
-    A globally-unique session id from the local run id.
+    The lake's numeric session id for one local run.
 
-    Local run ids reset to 1 in every SQLite database, so the raw id
-    collides across drives (and across the main db and the per-drive
-    session dbs) once they all land in one ClickHouse table. Namespacing
-    by the database basename keeps each drive distinct and is
-    deterministic, so a re-sync still de-duplicates. The source db name
-    also rides along in the sessions row for traceability.
+    Prefers the run's own durable identity. `session_uid` is a ULID minted
+    when the run was created and stored with it, so the id derived from it
+    survives renaming, copying and identical basenames - none of which say
+    anything about which drive the data is.
+
+    LEGACY PATH, and it stays. Runs recorded before session_uid existed
+    have none, and their sessions are already in the lake under an id
+    derived from the database's basename. Re-deriving those would not
+    correct them, it would duplicate them: the old rows would remain and a
+    second copy would appear under a new id. So a run without a uid keeps
+    the filename derivation it was written with, with all of that
+    scheme's faults, and only new runs get durable identity.
+
+    Local run ids reset to 1 in every database, so the raw id collides
+    across drives once they all land in one ClickHouse table; both schemes
+    exist to namespace that away.
     """
+    if session_uid:
+        return session_id_from_ulid(session_uid)
+
     ns = zlib.crc32(os.path.basename(db_path).encode()) & 0xFFFFFFFF
+
     return (ns << 20) | (int(run_id) & 0xFFFFF)
 
 
@@ -229,9 +246,12 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         # described in docs/DATA_QUALITY.md.
         #
         qual = "s.quality" if _has_column(con, "samples", "quality") else "NULL"
+        #: the run's durable identity, when it has one
+        suid = ("r.session_uid" if _has_column(con, "runs", "session_uid")
+                else "''")
         cur = con.execute(
             f"SELECT s.rowid, r.vin, s.run_id, s.ts, p.key, {unit}, s.value, "
-            f"{ver}, {qual} "
+            f"{ver}, {qual}, {suid} "
             "FROM samples s "
             "JOIN runs r   ON r.id = s.run_id "
             "JOIN params p ON p.id = s.param_id "
@@ -245,10 +265,11 @@ def read_samples(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
 
     return [
         {"_rowid": rid, "vehicle_id": vin,
-         "session_id": global_session_id(db_path, run_id),
+         "session_id": global_session_id(db_path, run_id, suid_val or ""),
          "ts": ts, "channel_raw": key, "unit": unit or "", "value": value,
          "mapping_ver": mver or "", "quality": qual or "ok"}
-        for rid, vin, run_id, ts, key, unit, value, mver, qual in rows
+        for rid, vin, run_id, ts, key, unit, value, mver, qual, suid_val
+        in rows
     ]
 
 
@@ -280,9 +301,18 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
                   else "''")
         vhw = ("vehicle_hardware"
                if _has_column(con, "runs", "vehicle_hardware") else "''")
+        #
+        # Durable identity and the boot that recorded the run. The uid
+        # decides the numeric session id; the boot id is evidence for
+        # grouping runs into one physical trip, since two runs from
+        # different boots cannot be the same drive.
+        #
+        suid = ("session_uid" if _has_column(con, "runs", "session_uid")
+                else "''")
+        boot = ("boot_id" if _has_column(con, "runs", "boot_id") else "''")
         rows = con.execute(
             f"SELECT id, vin, started_at, ended_at, ecu, ecu_addr, gateway, "
-            f"{mset}, {mode}, {clk}, {vlabel}, {vhw} "
+            f"{mset}, {mode}, {clk}, {vlabel}, {vhw}, {suid}, {boot} "
             "FROM runs WHERE id >= ? ORDER BY id",
             (after_id,),
         ).fetchall()
@@ -291,15 +321,20 @@ def read_sessions(db_path: str, after_id: int) -> List[Dict]:
 
     return [
         {"_id": rid, "vehicle_id": vin,
-         "session_id": global_session_id(db_path, rid),
+         "session_id": global_session_id(db_path, rid, suid_val or ""),
          "started": started, "ended": ended, "ecu": ecu or "",
          "ecu_addr": ecu_addr, "gateway": gateway or "",
          "mappings": mset_val or "", "mode": mode_val or "",
          "clock_synced": clk_val,
          "vehicle_label": vlabel_val or "",
-         "vehicle_hardware": vhw_val or ""}
+         "vehicle_hardware": vhw_val or "",
+         #: the full durable identity, carried unchanged. The numeric
+         #: session_id above is derived from it; this is the one that
+         #: cannot collide.
+         "session_uid": suid_val or "",
+         "boot_id": boot_val or ""}
         for rid, vin, started, ended, ecu, ecu_addr, gateway, mset_val,
-        mode_val, clk_val, vlabel_val, vhw_val in rows
+        mode_val, clk_val, vlabel_val, vhw_val, suid_val, boot_val in rows
     ]
 
 

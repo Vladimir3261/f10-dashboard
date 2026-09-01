@@ -152,6 +152,13 @@ The lake columns come from
 `infra/clickhouse/migrations/2026-09-01_vehicle_configuration_provenance.sql`
 (additive, `ADD COLUMN IF NOT EXISTS`, idempotent).
 
+## Related: what was *done* to the car
+
+The profile says what the car **is**. `local/vehicle-events.yaml` records
+what was **done** to it — oil changes, replaced sensors, a remap — because
+those segment a longitudinal baseline even when the configuration is
+unchanged. See [`TRIPS_AND_IDENTITY.md`](TRIPS_AND_IDENTITY.md).
+
 ## Adding a subsystem
 
 Nothing in the profile knows what a DPF is. Add a key under `hardware:`
