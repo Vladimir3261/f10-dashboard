@@ -268,13 +268,49 @@ class TheLakeConsumersAreGatedToo(unittest.TestCase):
         with open(DASHBOARD) as fh:
             return json.load(fh)["panels"]
 
-    def test_the_dpf_sections_are_parameterised(self):
+    def test_the_dpf_sections_gate_on_session_provenance(self):
+        #
+        # NOT on a global parameter. A toggle reinterprets history: flip
+        # it after the filter comes off and a session recorded while it
+        # was fitted is declared void. The session carries its own
+        # configuration, so each one answers for itself.
+        #
         parts = re.split(r"\n-- (\d+[a-z]?)\. ", "\n" + self.sql())
         sections = dict(zip(parts[1::2], parts[2::2]))
 
         for number in ("2", "4"):
             with self.subTest(section=number):
-                self.assertIn("{dpf_present:UInt8} = 1", sections[number])
+                self.assertIn("vehicle_hardware", sections[number])
+                self.assertIn("dpf=present", sections[number])
+
+    def test_no_global_dpf_toggle_survives_anywhere(self):
+        #
+        # The whole point of the review fix. If this reappears, a single
+        # setting can once again reinterpret every historical drive.
+        #
+        self.assertNotIn("dpf_present:UInt8", self.sql())
+
+        with open(DASHBOARD) as fh:
+            dash = json.load(fh)
+
+        self.assertNotIn(
+            "dpf_present", [v["name"] for v in dash["templating"]["list"]]
+        )
+        self.assertNotIn("$dpf_present", json.dumps(dash))
+
+    def test_unknown_configuration_is_excluded_not_assumed_fitted(self):
+        #
+        # `vehicle_hardware = ''` means the session predates provenance.
+        # The gate matches `dpf=present` positively, so unknown fails
+        # closed rather than being read as fitted.
+        #
+        parts = re.split(r"\n-- (\d+[a-z]?)\. ", "\n" + self.sql())
+        sections = dict(zip(parts[1::2], parts[2::2]))
+
+        for number in ("2", "4"):
+            with self.subTest(section=number):
+                self.assertNotIn("vehicle_hardware = ''", sections[number])
+                self.assertNotIn("dpf=absent", sections[number])
 
     def test_the_regeneration_section_is_NOT_gated(self):
         #
@@ -285,22 +321,17 @@ class TheLakeConsumersAreGatedToo(unittest.TestCase):
         sections = dict(zip(parts[1::2], parts[2::2]))
 
         self.assertIn("8", sections)
-        self.assertNotIn("{dpf_present:UInt8}", sections["8"])
+        self.assertNotIn("dpf=present", sections["8"])
 
-    def test_the_dashboard_has_the_variable(self):
-        with open(DASHBOARD) as fh:
-            names = [v["name"] for v in json.load(fh)["templating"]["list"]]
-
-        self.assertIn("dpf_present", names)
-
-    def test_the_dpf_panels_are_gated_and_say_so(self):
+    def test_the_dpf_panels_gate_on_session_provenance_and_say_so(self):
         for panel in self.panels():
             if panel["id"] not in (2, 4):
                 continue
 
             with self.subTest(panel=panel["title"]):
                 sql = panel["targets"][0]["rawSql"]
-                self.assertIn("$dpf_present=1", sql)
+                self.assertIn("vehicle_hardware", sql)
+                self.assertIn("dpf=present", sql)
                 self.assertIn("VOID", panel["title"] + panel["description"])
 
 

@@ -27,31 +27,6 @@
         "refresh": 1,
         "includeAll": false,
         "multi": false
-      },
-      {
-        "name": "dpf_present",
-        "label": "DPF fitted",
-        "description": "Does this car physically have a particulate filter? The target vehicle's was removed, so this is 0 and the DPF health panels are void. Keep in step with local/vehicle-profile.yaml. See docs/VEHICLE_PROFILE.md.",
-        "type": "custom",
-        "query": "0,1",
-        "current": {
-          "text": "0",
-          "value": "0"
-        },
-        "options": [
-          {
-            "text": "0",
-            "value": "0",
-            "selected": true
-          },
-          {
-            "text": "1",
-            "value": "1",
-            "selected": false
-          }
-        ],
-        "includeAll": false,
-        "multi": false
       }
     ]
   },
@@ -81,7 +56,7 @@
     {
       "id": 2,
       "title": "DPF ΔP vs exhaust flow (VOID: no filter fitted)",
-      "description": "VOID ON THIS VEHICLE. The particulate filter was removed, so dpf.differential_pressure measures an empty pipe and a restriction baseline from it is not a measurement of anything. The panel is gated on $dpf_present and returns nothing while it is 0. Median differential pressure binned by engine MAF. Trend this up over months = filter loading up at comparable flow. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
+      "description": "VOID ON THIS VEHICLE. The particulate filter was removed, so dpf.differential_pressure measures an empty pipe and a restriction baseline from it is not a measurement of anything. Gated on each SESSION'S OWN recorded configuration (sessions.vehicle_hardware contains dpf=present), not a global toggle - a toggle would reinterpret historical drives, declaring void a session recorded while the filter was still fitted. Sessions predating configuration provenance are '' = unknown, and unknown is not 'fitted', so this panel is legitimately empty until a drive is recorded declaring a filter. Median differential pressure binned by engine MAF. Trend this up over months = filter loading up at comparable flow. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
       "type": "barchart",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -111,7 +86,7 @@
         {
           "refId": "A",
           "queryType": "table",
-          "rawSql": "SELECT toString(round(maf,-1)) AS maf_gps, round(quantile(0.5)(dp),1) AS median_dP_hPa FROM (SELECT a.value AS dp, if(prev_gap<=next_gap,prev.value,next.value) AS maf, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.differential_pressure' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 AND $dpf_present=1 GROUP BY maf_gps ORDER BY toFloat64(maf_gps)"
+          "rawSql": "SELECT toString(round(maf,-1)) AS maf_gps, round(quantile(0.5)(dp),1) AS median_dP_hPa FROM (SELECT a.value AS dp, if(prev_gap<=next_gap,prev.value,next.value) AS maf, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.differential_pressure' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND position(vehicle_hardware,'dpf=present')>0) AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='engine.maf' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY maf_gps ORDER BY toFloat64(maf_gps)"
         }
       ]
     },
@@ -152,7 +127,7 @@
     {
       "id": 4,
       "title": "DPF soot vs distance since regen (VOID: no filter)",
-      "description": "VOID ON THIS VEHICLE. With no filter fitted the soot channels report the ECU's internal model of hardware that is not there, so accumulation against distance describes the model. Gated on $dpf_present. Soot accumulation. The slope (g/km) is a DPF-health baseline; a steeper slope over time points at injectors/EGR/combustion. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
+      "description": "VOID ON THIS VEHICLE. With no filter fitted the soot channels report the ECU's internal model of hardware that is not there, so accumulation against distance describes the model. Gated on each session's own recorded configuration, not a global toggle. Sessions predating configuration provenance are unknown and excluded. Soot accumulation. The slope (g/km) is a DPF-health baseline; a steeper slope over time points at injectors/EGR/combustion. Only quality='ok' readings: sentinel, saturated and clipped values are not measurements and are excluded. Alignment contract: same session, bounded gap, clock_synced=1, quality='ok'. See docs/ALIGNMENT.md.",
       "type": "barchart",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
@@ -179,7 +154,7 @@
         {
           "refId": "A",
           "queryType": "table",
-          "rawSql": "SELECT toString(round(dist,0)) AS dist_km, round(quantile(0.5)(soot),2) AS soot_g FROM (SELECT a.value AS dist, if(prev_gap<=next_gap,prev.value,next.value) AS soot, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.distance_since_regeneration' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 AND $dpf_present=1 GROUP BY dist_km ORDER BY toFloat64(dist_km)"
+          "rawSql": "SELECT toString(round(dist,0)) AS dist_km, round(quantile(0.5)(soot),2) AS soot_g FROM (SELECT a.value AS dist, if(prev_gap<=next_gap,prev.value,next.value) AS soot, dateDiff('millisecond',prev.ts,a.ts)/1000.0 AS prev_gap,if(dateDiff('millisecond',a.ts,next.ts)>=0,dateDiff('millisecond',a.ts,next.ts)/1000.0,1e18) AS next_gap, least(prev_gap,next_gap) AS gap_s FROM (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.distance_since_regeneration' AND quality='ok' AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND position(vehicle_hardware,'dpf=present')>0) AND session_id IN (SELECT session_id FROM telemetry.sessions WHERE vehicle_id='$vin' AND clock_synced=1)) a ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') prev ON a.session_id=prev.session_id AND a.ts>=prev.ts ASOF LEFT JOIN (SELECT session_id,ts,value FROM telemetry.samples WHERE vehicle_id='$vin' AND channel='dpf.soot_mass.measured' AND quality='ok') next ON a.session_id=next.session_id AND a.ts<=next.ts) WHERE gap_s<=15.0 GROUP BY dist_km ORDER BY toFloat64(dist_km)"
         }
       ]
     },
