@@ -36,6 +36,43 @@ __all__ = ["DEFAULT_POLLING_CLASSES", "resolve_classes", "PollingPlan"]
 #: loop rate itself silently runs at half that rate.
 SCHEDULE_SLACK = 0.001
 
+#
+# PHASE SPREADING WAS TRIED HERE AND REJECTED ON MEASUREMENT.
+#
+# Issue #19 asks for it: several non-staggered classes share a period, so
+# they all become due on the same wall-clock instant - 26 logical
+# requests at every minute boundary against a baseline of 4.
+#
+# Measured in the unit that actually matters, that burst is not what it
+# looks like. `MappingExecutor._run_obd` hands every OBD request due in
+# one cycle to `ObdSession.read`, which packs SIX PIDs into one Mode 01
+# exchange. The 26-request cycle is SEVEN physical exchanges; batching
+# had already absorbed it.
+#
+# Spreading the requests apart therefore trades a rare worst cycle for a
+# smaller one, and pays for it by breaking batches that used to be free.
+# Measured over 30 simulated minutes per drive mode, counting F303 setup
+# frames the way _run_generic actually sends them:
+#
+#     mode       exchanges/min       worst cycle (physical)
+#     normal     1133 -> 1115         11 -> 8     (-1.6%)
+#     long        357 ->  418         11 -> 7     (+16.9%)
+#     sampling    552 ->  582         11 -> 9     (+5.3%)
+#
+# Note where the worst cycle actually comes from: a paired dde_dyn slot
+# is two setup-plus-poll sequences, six exchanges, and phasing the OBD
+# side does not touch it. So spreading buys less than the logical count
+# suggests AND costs continuously.
+#
+# `long` exists to reduce link load on a motorway drive, and phasing
+# would add a quarter to its wire traffic to shave three exchanges off a
+# cycle that happens once a minute. So the burst is left alone: it is
+# already cheap, and the fix costs more than the problem.
+#
+# Recorded rather than silently dropped because "the issue asked for it"
+# is a reason to measure, not a reason to ship.
+#
+
 #: Fallback classes for a mapping that declares none of its own. Every
 #: shipped mapping declares its own, so these are a safety net rather
 #: than a default anyone relies on.
@@ -91,6 +128,11 @@ class PollingPlan:
         self._last: Dict[str, float] = {}
         #: Round-robin cursor per staggered class.
         self._rotation: Dict[str, int] = {}
+        #: Rotation slots per staggered class. A slot is the set of
+        #: requests sent on ONE firing: normally a single request, but a
+        #: declared pair is one slot holding both members. Built once,
+        #: after the sort, so the order is deterministic.
+        self._slots: Dict[str, List[List[RequestDef]]] = {}
         #: Wall clock the duty cycle is measured from; set on first use.
         self._duty_origin: Optional[float] = None
 
@@ -104,6 +146,97 @@ class PollingPlan:
         self.requests.sort(key=lambda r: (
             self.classes[r.polling_class].priority, r.order, r.id
         ))
+
+        self._validate_pairs()
+
+        for name, cls in self.classes.items():
+            if cls.stagger:
+                self._slots[name] = self._rotation_slots(name)
+
+    def _validate_pairs(self) -> None:
+        """
+        Reject a pair declaration that cannot mean what it says.
+
+        Fail early and loudly. Every one of these used to be accepted and
+        silently do nothing, which for a scheduling primitive is the
+        worst outcome: the mapping would look co-scheduled, the data
+        would not be, and the alignment coverage would quietly sit at
+        zero exactly as it did before pairing existed.
+        """
+        groups: Dict[str, List[RequestDef]] = {}
+
+        for request in self.requests:
+            if request.polling_pair:
+                groups.setdefault(request.polling_pair, []).append(request)
+
+        for tag, members in groups.items():
+            classes = {r.polling_class for r in members}
+
+            if len(members) != 2:
+                raise PollingError(
+                    f"polling pair {tag!r} has {len(members)} members "
+                    f"({sorted(r.id for r in members)!r}); a pair is exactly "
+                    "two. One member schedules nothing and is usually a "
+                    "misspelled tag on its partner; three or more would "
+                    "quietly make one firing cost three re-arm sequences, "
+                    "which is a group, not a pair - if that is wanted it "
+                    "should be named and costed as one"
+                )
+
+            if len(classes) > 1:
+                raise PollingError(
+                    f"polling pair {tag!r} spans polling classes "
+                    f"{sorted(classes)!r}. Members are co-scheduled inside "
+                    "ONE class rotation, so a pair cannot cross classes"
+                )
+
+            name = classes.pop()
+
+            if not self.classes[name].stagger:
+                raise PollingError(
+                    f"polling pair {tag!r} is on class {name!r}, which is "
+                    "not staggered. Requests in an unstaggered class are "
+                    "already all due together, so the tag would do nothing"
+                )
+
+    def _rotation_slots(self, name: str) -> List[List["RequestDef"]]:
+        """
+        Group a staggered class into firing slots, pairs kept together.
+
+        A pair group takes the rotation position of its FIRST member, so
+        the order is a function of the sorted request list and nothing
+        else - not of which member happens to be declared first.
+
+        This is why pairing is an explicit tag rather than an accident of
+        ordering. Before it, `n47d_boost_act` and `n47d_boost_set` landed
+        in adjacent slots and were 0.5 s apart, while `n47d_rail_act` and
+        `n47d_rail_set` landed three slots apart and were 1.5 s apart -
+        outside the 1.0 s window their alignment contract declares, so
+        rail act-vs-setpoint had ~0% usable coverage. Neither outcome was
+        chosen; both fell out of how the loader happened to order
+        requests across files. A reordering could have silently swapped
+        which pair worked.
+        """
+        slots: List[List[RequestDef]] = []
+        index: Dict[str, int] = {}
+
+        for request in self.requests:
+            if request.polling_class != name:
+                continue
+
+            tag = request.polling_pair
+
+            if tag:
+                if tag in index:
+                    slots[index[tag]].append(request)
+
+                    continue
+
+                index[tag] = len(slots)
+
+            slots.append([request])
+
+        return slots
 
     # -- modes ------------------------------------------------------
 
@@ -169,10 +302,10 @@ class PollingPlan:
             asleep = False
 
         out: List[RequestDef] = []
-        #: Members of a staggered class that are due this cycle, resolved
-        #: to a single round-robin pick after the eager pass so ordering
-        #: and the byte-pinned OBD behaviour are untouched.
-        staggered: Dict[str, List[RequestDef]] = {}
+        #: Staggered classes due this cycle, resolved to a single
+        #: round-robin slot after the eager pass so ordering and the
+        #: byte-pinned OBD behaviour are untouched.
+        staggered: List[str] = []
 
         #
         # A staggered class is timed as a WHOLE, not per request: the
@@ -197,8 +330,8 @@ class PollingPlan:
                 continue
 
             if cls.stagger:
-                if stagger_due.get(cls.name):
-                    staggered.setdefault(cls.name, []).append(request)
+                if stagger_due.get(cls.name) and cls.name not in staggered:
+                    staggered.append(cls.name)
 
                 continue
 
@@ -206,14 +339,25 @@ class PollingPlan:
                 out.append(request)
 
         #
-        # One member per staggered class per firing, cycling through them
-        # in declaration order. `self.requests` is already priority-sorted,
-        # so members come out in a stable order and the cursor advances
-        # only on firings the class actually gets.
+        # One SLOT per staggered class per firing, cycling through them in
+        # sorted order. A slot is usually one request; a declared pair is
+        # one slot holding both members, so an actual/setpoint pair goes
+        # out in the same cycle - and therefore under the same recorded
+        # timestamp - instead of seconds apart.
         #
-        for name, members in staggered.items():
+        # The class still fires once per period, so pairing costs no
+        # extra firings. It shortens the full rotation (one slot instead
+        # of two for a pair), which raises that class's request rate in
+        # proportion - measured and reported in the PR, not hand-waved.
+        #
+        for name in staggered:
+            slots = self._slots.get(name) or []
+
+            if not slots:
+                continue
+
             cursor = self._rotation.get(name, 0)
-            out.append(members[cursor % len(members)])
+            out.extend(slots[cursor % len(slots)])
             self._rotation[name] = cursor + 1
 
         return out

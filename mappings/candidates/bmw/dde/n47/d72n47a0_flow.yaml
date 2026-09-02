@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-flow
-  version: 2
+  version: 3
   production: false
   description: >
     F-series N47 air/fuel/pressure dynamic (0xF303) measurements from
@@ -101,7 +101,7 @@ requests:
 
   n47.d72.dyn.4841:
     setup: ["2C 03 F3 03", "2C 01 F3 03 48 41 01 02"]
-    polling: {class: dde_dyn}
+    polling: {class: dde_dyn, pair: boost}
     response: {data_length: 2}
     signals:
       n47d_boost_act:
@@ -112,7 +112,7 @@ requests:
 
   n47.d72.dyn.42C8:
     setup: ["2C 03 F3 03", "2C 01 F3 03 42 C8 01 02"]
-    polling: {class: dde_dyn}
+    polling: {class: dde_dyn, pair: boost}
     response: {data_length: 2}
     signals:
       n47d_boost_set:
@@ -123,7 +123,7 @@ requests:
 
   n47.d72.dyn.4746:
     setup: ["2C 03 F3 03", "2C 01 F3 03 47 46 01 02"]
-    polling: {class: dde_dyn}
+    polling: {class: dde_dyn, pair: rail}
     response: {data_length: 2}
     signals:
       n47d_rail_act:
@@ -134,7 +134,7 @@ requests:
 
   n47.d72.dyn.4715:
     setup: ["2C 03 F3 03", "2C 01 F3 03 47 15 01 02"]
-    polling: {class: dde_dyn}
+    polling: {class: dde_dyn, pair: rail}
     response: {data_length: 2}
     signals:
       n47d_rail_set:

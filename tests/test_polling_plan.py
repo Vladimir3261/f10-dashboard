@@ -138,12 +138,12 @@ class TestObdPollingTiers(unittest.TestCase):
             profile.requests, resolve_classes(registry.polling_classes())
         )
 
-    def test_every_request_is_in_one_of_the_four_tiers(self):
+    def test_every_request_is_in_one_of_the_declared_tiers(self):
         plan = self.declared_plan()
 
         self.assertEqual(
             plan.counts(),
-            {"motion": 4, "context": 7, "slow": 8, "rare": 5},
+            {"motion": 4, "control_ctx": 2, "context": 5, "slow": 8, "rare": 5},
         )
 
     def test_motion_runs_every_cycle_at_the_loop_rate(self):
@@ -167,8 +167,10 @@ class TestObdPollingTiers(unittest.TestCase):
         #: Everything is due the first time it is asked for.
         self.assertEqual(len(plan.due(0, start)), 24)
 
-        #: One second later only the 10 Hz tier is.
-        for i in range(1, 11):
+        #: Just under a second later only the 10 Hz tier is. The bound
+        #: stops at 0.9 s because `control_ctx` has a 1 s period and is
+        #: legitimately due at 1.0 s.
+        for i in range(1, 10):
             due = plan.due(i, start + i * 0.1)
 
             self.assertEqual(
@@ -178,12 +180,14 @@ class TestObdPollingTiers(unittest.TestCase):
         #: At ten seconds context and slow come round again, but not rare.
         due = {r.polling_class for r in plan.due(100, start + 10.0)}
 
-        self.assertEqual(due, {"motion", "context", "slow"})
+        self.assertEqual(due, {"motion", "control_ctx", "context", "slow"})
 
         #: At sixty, everything.
         due = {r.polling_class for r in plan.due(600, start + 60.0)}
 
-        self.assertEqual(due, {"motion", "context", "slow", "rare"})
+        self.assertEqual(
+            due, {"motion", "control_ctx", "context", "slow", "rare"}
+        )
 
     def test_due_order_is_by_tier_then_declaration(self):
         """The OBD session batches in list order; keep it deterministic."""
@@ -192,7 +196,12 @@ class TestObdPollingTiers(unittest.TestCase):
 
         self.assertEqual(
             [r.polling_class for r in due],
-            ["motion"] * 4 + ["context"] * 7 + ["slow"] * 8 + ["rare"] * 5,
+            ["motion"] * 4
+            #: control_ctx shares priority 1 with context, so the two
+            #: interleave by declaration order - deterministic, which is
+            #: all the OBD batching needs
+            + ["control_ctx", "context", "control_ctx"] + ["context"] * 4
+            + ["slow"] * 8 + ["rare"] * 5,
         )
         self.assertEqual(due[0].id, "obd.mode01.0C")
 

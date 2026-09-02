@@ -2,7 +2,7 @@ schema_version: 1
 
 mapping:
   id: sae-obd-engine
-  version: "4"
+  version: "5"
   description: >
     Standard SAE OBD-II Mode 01 current-data telemetry for the engine ECU.
     Every request and formula here is the one this application has been
@@ -73,6 +73,15 @@ defaults:
 # ---------------------------------------------------------------------
 polling_classes:
   motion:  {seconds: 0.1, priority: 0}
+  # Context needed to INTERPRET the fast channels, at a rate the fast
+  # channels can actually be compared against. `context` at 10 s cannot:
+  # measured against the alignment contract, conditioning a control-loop
+  # metric on a 10 s channel gives a 2.5 s median gap and 19.2% coverage
+  # inside a 1 s window - below the 50% the contract calls usable, so
+  # the comparison reports "cannot be concluded" rather than a number.
+  # Only the two channels that actually condition control-loop analysis
+  # live here; the rest of `context` is unchanged at 10 s.
+  control_ctx: {seconds: 1.0, priority: 1}
   context: {seconds: 10,  priority: 1}
   slow:    {seconds: 10,  priority: 2}
   rare:    {seconds: 60,  priority: 3}
@@ -134,7 +143,7 @@ requests:
 
   obd.mode01.04:
     pid: 0x04
-    polling: {class: context}
+    polling: {class: control_ctx}
     response: {data_length: 1}
     signals:
       load:
@@ -156,7 +165,7 @@ requests:
 
   obd.mode01.10:
     pid: 0x10
-    polling: {class: context}
+    polling: {class: control_ctx}
     response: {data_length: 2}
     signals:
       maf:

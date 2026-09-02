@@ -33,7 +33,7 @@
     },
     {
       "id": "candidate-n47-d72-flow",
-      "version": 2,
+      "version": 3,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"
     },
@@ -51,7 +51,7 @@
     },
     {
       "id": "drive-modes",
-      "version": 1,
+      "version": 2,
       "production": true,
       "path": "config/modes.yaml"
     },
@@ -63,7 +63,7 @@
     },
     {
       "id": "sae-obd-engine",
-      "version": 4,
+      "version": 5,
       "production": true,
       "path": "mappings/obd/engine.yaml"
     }

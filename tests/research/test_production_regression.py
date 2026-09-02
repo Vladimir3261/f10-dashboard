@@ -43,11 +43,20 @@ from bmwdiag.mapping import MappingRegistry, decode_signal, load_file
 #: percent of the channel - were that sentinel; 6,756 MAP rows sat on the
 #: byte ceiling. See docs/DATA_QUALITY.md.
 #:
+#: v4 -> v5 (2026-09-01): polling only. A new `control_ctx` class at
+#: 1.0 s, and `load` and `maf` moved into it from `context` (10 s). No
+#: request, decode step, signal or unit changed - the exhaustive sweeps
+#: still prove the arithmetic byte for byte. What changed is how often
+#: two channels are asked for: at 10 s they gave 19.2% coverage inside
+#: the 1 s window the alignment contract declares for conditioning a
+#: control-loop metric, which is below the 50% it calls usable. See
+#: docs/ALIGNMENT.md and issue #19.
+#:
 #: None of these bumps changed a request, decode step, signal or unit,
 #: which the decode tests below and the exhaustive sweeps in
 #: tests/test_existing_obd_mappings.py still prove byte for byte.
 ENGINE_YAML_SHA256 = (
-    "8a71ee898e80bcc76d2a8c3dac9bd6e5b06241e6494fe3cbc7857c6ddadb4233"
+    "2eded086925f51404f430b334d7d7a601109262d1a26d648cadad8c4bfb3f5c4"
 )
 
 

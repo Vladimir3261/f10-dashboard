@@ -286,6 +286,11 @@ class RequestDef:
     #: A sequence is data, never one fabricated identifier.
     setup: Tuple[Tuple[int, ...], ...] = ()
     polling_class: str = "slow"
+    #: Requests sharing a pair tag inside a STAGGERED class are sent in
+    #: the same firing instead of consecutive round-robin slots, so an
+    #: actual/setpoint pair lands in one poll cycle rather than seconds
+    #: apart. "" means unpaired. See bmwdiag/mapping/polling.py.
+    polling_pair: str = ""
     requires: Tuple[Capability, ...] = ()
     timeout: Optional[float] = None
     provenance: Provenance = field(default_factory=Provenance)

@@ -318,9 +318,16 @@ class TestMetadataIsUnchanged(ObdRegressionCase):
 V2_TIERS = {
     "rpm": "motion", "speed": "motion", "map": "motion", "pedal": "motion",
 
-    "load": "context", "throttle": "context", "maf": "context",
-    "rail": "context", "torque": "context", "relthr": "context",
-    "lambda": "context",
+    #: v5 promoted exactly these two to a 1 s tier. They are the
+    #: channels that CONDITION control-loop analysis, and at 10 s they
+    #: could not: measured against the alignment contract, a 10 s channel
+    #: gives 19.2% coverage inside a 1 s window, below the 50% the
+    #: contract calls usable. Named individually so a third cannot join
+    #: them without this test being edited on purpose.
+    "load": "control_ctx", "maf": "control_ctx",
+
+    "throttle": "context", "rail": "context", "torque": "context",
+    "relthr": "context", "lambda": "context",
 
     "coolant": "slow", "oil": "slow", "iat": "slow", "voltage": "slow",
     "fuelrate": "slow", "cattemp": "slow", "egr": "slow", "egrerr": "slow",
@@ -344,20 +351,34 @@ class TestPollingTiers(ObdRegressionCase):
                     self.profile.request_for_signal(key).polling_class, tier
                 )
 
-    def test_the_fast_tier_shrank_and_nothing_got_faster(self):
+    def test_nothing_from_the_old_fast_tier_is_still_polled_at_10hz(self):
         """
-        The direction of the change, asserted as a property rather than a
-        list: v2 may move a channel down a tier, never up. `map` is the
-        only channel allowed to stay in the fast tier.
-        """
-        rank = {"motion": 0, "context": 1, "slow": 2, "rare": 3}
-        was_fast = [row[1] for row in LEGACY_PIDS if row[7]]
+        The direction of the change, as a property rather than a list.
 
-        for key in was_fast:
-            with self.subTest(key=key):
-                self.assertGreaterEqual(
-                    rank[V2_TIERS[key]], rank["motion"]
-                )
+        v2 moved channels DOWN out of the old global-fast tier and none
+        of them came back up to it. v5 promotes `load` and `maf` from
+        10 s to 1 s - up, but to a tier an order of magnitude below the
+        old 10 Hz, which is the distinction that matters: the point of
+        v2 was removing 10 Hz oversampling, not forbidding every future
+        rate change.
+        """
+        #
+        # Asserted as an exact set rather than an inequality. The
+        # original compared ranks against `motion`, which no tier can
+        # beat, so it could never fail; this cannot pass if a channel
+        # quietly rejoins the 10 Hz tier.
+        #
+        on_motion = {k for k, tier in V2_TIERS.items() if tier == "motion"}
+
+        self.assertEqual(on_motion, {"rpm", "speed", "map", "pedal"})
+
+        #: and the promoted pair went to 1 s, not back to 10 Hz
+        self.assertEqual(V2_TIERS["load"], "control_ctx")
+        self.assertEqual(V2_TIERS["maf"], "control_ctx")
+
+        #: a channel that was already slow in v1 must not have got faster
+        rank = {"motion": 0, "control_ctx": 1, "context": 2,
+                "slow": 3, "rare": 4}
 
         for key in (row[1] for row in LEGACY_PIDS if not row[7]):
             with self.subTest(key=key):
@@ -365,11 +386,6 @@ class TestPollingTiers(ObdRegressionCase):
                     rank[V2_TIERS[key]], rank["slow"],
                     f"{key} was slow in v1 and must not have become faster",
                 )
-
-        self.assertEqual(
-            [k for k in was_fast if V2_TIERS[k] == "motion"],
-            ["rpm", "map", "speed", "pedal"],
-        )
 
     def test_the_plan_sends_far_fewer_requests_per_minute(self):
         """

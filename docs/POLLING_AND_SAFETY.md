@@ -93,7 +93,8 @@ common cadence to be correlated: ClickHouse joins on nearest timestamp
 | class | period | channels | why |
 |---|---|---|---|
 | `motion` | 0.1 s | rpm, speed, map, pedal | genuinely fast; the basis of load context |
-| `context` | 10 s | load, throttle, relthr, torque, maf, rail, lambda | characterises a driving phase, not a single transient |
+| `control_ctx` | 1 s | load, maf | conditions control-loop analysis, so it must be comparable against it — at 10 s these gave 19.2% coverage inside the 1 s alignment window, below the 50% the contract calls usable |
+| `context` | 10 s | throttle, relthr, torque, rail, lambda | characterises a driving phase, not a single transient |
 | `slow` | 10 s | coolant, oil, iat, voltage, fuelrate, cattemp, egr, egrerr | thermal mass and electrics: minutes, not seconds |
 | `rare` | 60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
 | `dde_dyn` | 0.5 s x 22 | the 22 proprietary DDE reads | round-robin: one per firing, so ~11 s per channel |
@@ -115,6 +116,7 @@ Measured over a simulated minute at the 10 Hz loop rate:
 |---|---|
 | before (v1 + EGS at 4 Hz + DDE) | 7,740 |
 | after (`normal`) | 2,735 |
+| after pair + medium tier (2026-09-01) | 2,855 |
 
 **A 65% cut**, with no channel lost and no decode changed. `long` mode
 takes it to 637/min (−92%).
@@ -197,3 +199,108 @@ Switch from the dashboard's `mode` chip, or start in one with
 
 *(The overnight battery test used to head this list. It is cancelled —
 see §1: the Pi runs from a powerbank.)*
+
+
+## Paired requests, and why ordering was not enough
+
+Two channels of a control loop — an actual and its setpoint — are only
+comparable if they were sampled close together. The staggered `dde_dyn`
+class sends one member per firing, so where a pair lands in the rotation
+decides whether the comparison means anything.
+
+That used to be an accident. `n47d_boost_act` and `n47d_boost_set`
+happened to land in adjacent slots (0.5 s apart, inside their 1 s
+window); `n47d_rail_act` and `n47d_rail_set` landed three slots apart
+(1.5 s), **outside** theirs — so rail act-vs-setpoint had ~0% usable
+coverage. Neither outcome was chosen: both fell out of the order the
+loader produced across files, and a reordering could have silently
+swapped which pair worked.
+
+A request may now declare a pair tag:
+
+```yaml
+polling: {class: dde_dyn, pair: rail}
+```
+
+Members sharing a tag occupy **one rotation slot** and go out in the same
+scheduler firing. The class still fires once per period, so pairing costs
+no extra firings; it shortens the rotation by one slot per pair.
+
+**That is a statement about scheduling, not about the wire.** The
+executor runs the two requests sequentially, and each F303 member
+normally re-arms its definition first — two setup frames plus the poll.
+So a paired slot is *six* exchanges, and the two ECU reads are separated
+by however long that takes. Measured cost with setup frames counted:
+1,098 → 1,133 exchanges/min in `normal` (+3.2%), worst cycle 8 → 11.
+
+The real separation is recorded, not assumed: each response carries its
+own completion timestamp (below). **How large it is on a car is not
+established here and needs supervised on-car validation.**
+
+`long` mode is where this mattered most and was least obvious. Its
+`dde_dyn` multiplier of 2.0 doubles the class period, so even the
+adjacent boost pair sat 1.0 s apart — right on its window edge, at 34.6%
+coverage. Pairing fixes that too.
+
+## The burst was measured and left alone
+
+#19 also asks for phase spreading: several non-staggered classes share a
+period, so they become due on the same instant — 26 logical requests at
+every minute boundary against a baseline of 4.
+
+Measured in the unit that matters, that burst is not what it looks like.
+`MappingExecutor._run_obd` hands every OBD request due in a cycle to
+`ObdSession.read`, which packs **six PIDs into one Mode 01 exchange**. The
+26-request cycle is **eleven physical exchanges**, not twenty-six;
+batching absorbs the OBD half.
+
+Per-request phase spreading was implemented, measured and removed. It
+trades a rare worst cycle of 7 exchanges for 4, and pays by breaking
+batches that were free:
+
+| mode | exchanges/min | worst cycle (physical) |
+|---|---|---|
+| `normal` | 1,133 → 1,115 (−1.6%) | 11 → 8 |
+| `long` | 357 → **418 (+16.9%)** | 11 → 7 |
+| `sampling` | 552 → **582 (+5.3%)** | 11 → 9 |
+
+Note where the worst cycle comes from: a paired `dde_dyn` slot is two
+setup-plus-poll sequences — six exchanges — and phasing the OBD side does
+not touch it. Spreading buys less than the logical count suggests *and*
+costs continuously.
+
+`long` exists to reduce link load on a motorway drive. Phasing would add
+a quarter to its wire traffic to save three exchanges on a cycle that
+happens once a minute. The rationale sits in `polling.py` next to where
+the code would have gone, so it is not re-litigated from the logical
+count.
+
+**Logical requests are not wire exchanges.** Any future scheduling change
+must be judged in exchanges; `tests/test_polling_pairs.py` encodes the
+6-PID rule so that accounting is available without a car.
+
+## Acquisition timestamps
+
+Requests in one cycle are executed **sequentially**, so they do not share
+an instant. The recorder used to stamp every value in a cycle with one
+`time.time()`, which was harmless while the staggered class sent one
+member per firing.
+
+Pair slots broke that assumption: two independent ECU reads landing in
+one cycle would both inherit the cycle timestamp, and the alignment
+matcher would report a gap of exactly zero however far apart the two
+exchanges really were. That is measuring the recorder, not the car — and
+for a project whose alignment contract exists to prevent plausible
+misaligned conclusions, it would have been the worst possible way to
+"prove" pairing works.
+
+Each response now carries its own completion time (`DecodedResponse.at`),
+and the recorder stores it per signal. Derived channels have no exchange
+of their own and keep the cycle timestamp.
+
+So "the pair is scheduled in one firing" is a static, proven result, and
+it is the only claim this work supports on its own. The physical
+separation is a setup-plus-poll sequence per member, its size is a
+property of the car and the link, and **measuring it needs a car.** The
+per-signal timestamps are what will make that measurable on the first
+drive rather than assumed now.
