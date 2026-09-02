@@ -95,6 +95,13 @@ class DecodedResponse:
     #: ones `values` leaves out because they are not measurements. This is
     #: what lets storage record that the ECU answered and said no-value.
     readings: Dict[str, Any] = field(default_factory=dict)
+    #: When this exchange completed, as wall clock. Requests in one poll
+    #: cycle are executed SEQUENTIALLY, so they do not share an instant -
+    #: and a paired actual/setpoint stamped with one cycle timestamp
+    #: would report a gap of exactly zero no matter how far apart the two
+    #: reads really were. Recording per response keeps the separation
+    #: observable instead of erasing it.
+    at: float = 0.0
 
 
 def build_payload(request: RequestDef) -> bytes:

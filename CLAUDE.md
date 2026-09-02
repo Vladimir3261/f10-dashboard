@@ -139,9 +139,12 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   speed/map/pedal), `control_ctx` 1 s (load/maf), `context` and `slow`
   1/10 s, `rare` 1/60 s — plus `dde_dyn` (round-robin, ~1/11 s each) and
   `egs` 2 Hz. 7,740 → 2,854 requests/min. Declared actual/setpoint pairs
-  share one rotation slot so they are sampled in the same cycle, and
-  non-staggered requests are phase-spread so same-period classes do not
-  burst together. See `docs/POLLING_AND_SAFETY.md`.
+  share one rotation slot so they are sampled in the same cycle, and each
+  response carries its own acquisition timestamp (a cycle is executed
+  sequentially, so one shared timestamp would erase the gap an alignment
+  contract exists to measure). Phase spreading was measured and rejected:
+  the burst is 7 wire exchanges, not 26 requests. See
+  `docs/POLLING_AND_SAFETY.md`.
 - **Drive modes** scale those classes at runtime: `off` (connected but
   silent), `sampling` (120 s on / 600 s off, slow tiers exempt), `long`,
   `normal` (= the declared rates), `debug` (the pre-v2 behaviour).

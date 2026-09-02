@@ -167,13 +167,9 @@ class TestObdPollingTiers(unittest.TestCase):
         #: Everything is due the first time it is asked for.
         self.assertEqual(len(plan.due(0, start)), 24)
 
-        #
-        # Just under a second later, only the 10 Hz tier is. The bound is
-        # 0.9 s rather than 1.0 s on purpose: `control_ctx` has a 1 s
-        # period, so at exactly 1.0 s it is legitimately due and this
-        # would be asserting the wrong thing - and relying on its phase
-        # offset to hide that would be luck, not a test.
-        #
+        #: Just under a second later only the 10 Hz tier is. The bound
+        #: stops at 0.9 s because `control_ctx` has a 1 s period and is
+        #: legitimately due at 1.0 s.
         for i in range(1, 10):
             due = plan.due(i, start + i * 0.1)
 
@@ -181,36 +177,16 @@ class TestObdPollingTiers(unittest.TestCase):
                 [r.polling_class for r in due], ["motion"] * 4, f"cycle {i}"
             )
 
-        #
-        # At ten seconds context and slow come round again - but no longer
-        # all at the same instant. Phase spreading gives each request its
-        # own offset inside the period, so they arrive across the window
-        # rather than as one burst. Collected over the full period, the
-        # set is unchanged; `rare` still does not appear.
-        #
-        seen = set()
+        #: At ten seconds context and slow come round again, but not rare.
+        due = {r.polling_class for r in plan.due(100, start + 10.0)}
 
-        for i in range(101):
-            seen |= {r.polling_class for r in plan.due(100 + i,
-                                                       start + 10.0 + i * 0.1)}
+        self.assertEqual(due, {"motion", "control_ctx", "context", "slow"})
 
-        self.assertEqual(seen, {"motion", "control_ctx", "context", "slow"})
-
-        #
-        # At sixty, everything - again gathered across the period rather
-        # than demanded at one instant, because `rare` is phased too. The
-        # tier still comes round; it simply no longer piles onto the same
-        # wall-clock tick as context and slow, which is the burst this
-        # change removes.
-        #
-        seen = set()
-
-        for i in range(601):
-            seen |= {r.polling_class for r in plan.due(600 + i,
-                                                       start + 60.0 + i * 0.1)}
+        #: At sixty, everything.
+        due = {r.polling_class for r in plan.due(600, start + 60.0)}
 
         self.assertEqual(
-            seen, {"motion", "control_ctx", "context", "slow", "rare"}
+            due, {"motion", "control_ctx", "context", "slow", "rare"}
         )
 
     def test_due_order_is_by_tier_then_declaration(self):
@@ -222,8 +198,8 @@ class TestObdPollingTiers(unittest.TestCase):
             [r.polling_class for r in due],
             ["motion"] * 4
             #: control_ctx shares priority 1 with context, so the two
-            #: interleave by declaration order. Still deterministic,
-            #: which is all the OBD batching needs.
+            #: interleave by declaration order - deterministic, which is
+            #: all the OBD batching needs
             + ["control_ctx", "context", "control_ctx"] + ["context"] * 4
             + ["slow"] * 8 + ["rare"] * 5,
         )
@@ -268,27 +244,11 @@ class TestWallClockPeriods(unittest.TestCase):
         self.assertEqual(len(plan.due(2, now=1000.2)), 2)
 
     def test_a_slow_period_respects_wall_clock(self):
-        #
-        # Phase spreading offsets the FIRST interval, so a request is not
-        # guaranteed to come round at exactly t=period any more - it
-        # comes round at period + its own phase, which is at most one
-        # further period. What must still hold, and is what this pins, is
-        # that nothing fires EARLY: phase can only ever delay a request,
-        # so it cannot raise request volume. See PHASE_MIN_PERIOD.
-        #
         plan = self.plan(PollingClassDef("paced", 5.0, 0))
 
         self.assertEqual(len(plan.due(0, now=0.0)), 2)
         self.assertEqual(len(plan.due(1, now=4.9)), 0)
-
-        #: one period's worth of cycles: phase is < period, so each
-        #: request comes round exactly once inside [period, 2*period)
-        fired = 0
-
-        for i, t in enumerate([5.0 + 0.1 * k for k in range(50)]):
-            fired += len(plan.due(2 + i, now=t))
-
-        self.assertEqual(fired, 2, "each request comes round exactly once")
+        self.assertEqual(len(plan.due(2, now=5.0)), 2)
 
     def test_hz_is_available_for_display_only(self):
         self.assertEqual(PollingClassDef("paced", 0.1, 0).hz, 10.0)
