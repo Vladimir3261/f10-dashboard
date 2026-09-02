@@ -49,14 +49,20 @@ SCHEDULE_SLACK = 0.001
 # exchange. The 26-request cycle is SEVEN physical exchanges; batching
 # had already absorbed it.
 #
-# Spreading the requests apart therefore trades a rare worst cycle of 7
-# exchanges for 4, and pays for it by breaking batches that used to be
-# free. Measured over 30 simulated minutes per drive mode:
+# Spreading the requests apart therefore trades a rare worst cycle for a
+# smaller one, and pays for it by breaking batches that used to be free.
+# Measured over 30 simulated minutes per drive mode, counting F303 setup
+# frames the way _run_generic actually sends them:
 #
 #     mode       exchanges/min       worst cycle (physical)
-#     normal      870 ->  852          7 -> 4
-#     long        226 ->  286          7 -> 3      (+26.8%)
-#     sampling    289 ->  319          7 -> 5      (+10.2%)
+#     normal     1133 -> 1115         11 -> 8     (-1.6%)
+#     long        357 ->  418         11 -> 7     (+16.9%)
+#     sampling    552 ->  582         11 -> 9     (+5.3%)
+#
+# Note where the worst cycle actually comes from: a paired dde_dyn slot
+# is two setup-plus-poll sequences, six exchanges, and phasing the OBD
+# side does not touch it. So spreading buys less than the logical count
+# suggests AND costs continuously.
 #
 # `long` exists to reduce link load on a motorway drive, and phasing
 # would add a quarter to its wire traffic to shave three exchanges off a
@@ -166,11 +172,15 @@ class PollingPlan:
         for tag, members in groups.items():
             classes = {r.polling_class for r in members}
 
-            if len(members) < 2:
+            if len(members) != 2:
                 raise PollingError(
-                    f"polling pair {tag!r} has only one member "
-                    f"({members[0].id!r}). A pair of one schedules nothing "
-                    "- most likely the tag is misspelled on its partner"
+                    f"polling pair {tag!r} has {len(members)} members "
+                    f"({sorted(r.id for r in members)!r}); a pair is exactly "
+                    "two. One member schedules nothing and is usually a "
+                    "misspelled tag on its partner; three or more would "
+                    "quietly make one firing cost three re-arm sequences, "
+                    "which is a group, not a pair - if that is wanted it "
+                    "should be named and costed as one"
                 )
 
             if len(classes) > 1:
