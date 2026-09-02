@@ -2,7 +2,8 @@
 # reference. A research record naming a source_id absent from this file
 # fails validation (tests/research/test_license_manifest.py).
 #
-# Pins were taken 2026-08-25. license.id records what was actually
+# Most initial pins were taken 2026-08-25; refreshed entries carry their
+# own later retrieved_at date. license.id records what was actually
 # determined at the pinned revision; "unknown" is a determination, not a
 # gap. commercial_runtime_copy_allowed refers to copying IMPLEMENTATION
 # into a potentially commercial runtime - extracting individual factual
@@ -195,12 +196,15 @@ sources:
     name: "obd-gauge-cluster F10 on-car validation (BMW-STATUS.md)"
     type: git_repository
     url: "https://github.com/cheeseprince/obd-gauge-cluster"
-    commit: "bb1323960c8e378633138dc46226cf99b8a55859"
-    retrieved_at: "2026-08-25"
+    commit: "742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa"
+    retrieved_at: "2026-09-02"
     license:
       id: MIT
       commercial_runtime_copy_allowed: true
-      notes: "Methodology reference plus F10 N55 on-car scan evidence."
+      notes: >
+        Methodology reference plus F10 N55 on-car scan evidence. Pin
+        refreshed after issue #1 exposed the absolute oil-pressure datum,
+        the expanded static namespace and the confirmed 0x4402 oil-temp DID.
     trust:
       tier: A
       primary_evidence: [on_car_scan]
@@ -209,7 +213,7 @@ sources:
       source_engine: [N55]
     used_files:
       - path: docs/BMW-STATUS.md
-        purpose: f10_namespace_and_oil_pressure_evidence
+        purpose: f10_namespace_oil_pressure_and_oil_temperature_evidence
 
   bimmerdis:
     name: BimmerDis
