@@ -41,14 +41,35 @@ a supervised on-car try of a two-source define with byte-exact
 verification of both fields. Until then: one dynamic request at a time
 (enforced by comment + validation report; see conflicts report).
 
-## 4. Does the diesel DDE serve the 58xx static namespace?
+## 4. Does the diesel DDE serve the N55's static F10 namespace?
 
-`22 586F` gave u16 millibar on an F10 **N55**. If the diesel DDE
-answers it, oil pressure becomes a one-request static read with no
-define dance. **Evidence needed:** one supervised `22 586F` to the
-discovered engine ECU; sanity: idle warm ≈ 1500–4500 mbar rising with
-RPM. Also probe the unpinned oil-temp leads `22 5817` / `22 58EB`
-against a COLD start (their source could not pin them on a warm one).
+The refreshed `obd-gauge-cluster` evidence is stronger and broader than
+the original pin, but it still comes from an F10 **N55**, not an N47.
+On that source car a 1,797-probe sweep found 462 answering DIDs in six
+blocks: `42xx`, `43xx`, `44xx`, `45xx`, `4Axx` and `58xx`; `DAxx`
+returned nothing.
+
+Two concrete source-car signals are now anchored:
+
+- `22 586F` is u16 big-endian **absolute** oil pressure in millibar. KOEO
+  reads 1057–1058 mbar against roughly 1000 mbar barometric pressure, so
+  gauge pressure is the reading minus a contemporaneous barometric value.
+- `22 4402` is u16 big-endian oil temperature at `raw × 0.75 − 48 °C`,
+  confirmed by a 24.8 → 74.2 °C cold-start ramp and an independent
+  `22 4408` corroboration.
+
+The former `22 5817` / `22 58EB` oil-temperature leads are closed for
+that interpretation on the source car: they duplicate each other and
+track ambient, not oil. Do not spend the target-car cold start trying to
+validate a claim the source has already falsified.
+
+**Evidence needed on F10-520d-dev:** supervised reads of `22 586F` and
+`22 4402` to the discovered engine ECU, with raw bytes retained. For
+`586F`, capture barometric pressure and an engine-off sample so datum is
+not guessed. For `4402`, compare against coolant from cold soak through
+warm-up. A static block census over the six source-car blocks is useful
+only as a discovery lead; no N55 DID is an N47 fact until the diesel DDE
+answers it.
 
 ## 5. Compare d72 vs d73 vs DDE7-KWP DPF identifiers
 
@@ -104,7 +125,9 @@ Precondition: ignition on, engine running for temperature plausibility;
 2. Question 1: UDS ident reads for variant resolution; record bytes.
 3. Question 2: enable `n47.d72.dyn.4517` alone → expect ~46–110 °C oil.
 4. Question 5: repeat for `44BE`, then `44C1`; compare the pair.
-5. Question 4: `22 586F`, then `22 5817`/`22 58EB` (cold start next day).
+5. Question 4: targeted `22 586F` with barometric + engine-off context,
+   then `22 4402` through a cold-start ramp. Do not treat `5817`/`58EB`
+   as oil-temperature candidates.
 6. Question 7: `tools/egs.py scan --ecu 0x18`; targeted `22 DA12/DA2E`.
 7. Anything that answers gets promoted `candidate →
    locally_verified` in the mapping file's `verification:` block with
