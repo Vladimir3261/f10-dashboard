@@ -15,7 +15,7 @@
     },
     {
       "id": "candidate-f10-static-58xx",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/f10_static_58xx.yaml"
     },
