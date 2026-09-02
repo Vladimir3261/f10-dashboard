@@ -1134,9 +1134,15 @@ class Recorder:
         ts: float,
         values: Dict[str, float],
         qualities: Optional[Dict[str, str]] = None,
+        stamps: Optional[Dict[str, float]] = None,
     ) -> None:
         """
         Record one cycle's values, optionally with a quality label each.
+
+        `stamps` gives a signal its own acquisition time; anything
+        missing keeps `ts`, the cycle time. Requests in one cycle are
+        executed sequentially, so sharing one timestamp would erase the
+        separation an alignment contract exists to measure.
 
         `qualities` is keyed like `values`; anything missing from it is
         recorded as 'ok'. That default is honest rather than convenient:
@@ -1146,7 +1152,8 @@ class Recorder:
         """
         try:
             self.q.put_nowait(
-                ("s", (ts, dict(values), dict(qualities or {})))
+                ("s", (ts, dict(values), dict(qualities or {}),
+                       dict(stamps or {})))
             )
         except queue.Full:
             self.dropped += 1
@@ -1415,13 +1422,20 @@ class Recorder:
                 self.db.commit()
 
             elif kind == "s" and self.run_id is not None:
-                ts, values, qualities = payload
+                ts, values, qualities, stamps = payload
 
                 for key, value in values.items():
                     param_id = self._param_id(key)
                     self._note_run_channel(param_id, key)
                     pending.append((
-                        self.run_id, ts, param_id, value,
+                        #
+                        # The signal's own acquisition time where the
+                        # executor recorded one; the cycle time otherwise
+                        # (derived channels, and any caller that passes
+                        # no stamps). Without this two sequential reads
+                        # in one cycle are indistinguishable in storage.
+                        #
+                        self.run_id, stamps.get(key, ts), param_id, value,
                         qualities.get(key, "ok"),
                     ))
 
@@ -2361,7 +2375,9 @@ def poll_loop(
                 # The plan schedules requests, not channel names, so two
                 # signals decoded from one reply cost one exchange.
                 #
-                readings = executor.execute_readings(plan.due(cycle, started))
+                readings, stamps = executor.execute_readings_at(
+                    plan.due(cycle, started)
+                )
                 fresh = {
                     key: r.value for key, r in readings.items() if r.usable
                 }
@@ -2444,6 +2460,17 @@ def poll_loop(
                         time.time(),
                         numeric_only(stored, profile),
                         {key: r.quality for key, r in readings.items()},
+                        #
+                        # Per-signal acquisition times. Requests in a
+                        # cycle go out sequentially, so a paired
+                        # actual/setpoint stamped with one cycle time
+                        # would report a gap of exactly zero however far
+                        # apart the two exchanges were - the alignment
+                        # contract would then be grading the recorder.
+                        # Derived channels have no exchange of their own
+                        # and keep the cycle timestamp.
+                        #
+                        stamps,
                     )
 
                 latency = (time.monotonic() - started) * 1000.0

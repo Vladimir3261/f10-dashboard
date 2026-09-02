@@ -15,7 +15,6 @@ It is applied here rather than beside here, so there remains exactly one
 place that decides whether a request is due.
 """
 
-import hashlib
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .errors import PollingError
@@ -37,19 +36,36 @@ __all__ = ["DEFAULT_POLLING_CLASSES", "resolve_classes", "PollingPlan"]
 #: loop rate itself silently runs at half that rate.
 SCHEDULE_SLACK = 0.001
 
-#: Requests slower than this get a deterministic phase offset so that
-#: same-period classes do not all fire on the same wall-clock instant.
-#:
-#: The threshold exists because phasing a class whose period is at or
-#: near the poll-loop rate would push members onto alternate cycles and
-#: HALVE their effective rate - exactly the bug SCHEDULE_SLACK exists to
-#: prevent. `motion` (0.1 s) and `egs` (0.5 s) are therefore never
-#: phased; they are meant to fire every cycle.
-PHASE_MIN_PERIOD = 1.0
-
-#: Resolution of the phase offset. A prime keeps the spread from
-#: aligning with any round period.
-_PHASE_STEPS = 997
+#
+# PHASE SPREADING WAS TRIED HERE AND REJECTED ON MEASUREMENT.
+#
+# Issue #19 asks for it: several non-staggered classes share a period, so
+# they all become due on the same wall-clock instant - 26 logical
+# requests at every minute boundary against a baseline of 4.
+#
+# Measured in the unit that actually matters, that burst is not what it
+# looks like. `MappingExecutor._run_obd` hands every OBD request due in
+# one cycle to `ObdSession.read`, which packs SIX PIDs into one Mode 01
+# exchange. The 26-request cycle is SEVEN physical exchanges; batching
+# had already absorbed it.
+#
+# Spreading the requests apart therefore trades a rare worst cycle of 7
+# exchanges for 4, and pays for it by breaking batches that used to be
+# free. Measured over 30 simulated minutes per drive mode:
+#
+#     mode       exchanges/min       worst cycle (physical)
+#     normal      870 ->  852          7 -> 4
+#     long        226 ->  286          7 -> 3      (+26.8%)
+#     sampling    289 ->  319          7 -> 5      (+10.2%)
+#
+# `long` exists to reduce link load on a motorway drive, and phasing
+# would add a quarter to its wire traffic to shave three exchanges off a
+# cycle that happens once a minute. So the burst is left alone: it is
+# already cheap, and the fix costs more than the problem.
+#
+# Recorded rather than silently dropped because "the issue asked for it"
+# is a reason to measure, not a reason to ship.
+#
 
 #: Fallback classes for a mapping that declares none of its own. Every
 #: shipped mapping declares its own, so these are a safety net rather
@@ -125,9 +141,53 @@ class PollingPlan:
             self.classes[r.polling_class].priority, r.order, r.id
         ))
 
+        self._validate_pairs()
+
         for name, cls in self.classes.items():
             if cls.stagger:
                 self._slots[name] = self._rotation_slots(name)
+
+    def _validate_pairs(self) -> None:
+        """
+        Reject a pair declaration that cannot mean what it says.
+
+        Fail early and loudly. Every one of these used to be accepted and
+        silently do nothing, which for a scheduling primitive is the
+        worst outcome: the mapping would look co-scheduled, the data
+        would not be, and the alignment coverage would quietly sit at
+        zero exactly as it did before pairing existed.
+        """
+        groups: Dict[str, List[RequestDef]] = {}
+
+        for request in self.requests:
+            if request.polling_pair:
+                groups.setdefault(request.polling_pair, []).append(request)
+
+        for tag, members in groups.items():
+            classes = {r.polling_class for r in members}
+
+            if len(members) < 2:
+                raise PollingError(
+                    f"polling pair {tag!r} has only one member "
+                    f"({members[0].id!r}). A pair of one schedules nothing "
+                    "- most likely the tag is misspelled on its partner"
+                )
+
+            if len(classes) > 1:
+                raise PollingError(
+                    f"polling pair {tag!r} spans polling classes "
+                    f"{sorted(classes)!r}. Members are co-scheduled inside "
+                    "ONE class rotation, so a pair cannot cross classes"
+                )
+
+            name = classes.pop()
+
+            if not self.classes[name].stagger:
+                raise PollingError(
+                    f"polling pair {tag!r} is on class {name!r}, which is "
+                    "not staggered. Requests in an unstaggered class are "
+                    "already all due together, so the tag would do nothing"
+                )
 
     def _rotation_slots(self, name: str) -> List[List["RequestDef"]]:
         """
@@ -265,8 +325,7 @@ class PollingPlan:
 
                 continue
 
-            if self._is_due(request.id, cls.period, now,
-                            self._phase(request.id, cls.period)):
+            if self._is_due(request.id, cls.period, now):
                 out.append(request)
 
         #
@@ -293,29 +352,7 @@ class PollingPlan:
 
         return out
 
-    def _phase(self, request_id: str, period: float) -> float:
-        """
-        A stable offset in [0, period) for one request.
-
-        Deterministic and reproducible: the same request id always gets
-        the same phase, on every host and every restart. NOT jitter -
-        nothing here is random, and two runs of the same configuration
-        produce the same schedule.
-
-        Derived from the request id rather than its position, so adding a
-        channel does not reshuffle the phases of everything else.
-
-        Classes at or below PHASE_MIN_PERIOD get no phase; see there.
-        """
-        if period < PHASE_MIN_PERIOD:
-            return 0.0
-
-        digest = hashlib.blake2b(request_id.encode(), digest_size=4).digest()
-
-        return period * (int.from_bytes(digest, "big") % _PHASE_STEPS) / _PHASE_STEPS
-
-    def _is_due(self, key: str, period: float, now: Optional[float],
-                phase: float = 0.0) -> bool:
+    def _is_due(self, key: str, period: float, now: Optional[float]) -> bool:
         """
         Has `period` elapsed since `key` last fired?
 
@@ -335,25 +372,7 @@ class PollingPlan:
 
         last = self._last.get(key)
 
-        if last is None:
-            #
-            # First sight: fire NOW regardless of phase, because the
-            # opening value of every channel matters and deferring a
-            # 60-second class by up to a minute at startup would cost
-            # real data to buy tidiness.
-            #
-            # The phase is applied to the FIRST INTERVAL instead, which
-            # becomes `period + phase`; every interval after it is exactly
-            # `period`. Deliberately lengthened rather than shortened: a
-            # request must never fire sooner than its declared period, so
-            # phase spreading can only ever reduce request volume, never
-            # add to it. Steady-state cadence is untouched.
-            #
-            self._last[key] = now + phase
-
-            return True
-
-        if now - last >= period - SCHEDULE_SLACK:
+        if last is None or now - last >= period - SCHEDULE_SLACK:
             self._last[key] = now
 
             return True

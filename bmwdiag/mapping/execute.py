@@ -20,7 +20,7 @@ Adding a protocol means adding a branch here, not touching the decoder.
 """
 
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..protocol.request import (
     DecodedResponse,
@@ -435,12 +435,29 @@ class MappingExecutor:
         self, requests: Sequence[RequestDef]
     ) -> Dict[str, Any]:
         """Run every request and merge the signals as key -> Reading."""
-        out: Dict[str, Any] = {}
+        return self.execute_readings_at(requests)[0]
+
+    def execute_readings_at(
+        self, requests: Sequence[RequestDef]
+    ) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """
+        As `execute_readings`, plus when each signal was actually read.
+
+        Requests in one cycle are executed SEQUENTIALLY. Stamping them
+        all with one cycle timestamp would make a paired actual/setpoint
+        report a gap of exactly zero however far apart the two exchanges
+        really were - which is measuring the recorder, not the car.
+        """
+        readings: Dict[str, Any] = {}
+        stamps: Dict[str, float] = {}
 
         for decoded in self.execute_detailed(requests):
-            out.update(decoded.readings)
+            readings.update(decoded.readings)
 
-        return out
+            for key in decoded.readings:
+                stamps[key] = decoded.at
+
+        return readings, stamps
 
     def execute_detailed(
         self, requests: Sequence[RequestDef]
@@ -512,10 +529,11 @@ class MappingExecutor:
                 self._note(request.id, exc)
                 continue
 
-            self._record_ok(request.id, time.time())
+            completed = time.time()
+            self._record_ok(request.id, completed)
             self._record_quality(readings)
             out.append(DecodedResponse(
-                request.id, response, _usable(readings), readings,
+                request.id, response, _usable(readings), readings, completed,
             ))
 
         return out
@@ -641,10 +659,12 @@ class MappingExecutor:
                 self._note(request.id, exc)
                 continue
 
-            self._record_ok(request.id, time.time())
+            completed = time.time()
+            self._record_ok(request.id, completed)
             self._record_quality(readings)
             out.append(DecodedResponse(
                 request.id, bytes(response), _usable(readings), readings,
+                completed,
             ))
 
         return out

@@ -234,27 +234,56 @@ pair, which raises that class's request rate in proportion. Measured:
 adjacent boost pair sat 1.0 s apart — right on its window edge, at 34.6%
 coverage. Pairing fixes that too.
 
-## Phase spreading
+## The burst was measured and left alone
 
-Every non-staggered request used to fire on the same wall-clock instant,
-because the first cycle armed them all together and they stayed in
-lockstep. `context` and `slow` (both 10 s) plus `rare` (60 s) piled into
-one cycle: **26 requests at every minute boundary against a baseline of
-4.**
+#19 also asks for phase spreading: several non-staggered classes share a
+period, so they become due on the same instant — 26 logical requests at
+every minute boundary against a baseline of 4.
 
-Each request now gets a deterministic phase offset inside its period,
-derived from a hash of its id — stable across hosts and restarts, and
-derived from the id rather than the position so adding a channel does not
-reshuffle everything else. **Not jitter: nothing here is random.**
+Measured in the unit that matters, that burst is not what it looks like.
+`MappingExecutor._run_obd` hands every OBD request due in a cycle to
+`ObdSession.read`, which packs **six PIDs into one Mode 01 exchange**. The
+26-request cycle is **seven physical exchanges**; batching had already
+absorbed it.
 
-Two properties worth stating, because they are what make it safe:
+Per-request phase spreading was implemented, measured and removed. It
+trades a rare worst cycle of 7 exchanges for 4, and pays by breaking
+batches that were free:
 
-- the offset **lengthens** the first interval, never shortens it, so
-  phase spreading can only ever reduce request volume;
-- classes at or below `PHASE_MIN_PERIOD` (1 s) are never phased. Phasing
-  a class at the loop rate would push members onto alternate cycles and
-  halve their rate — the same failure `SCHEDULE_SLACK` exists to prevent.
+| mode | exchanges/min | worst cycle (physical) |
+|---|---|---|
+| `normal` | 870 → 852 | 7 → 4 |
+| `long` | 226 → **286 (+26.8%)** | 7 → 3 |
+| `sampling` | 289 → **319 (+10.2%)** | 7 → 5 |
 
-The first cycle still reads everything: a channel's opening value is
-worth more than a tidy startup, and deferring a 60 s class by up to a
-minute would cost real data. Steady-state burst measured 26 → 8.
+`long` exists to reduce link load on a motorway drive. Phasing would add
+a quarter to its wire traffic to save three exchanges on a cycle that
+happens once a minute. The rationale sits in `polling.py` next to where
+the code would have gone, so it is not re-litigated from the logical
+count.
+
+**Logical requests are not wire exchanges.** Any future scheduling change
+must be judged in exchanges; `tests/test_polling_pairs.py` encodes the
+6-PID rule so that accounting is available without a car.
+
+## Acquisition timestamps
+
+Requests in one cycle are executed **sequentially**, so they do not share
+an instant. The recorder used to stamp every value in a cycle with one
+`time.time()`, which was harmless while the staggered class sent one
+member per firing.
+
+Pair slots broke that assumption: two independent ECU reads landing in
+one cycle would both inherit the cycle timestamp, and the alignment
+matcher would report a gap of exactly zero however far apart the two
+exchanges really were. That is measuring the recorder, not the car — and
+for a project whose alignment contract exists to prevent plausible
+misaligned conclusions, it would have been the worst possible way to
+"prove" pairing works.
+
+Each response now carries its own completion time (`DecodedResponse.at`),
+and the recorder stores it per signal. Derived channels have no exchange
+of their own and keep the cycle timestamp.
+
+So "the pair is scheduled in one firing" is a static, proven result. The
+physical separation is one exchange, and **measuring it needs a car.**

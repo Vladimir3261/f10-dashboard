@@ -11,9 +11,12 @@ that #7 already established rather than against a fresh opinion:
     both fell out of the order the loader happened to produce across
     files, and a reordering could have swapped which pair worked.
 
-  * every non-staggered request fired on the same wall-clock instant,
-    so `context` and `slow` (both 10 s) and `rare` (60 s) piled into one
-    cycle - 26 requests at every minute boundary against a baseline of 4.
+The synchronized burst that #19 also names was measured and left alone:
+in physical exchanges it is 7, not 26, because `ObdSession.read` packs
+six PIDs into one Mode 01 request. Spreading it would have cost +26.8%
+of `long` mode's wire traffic to save three exchanges once a minute.
+`TheWireCostIsAccountedFor` pins that reasoning so it is not re-litigated
+from the logical count.
 
 The alignment numbers here come from `analysis.alignment.align`, the same
 matcher the analysis layer uses. There is deliberately no second
@@ -28,11 +31,7 @@ from tests import support  # noqa: F401
 from analysis.alignment import align, pairing_for
 from bmwdiag.mapping import MappingRegistry, load_file
 from bmwdiag.mapping.modes import load_modes
-from bmwdiag.mapping.polling import (
-    PHASE_MIN_PERIOD,
-    PollingPlan,
-    resolve_classes,
-)
+from bmwdiag.mapping.polling import PollingPlan, resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
 
 CAR_FILES = ["mappings/obd/engine.yaml"] + [
@@ -108,16 +107,22 @@ class CriticalPairsAreScheduledTogether(unittest.TestCase):
 
         return med, cov, rule.max_age_s
 
-    def test_rail_actual_and_setpoint_land_in_the_same_cycle(self):
+    def test_rail_actual_and_setpoint_land_in_the_same_scheduler_firing(self):
         #
-        # The defect this change exists for: 1.5 s apart, 0% coverage
-        # inside the 1.0 s window the contract declares for a control
-        # loop. Same cycle means the recorder stamps them with one
-        # timestamp, so the gap is zero rather than merely small.
+        # The defect this change exists for: 1.5 s apart in the rotation,
+        # 0% coverage inside the 1.0 s window the contract declares.
+        #
+        # NOTE WHAT THIS DOES AND DOES NOT SAY. It measures SCHEDULER
+        # geometry - the two requests are selected in the same firing.
+        # It is not a claim about the physical gap on the wire: the
+        # executor runs the requests sequentially, and each F303 read may
+        # carry setup frames. The real separation is one exchange, which
+        # only a car can measure. Recording that separation is what
+        # per-signal timestamps exist for; see TheAcquisitionTimeSurvives.
         #
         med, cov, window = self._pair("n47d_rail_act", "n47d_rail_set")
 
-        self.assertEqual(med, 0.0)
+        self.assertEqual(med, 0.0, "same firing in scheduler time")
         self.assertEqual(cov, 100.0)
         self.assertEqual(window, 1.0)
 
@@ -182,75 +187,6 @@ class CriticalPairsAreScheduledTogether(unittest.TestCase):
 
         self.assertEqual(members, 23)
         self.assertEqual(slots, 21, "two pairs collapse four slots into two")
-
-
-class PhaseSpreadingRemovesTheBurst(unittest.TestCase):
-    def setUp(self):
-        self.profile, self.plan = car_plan()
-        self.fired, self.per_cycle = simulate(self.plan)
-
-    def test_the_steady_state_burst_is_small(self):
-        #
-        # Before: 26 requests on every minute boundary, against a
-        # baseline of 4. The first cycle is excluded deliberately - every
-        # channel's opening value is wanted at startup, and deferring a
-        # 60 s class by up to a minute to avoid one burst would cost real
-        # data to buy tidiness.
-        #
-        steady = self.per_cycle[1:]
-
-        self.assertLessEqual(max(steady), 10)
-
-    def test_the_first_cycle_still_reads_everything(self):
-        self.assertGreater(self.per_cycle[0], 20)
-
-    def test_phase_is_deterministic_across_plans(self):
-        #: same configuration, same schedule - not jitter
-        _, second = car_plan()
-        fired_b, _ = simulate(second)
-
-        self.assertEqual(self.fired, fired_b)
-
-    def test_phase_never_makes_a_request_fire_early(self):
-        #
-        # Phase lengthens the first interval, never shortens it, so it
-        # cannot raise request volume. Every observed interval must be at
-        # least the declared period.
-        #
-        classes = self.plan.classes
-
-        for request in self.profile.requests:
-            cls = classes[request.polling_class]
-
-            if cls.stagger:
-                continue
-
-            times = self.fired.get(request.id, [])
-            gaps = [b - a for a, b in zip(times, times[1:])]
-
-            for gap in gaps:
-                self.assertGreaterEqual(
-                    round(gap, 3), cls.period - 0.01,
-                    f"{request.id} fired early",
-                )
-
-    def test_fast_classes_are_not_phased(self):
-        #
-        # Phasing a class at or near the loop rate would push members
-        # onto alternate cycles and halve their rate - the bug
-        # SCHEDULE_SLACK exists to prevent.
-        #
-        self.assertEqual(self.plan._phase("anything", 0.1), 0.0)
-        self.assertEqual(self.plan._phase("anything", PHASE_MIN_PERIOD - 0.01), 0.0)
-        self.assertGreater(self.plan._phase("obd.mode01.05", 10.0), 0.0)
-
-    def test_phase_stays_inside_the_period(self):
-        for request_id in ("a", "obd.mode01.05", "n47.d72.dyn.4746", "zzz"):
-            for period in (1.0, 10.0, 60.0):
-                phase = self.plan._phase(request_id, period)
-
-                self.assertGreaterEqual(phase, 0.0)
-                self.assertLess(phase, period)
 
 
 class ContextIsFastEnoughToConditionControlLoops(unittest.TestCase):
@@ -406,3 +342,290 @@ class TheConfigurationChangeIsRecorded(unittest.TestCase):
 
         self.assertIn("sae-obd-engine@5", fingerprint)
         self.assertIn("drive-modes@2", fingerprint)
+
+
+class TheWireCostIsAccountedFor(unittest.TestCase):
+    """
+    Logical requests are not wire exchanges, and #19's constraint is
+    about the wire.
+
+    `MappingExecutor._run_obd` hands every OBD request due in one cycle
+    to `ObdSession.read`, which packs SIX PIDs into one Mode 01 exchange
+    while `multi_ok` holds. So a cycle with 19 OBD requests is four
+    exchanges, not nineteen - and a scheduler change that reduces the
+    logical count while splitting batches can INCREASE wire traffic.
+
+    That is not hypothetical: per-request phase spreading was implemented
+    here, measured, and removed because it did exactly that. These pin
+    the accounting so the next change is judged in the right unit.
+    """
+
+    #: same rule as ObdSession.read()
+    PIDS_PER_EXCHANGE = 6
+
+    def exchanges(self, plan, seconds=600.0, rate=0.1):
+        """Best-case physical exchanges under multi_ok=True."""
+        import math
+
+        total = worst = 0
+        now, cycle = 0.0, 0
+
+        while now < seconds:
+            due = plan.due(cycle, now)
+            obd = [r for r in due
+                   if r.protocol == "obd" and r.payload is None]
+            other = [r for r in due if r not in obd]
+            count = math.ceil(len(obd) / self.PIDS_PER_EXCHANGE) + len(other)
+
+            total += count
+
+            if cycle:
+                worst = max(worst, count)
+
+            now += rate
+            cycle += 1
+
+        return total / seconds * 60.0, worst
+
+    def test_the_worst_cycle_is_a_handful_of_exchanges_not_dozens(self):
+        #
+        # The measurement that decided against phase spreading: the
+        # "26-request burst" is seven exchanges. Batching already
+        # absorbed it.
+        #
+        _, plan = car_plan()
+        _, worst = self.exchanges(plan)
+
+        self.assertLessEqual(worst, 8)
+
+    def test_pairing_does_not_inflate_wire_traffic(self):
+        #
+        # A pair shares one rotation slot, so it costs no extra FIRINGS -
+        # only a shorter rotation. Compared against the same plan with
+        # pairing suppressed, the increase must stay small.
+        #
+        profile, plan = car_plan()
+        paired, _ = self.exchanges(plan)
+
+        import dataclasses
+
+        unpaired_requests = [
+            dataclasses.replace(r, polling_pair="") for r in profile.requests
+        ]
+        registry_classes = plan.declared
+        flat = PollingPlan(unpaired_requests, registry_classes)
+        unpaired, _ = self.exchanges(flat)
+
+        self.assertLess(
+            paired, unpaired * 1.10,
+            "pairing must not materially increase wire exchanges",
+        )
+
+    def test_every_drive_mode_stays_within_its_wire_budget(self):
+        #
+        # `long` is the mode that exists to reduce link load, and it is
+        # the one a scheduling change is most likely to spoil - phase
+        # spreading raised it 26.8% before it was removed.
+        #
+        table = load_modes()
+        budgets = {"normal": 1000, "long": 300, "sampling": 400, "debug": 2400}
+
+        for name, budget in budgets.items():
+            with self.subTest(mode=name):
+                _, plan = car_plan(mode=table.get(name))
+                per_minute, _ = self.exchanges(plan, seconds=600.0)
+
+                self.assertLess(per_minute, budget)
+
+
+class TheAcquisitionTimeSurvives(unittest.TestCase):
+    """
+    A paired read must not be graded by a timestamp that erased the thing
+    being graded.
+
+    Pair slots put two requests in one poll cycle. The executor runs them
+    SEQUENTIALLY, so they are not simultaneous - but the recorder used to
+    stamp everything in a cycle with one `time.time()`, which would make
+    the alignment matcher report exactly 0 ms no matter how far apart the
+    two exchanges really were. That is measuring the recorder.
+
+    Each response now carries its own completion time, and the recorder
+    stores it.
+    """
+
+    def test_the_executor_stamps_each_response_separately(self):
+        import os
+        import time as clock
+
+        from bmwdiag.mapping import MappingRegistry, load_text
+        from bmwdiag.mapping.execute import MappingExecutor
+        from bmwdiag.mapping.registry import AllCapabilities
+
+        mapping = load_text(
+            "schema_version: 1\n"
+            "mapping: {id: t, version: 1, production: false}\n"
+            "ecu: {target: 0x12}\n"
+            "polling_classes: {p: {seconds: 0.5, priority: 0, stagger: true}}\n"
+            "requests:\n"
+            "  a:\n"
+            "    protocol: uds\n    service: 0x22\n    did: 0xDA01\n"
+            "    polling: {class: p, pair: x}\n"
+            "    response: {data_length: 1}\n"
+            "    signals: {sa: {label: A, unit: '', decode: {type: uint8}}}\n"
+            "  b:\n"
+            "    protocol: uds\n    service: 0x22\n    did: 0xDA02\n"
+            "    polling: {class: p, pair: x}\n"
+            "    response: {data_length: 1}\n"
+            "    signals: {sb: {label: B, unit: '', decode: {type: uint8}}}\n",
+            "t",
+        )
+        profile = MappingRegistry([mapping]).resolve(AllCapabilities())
+
+        class Slow:
+            def request(self, payload, *, dst, timeout=None):
+                clock.sleep(0.02)
+
+                return bytes([0x62, payload[1], payload[2], 7])
+
+        executor = MappingExecutor(profile, transport=Slow())
+        readings, stamps = executor.execute_readings_at(profile.requests)
+
+        self.assertEqual(set(stamps), {"sa", "sb"})
+        self.assertNotEqual(
+            stamps["sa"], stamps["sb"],
+            "sequential exchanges must not share one timestamp",
+        )
+        self.assertGreater(abs(stamps["sb"] - stamps["sa"]), 0.01)
+
+    def test_the_recorder_stores_the_per_signal_time(self):
+        import os
+        import sqlite3
+        import tempfile
+        import time as clock
+
+        import live
+
+        path = os.path.join(tempfile.mkdtemp(), "t.db")
+        rec = live.Recorder(path, chunk=1, interval=0.05)
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12, clock_synced=True)
+        clock.sleep(0.05)
+
+        cycle = 1000.0
+        rec.write(cycle, {"a": 1.0, "b": 2.0}, None,
+                  {"a": cycle - 0.30, "b": cycle - 0.10})
+        rec.close()
+
+        con = sqlite3.connect(path)
+
+        try:
+            rows = dict(con.execute(
+                "SELECT p.key, s.ts FROM samples s "
+                "JOIN params p ON p.id = s.param_id"
+            ).fetchall())
+        finally:
+            con.close()
+
+        self.assertAlmostEqual(rows["a"], cycle - 0.30, places=6)
+        self.assertAlmostEqual(rows["b"], cycle - 0.10, places=6)
+
+    def test_an_unstamped_signal_keeps_the_cycle_time(self):
+        #: derived channels have no exchange of their own
+        import os
+        import sqlite3
+        import tempfile
+        import time as clock
+
+        import live
+
+        path = os.path.join(tempfile.mkdtemp(), "t.db")
+        rec = live.Recorder(path, chunk=1, interval=0.05)
+        rec.open()
+        rec.start_run("VINREDACTED", "gw", "DDE", 0x12, clock_synced=True)
+        clock.sleep(0.05)
+        rec.write(2000.0, {"derived": 5.0}, None, {})
+        rec.close()
+
+        con = sqlite3.connect(path)
+
+        try:
+            ts = con.execute("SELECT ts FROM samples").fetchone()[0]
+        finally:
+            con.close()
+
+        self.assertEqual(ts, 2000.0)
+
+
+class PairDeclarationsAreValidated(unittest.TestCase):
+    """
+    A scheduling primitive that silently does nothing is worse than one
+    that fails: the mapping looks co-scheduled, the data is not, and the
+    alignment coverage sits at zero exactly as it did before.
+    """
+
+    def plan_for(self, extra):
+        from bmwdiag.mapping import MappingRegistry, load_text
+        from bmwdiag.mapping.registry import AllCapabilities
+
+        mapping = load_text(
+            "schema_version: 1\n"
+            "mapping: {id: t, version: 1, production: false}\n"
+            "ecu: {target: 0x12}\n"
+            "polling_classes:\n"
+            "  st: {seconds: 0.5, priority: 0, stagger: true}\n"
+            "  flat: {seconds: 10, priority: 1}\n"
+            "requests:\n" + extra,
+            "t",
+        )
+        profile = MappingRegistry([mapping]).resolve(AllCapabilities())
+
+        return PollingPlan(profile.requests,
+                           resolve_classes(mapping.polling_classes))
+
+    def _request(self, name, did, cls, pair=None):
+        tag = "" if pair is None else ", pair: %s" % pair
+
+        return (
+            "  %s:\n    protocol: uds\n    service: 0x22\n"
+            "    did: %s\n    polling: {class: %s%s}\n"
+            "    response: {data_length: 1}\n"
+            "    signals: {s%s: {label: X, unit: '', decode: {type: uint8}}}\n"
+            % (name, did, cls, tag, name)
+        )
+
+    def test_a_lone_pair_tag_is_refused(self):
+        from bmwdiag.mapping.errors import PollingError
+
+        with self.assertRaises(PollingError) as caught:
+            self.plan_for(self._request("a", "0xDA01", "st", "x")
+                          + self._request("b", "0xDA02", "st"))
+
+        self.assertIn("only one member", str(caught.exception))
+
+    def test_a_pair_on_an_unstaggered_class_is_refused(self):
+        from bmwdiag.mapping.errors import PollingError
+
+        with self.assertRaises(PollingError) as caught:
+            self.plan_for(self._request("a", "0xDA01", "flat", "x")
+                          + self._request("b", "0xDA02", "flat", "x"))
+
+        self.assertIn("not staggered", str(caught.exception))
+
+    def test_a_pair_spanning_two_classes_is_refused(self):
+        from bmwdiag.mapping.errors import PollingError
+
+        with self.assertRaises(PollingError) as caught:
+            self.plan_for(self._request("a", "0xDA01", "st", "x")
+                          + self._request("b", "0xDA02", "flat", "x"))
+
+        self.assertIn("cannot cross classes", str(caught.exception))
+
+    def test_a_valid_pair_is_accepted(self):
+        plan = self.plan_for(self._request("a", "0xDA01", "st", "x")
+                             + self._request("b", "0xDA02", "st", "x"))
+
+        self.assertEqual(len(plan._slots["st"]), 1)
+
+    def test_the_shipped_mappings_pass_validation(self):
+        #: the production set must not be the thing that trips this
+        car_plan()
