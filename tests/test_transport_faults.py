@@ -55,7 +55,7 @@ requests:
     protocol: uds
     service: 0x22
     did: 0xF300
-    response: {service: 0x62, identifier: 0xF300}
+    response: {data_length: 1}
     signals:
       alpha:
         label: Alpha
@@ -65,7 +65,7 @@ requests:
     protocol: uds
     service: 0x22
     did: 0xF301
-    response: {service: 0x62, identifier: 0xF301}
+    response: {data_length: 1}
     signals:
       beta:
         label: Beta

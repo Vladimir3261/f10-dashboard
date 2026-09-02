@@ -212,9 +212,26 @@ class TableIsConfig(unittest.TestCase):
                         + f"  x:\n    multipliers: {{slow: {bad}}}\n"
                     )
 
+    def test_a_non_finite_multiplier_or_duty_is_refused_at_load(self):
+        """`.inf > 0` is true; an infinite period is a class that never runs."""
+        for bad in ("  x:\n    multipliers: {slow: .inf}\n",
+                    "  x:\n    multipliers: {slow: .nan}\n",
+                    "  x:\n    duty: {awake: .inf, asleep: 600}\n",
+                    "  x:\n    duty: {awake: 120, asleep: .nan}\n"):
+            with self.subTest(bad=bad.strip()):
+                with self.assertRaises(MappingError):
+                    self._table(self.MINIMAL + bad)
+
     def test_a_default_naming_an_undefined_mode_is_refused(self):
         with self.assertRaises(MappingError):
             self._table("version: 1\ndefault: nope\nmodes:\n  normal:\n")
+
+    def test_an_unknown_top_level_key_is_refused(self):
+        """`defualt: long` would leave the default at normal in silence."""
+        with self.assertRaises(MappingError) as caught:
+            self._table(self.MINIMAL + "defualt: normal\n")
+
+        self.assertIn("defualt", str(caught.exception))
 
     def test_an_unknown_key_is_refused(self):
         """A typo must not be silently ignored - it would do nothing."""

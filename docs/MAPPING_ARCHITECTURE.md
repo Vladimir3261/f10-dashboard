@@ -461,6 +461,44 @@ signals nobody provides.
 
 Everything raises a `MappingError` subclass, never a bare `KeyError`.
 
+### Fail closed (2026-09-03, issue #9)
+
+The loader validated what it read and ignored what it did not know.
+That is the wrong failure mode for a file that decides which bytes reach
+the car: `prodution: false` fell back to `production: true`,
+`production: "false"` was a truthy string, and two tracked candidates
+carried `defaults.request.timeout: 0.4` for a week without the value
+ever reaching the wire. Now:
+
+- **Every schema object has a field vocabulary** (`FIELDS_*` in
+  `loader.py`) and a key outside it is an `UnknownFieldError` at its
+  full path, with a did-you-mean hint. This applies at every level:
+  document, `mapping`, `ecu`, `ecu.match`, `target`, `source`,
+  `verification`, `defaults`, `defaults.request`, `polling_classes.<x>`,
+  request, `response`, `polling`, `requires`, signal, `decode`,
+  `display` (and its `{config, default}` bounds), derived, and
+  `derived.scale`. Capability *kinds* under `match.capability` stay
+  open — an unknown kind fails closed at resolution instead.
+- **Booleans are booleans.** `production`, `stagger` and `log` accept
+  `true`/`false` only.
+- **Numbers are finite.** `.nan` and `.inf` parse, and are refused
+  wherever a number goes: periods, scales, display bounds, timeouts,
+  validity limits, mode multipliers and duty windows.
+- **Explicit payloads are non-empty**, as setup frames already were.
+- **Identifiers match the protocol.** `did` on an `obd` request, `pid`
+  on a `uds` one, or `did` on `raw` would ride on the definition and
+  never be sent; each is an error. `service` is range-checked.
+- **Retired spellings are refused by name** with a pointer to the live
+  one: `response.length` → `data_length`; `display.lo`/`hi` →
+  `min`/`max`; `hz`/`every`/`cycles` → `seconds`.
+- **`defaults.request` is a closed list** — `protocol`, `transport`,
+  `service`, `pid`, `did`, `payload`, `target`, `polling`, `timeout` —
+  and every entry in it is actually inherited. `timeout` was not until
+  this change; see the EGS candidate.
+
+The runtime dependency story is unchanged: the parser is still the
+bundled YAML subset, and none of this executes anything from the file.
+
 ---
 
 ## Development CLI
