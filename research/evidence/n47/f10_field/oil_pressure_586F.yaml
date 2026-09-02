@@ -1,31 +1,48 @@
-# Source-backed on-car F10 evidence: static Mode-22 namespace + oil pressure.
+# Source-backed on-car F10 evidence: static Mode-22 namespace,
+# absolute oil pressure, and the N55 oil-temperature lead.
 #
 # Transcribed from cheeseprince/obd-gauge-cluster @
-# bb1323960c8e378633138dc46226cf99b8a55859, docs/BMW-STATUS.md
-# (retrieved 2026-08-25). MIT licensed.
+# 742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa, docs/BMW-STATUS.md
+# (retrieved 2026-09-02). MIT licensed.
 #
 # The vehicle is an F10 535i - the RIGHT CHASSIS but the WRONG ENGINE
 # (N55 petrol, not N47 diesel). What transfers is gateway/namespace
-# behaviour and the methodology; the specific DID values must be
-# re-proven on a diesel DDE.
+# behaviour and the methodology; every DID still has to be re-proven on
+# the target diesel DDE before it can be treated as an N47 fact.
 #
-# On-car scan findings (census + sweep + ~15 min drive, ELM327 adapter):
+# On-car scan findings (census + full sweep + cold/warm drives, ELM327):
 #
 #   * The DME answers enhanced Mode-22 on the PLAIN 7DF functional
-#     broadcast, in a 58xx/42xx/45xx identifier namespace.
+#     broadcast.
+#   * A 1,797-probe sweep produced 462 answering DIDs in six blocks:
+#     42xx, 43xx, 44xx, 45xx, 4Axx and 58xx. The earlier pin recorded only
+#     42xx/45xx/58xx. The DAxx block was swept and returned no answers on
+#     the source car.
 #   * The community `6F1` extended-addressing headers were NOT routed to
 #     the adapter: DME `612` and EGS `618` stayed silent, and `22 DA25`
 #     on 7DF returned `7F 22 22`. NOTE: adapter-specific - our transport
 #     is ENET/HSFZ through the ZGW, which routes 0x18 (tools/egs.py
 #     reaches it), so this reachability finding does NOT transfer.
 #   * `22 58 6F` answered a 2-byte value on-car; decoded as u16
-#     BIG-ENDIAN MILLIBAR it gave 2324-4776 mbar (33.7-69.3 psi) over
-#     the drive, monotone by RPM band, r = 0.653. Their initial
-#     byte-0-only read was wrong by ~4x - the documented lesson is that
-#     a shape check cannot validate a scale.
-#   * Oil-temp candidates `22 58 17` / `22 58 EB` both sat 91-98 degC
-#     tracking coolant on a WARM-started drive - never pinned; explicitly
-#     left unverified by the source.
+#     BIG-ENDIAN MILLIBAR it gave 2324-4776 mbar over the original drive,
+#     monotone by RPM band, r = 0.653.
+#   * The pressure datum is ABSOLUTE, not gauge. Key-on/engine-off reads
+#     were 1057-1058 mbar against roughly 1000 mbar barometric pressure;
+#     engine-off rows in the drive fell to atmospheric and the final row
+#     as the engine died was 982 mbar. A gauge value therefore requires a
+#     contemporaneous barometric subtraction. Reading the raw value as
+#     gauge overstates it by about one atmosphere (~14.5 psi).
+#   * Oil temperature is `22 44 02`: u16 big-endian, raw*0.75-48 degC.
+#     A genuine cold start produced a 24.8 -> 74.2 degC ramp, while warm
+#     data reached 93.0-115.5 degC. `22 44 08`, on a different scale,
+#     corroborated it across the ramp (r = 0.99978).
+#   * The former `22 58 17` / `22 58 EB` oil-temperature leads are
+#     rejected for that interpretation on the source car: they are
+#     byte-identical on 99.51% of 1,427 rows and track ambient, not oil.
+#
+# The first byte-only pressure decode was also wrong by about 4x. Together
+# the two corrections are a useful warning: plausible shape and plausible
+# magnitude are not enough unless width, scale and datum are all anchored.
 
 source_id: obd-gauge-cluster
 record_id: f10field.n55.586F
@@ -35,6 +52,12 @@ vehicle:
   engine_family: N55            # NOT N47
   chassis: F10
   transport: "ELM327 / ISO 15765-4 on 7DF functional"
+
+namespace:
+  probes: 1797
+  answering_dids: 462
+  answering_blocks: [42xx, 43xx, 44xx, 45xx, 4Axx, 58xx]
+  no_answers: [DAxx]
 
 exchange:
   request: "22 58 6F"
@@ -49,21 +72,40 @@ decode:
   div: "1"
   add: "0"
   unit: mbar
-  signal: "Engine oil pressure"
+  signal: "Engine oil pressure (absolute)"
+  pressure_reference: absolute
+  gauge_formula: "absolute_mbar - contemporaneous_barometric_mbar"
 
 verification: externally_verified
 evidence_tier: A
 safety: read_only_telemetry_candidate
 n47_applicability: unverified   # engine mismatch; namespace evidence only
 
+oil_temperature:
+  record_id: f10field.n55.4402
+  request: "22 44 02"
+  response_shape: "62 44 02 VV VV"
+  raw_type: uint16
+  byte_order: big
+  mul: "0.75"
+  div: "1"
+  add: "-48"
+  unit: degC
+  signal: "Engine oil temperature"
+  verification: externally_verified
+  evidence: "24.8-74.2 degC cold-start ramp; 93.0-115.5 degC warm range"
+  n47_applicability: unverified
+
+# They still answered and remain useful unknown-signal leads, but the
+# refreshed source explicitly falsifies the oil-temperature interpretation.
 unpinned_leads:
   - request: "22 58 17"
-    note: "oil-temp candidate, 91-98 degC on warm drive, never pinned"
+    note: "not oil temperature on the N55 source car; tracks ambient"
   - request: "22 58 EB"
-    note: "oil-temp candidate, same drive, never pinned"
+    note: "not oil temperature on the N55 source car; duplicates 5817"
 
 citation:
-  url: "https://github.com/cheeseprince/obd-gauge-cluster/blob/main/docs/BMW-STATUS.md"
-  commit: "bb1323960c8e378633138dc46226cf99b8a55859"
-  retrieved_at: "2026-08-25"
+  url: "https://github.com/cheeseprince/obd-gauge-cluster/blob/742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa/docs/BMW-STATUS.md"
+  commit: "742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa"
+  retrieved_at: "2026-09-02"
   license: MIT

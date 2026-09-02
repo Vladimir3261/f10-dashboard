@@ -3,49 +3,64 @@ schema_version: 1
 # ============================================================ CANDIDATE
 #
 # NOT verified on the target F10 520d. production: false. Source
-# vehicle: an F10 535i - RIGHT chassis, WRONG engine (N55 petrol). What
-# this file encodes is the one decode that source proved on-car:
+# vehicle: an F10 535i - RIGHT chassis, WRONG engine (N55 petrol).
+#
+# This file encodes the one 58xx decode the source proved on-car:
 #
 #   TX 22 58 6F
-#   RX 62 58 6F VV VV     -> u16 big-endian, millibar
+#   RX 62 58 6F VV VV     -> u16 big-endian, absolute millibar
 #
-# 159 drive samples, 144 distinct values, 2324-4776 mbar, monotone by
-# RPM band (cheeseprince/obd-gauge-cluster @ bb132396,
-# docs/BMW-STATUS.md). The same document records that its first
-# byte-0-only decode was wrong by ~4x - "a shape check cannot validate
-# a scale" - which is why this row carries the full 16-bit decode and
-# nothing else from that project's unpinned leads (5817/58EB stay in
-# research storage, not here).
+# The refreshed source pin adds the datum that the old record lacked:
+# 0x586F is ABSOLUTE pressure. Key-on/engine-off it reads 1057-1058 mbar
+# against roughly 1000 mbar barometric pressure, and it falls back to
+# atmospheric as the engine stops. It must not be displayed or analysed
+# as gauge pressure without subtracting a contemporaneous barometric
+# reading. A fixed sea-level subtraction would merely replace one hidden
+# assumption with another, so this mapping keeps the measured absolute
+# value and names it honestly.
 #
-# Whether a diesel DDE serves 0x586F at all is exactly what the on-car
-# validation session must answer. It is a plain static read the
-# capability gate keeps disabled until then.
+# The original drive had 159 samples, 144 distinct values and a
+# 2324-4776 mbar range, monotone by RPM band (cheeseprince/
+# obd-gauge-cluster @ 742f8a44, docs/BMW-STATUS.md). The same document
+# records that its first byte-0-only decode was wrong by about 4x - "a
+# shape check cannot validate a scale". The absolute/gauge correction
+# adds the matching lesson that a scale does not establish its datum.
+#
+# That refreshed source also found a wider N55 static namespace
+# (42xx/43xx/44xx/45xx/4Axx/58xx) and confirmed oil temperature at
+# 0x4402. Those facts are recorded in
+# research/evidence/n47/f10_field/oil_pressure_586F.yaml, but are not
+# silently asserted here as N47 facts: every static DID still needs a
+# supervised read on the target diesel DDE.
 # ======================================================================
 
 mapping:
   id: candidate-f10-static-58xx
-  version: 1
+  version: 2
   production: false
   description: >
-    CANDIDATE - F10 static Mode-22 oil pressure (0x586F, u16 millibar),
-    on-car verified on an F10 N55 petrol; unverified for the N47 diesel
-    target.
+    CANDIDATE - F10 static Mode-22 absolute oil pressure (0x586F, u16
+    millibar), on-car verified on an F10 N55 petrol; unverified for the
+    N47 diesel target. Gauge pressure requires contemporaneous barometric
+    subtraction outside this raw measurement.
 
 source:
   type: trace
-  file: "https://github.com/cheeseprince/obd-gauge-cluster/blob/main/docs/BMW-STATUS.md"
+  file: "https://github.com/cheeseprince/obd-gauge-cluster/blob/742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa/docs/BMW-STATUS.md"
   notes: >
-    On-car F10 scan, pinned commit bb1323960c8e378633138dc46226cf99b8a55859.
-    Transcription: research/evidence/n47/f10_field/oil_pressure_586F.yaml.
-    OBDb's BMW-5-Series signalset disagrees on the width (8-bit scalar);
-    the on-car u16 decode is used and the conflict is recorded in
+    On-car F10 scan, pinned commit
+    742f8a44e6c9a78f4dd43ac1bb6a9c2376c74caa. Transcription:
+    research/evidence/n47/f10_field/oil_pressure_586F.yaml. OBDb's
+    BMW-5-Series signalset disagrees on the width (8-bit scalar); the
+    on-car u16 decode is used and the conflict is recorded in
     research/reports/n47-conflicts.md.
 
 verification:
   status: candidate
   method: >
-    externally verified on the source F10 535i (N55). NOT verified on
-    F10-520d-dev; engine family differs.
+    Externally verified on the source F10 535i (N55), including
+    engine-off evidence proving an absolute pressure datum. NOT verified
+    on F10-520d-dev; engine family differs.
   vehicle: F10-535i-N55 (source), F10-520d-dev (target, PENDING)
 
 ecu:
@@ -69,8 +84,8 @@ requests:
     polling: {class: slow}
     response: {data_length: 2}
     signals:
-      f10_oil_press:
-        label: Oil pressure
+      f10_oil_press_absolute:
+        label: Oil pressure (absolute)
         unit: mbar
         display: {digits: 0, min: 0, max: 10000}
         decode: {type: uint16_be}
