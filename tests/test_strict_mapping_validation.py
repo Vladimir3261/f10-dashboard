@@ -354,8 +354,9 @@ class TestTypeStrictness(unittest.TestCase):
              "requests.test.one.signals.alpha.decode.valid_max"),
             ("    pid: 0x0C", "    pid: 0x0C\n    timeout: .inf",
              "requests.test.one.timeout"),
+            #: Reported where it was written, not where it was inherited.
             ("    transport: diagnostic", "    transport: diagnostic\n    timeout: .nan",
-             "requests.test.one.timeout"),
+             "defaults.request.timeout"),
         )
 
         for old, new, path in cases:
@@ -402,6 +403,73 @@ class TestWireLevelConsistency(unittest.TestCase):
         fails(
             self, edit("    pid: 0x0C", "    pid: 0x0C\n    timeout: 0"),
             InvalidFieldError, "requests.test.one.timeout", "positive",
+        )
+
+
+class TestDefaultsAreValidatedWhereWritten(unittest.TestCase):
+    """
+    A value under `defaults.request` is validated when the block loads,
+    not when (or whether) a request inherits it.
+
+    Otherwise a file's validity would depend on which request happened
+    to override which default: `timeout: .nan` under defaults with every
+    request declaring its own timeout would load clean, and the first
+    request added without one would inherit NaN. Every request here
+    overrides the field the default gets wrong.
+    """
+
+    CASES = (
+        ("timeout: .nan", "    timeout: 0.4", "defaults.request.timeout"),
+        ("timeout: -1", "    timeout: 0.4", "defaults.request.timeout"),
+        ("polling: {class: slow, stray: typo}", "", "defaults.request.polling.stray"),
+        ("polling: 7", "", "defaults.request.polling"),
+        ("service: 0x1FF", "", "defaults.request.service"),
+        ("service: \"1\"", "", "defaults.request.service"),
+        ("pid: 256", "    pid: 0x0C", "defaults.request.pid"),
+        ("did: 0x10000", "", "defaults.request.did"),
+        ("payload: []", "    payload: 01 0C", "defaults.request.payload"),
+        ("payload: [0x1FF]", "    payload: 01 0C", "defaults.request.payload[0]"),
+        ("target: 0x1FF", "", "defaults.request.target"),
+        ("target: {address: 0x12, name: x}", "", "defaults.request.target"),
+        ("target: {adress: 0x12}", "", "defaults.request.target.adress"),
+        ("protocol: kwp", "", "defaults.request.protocol"),
+    )
+
+    def test_an_invalid_default_transport_fails(self):
+        fails(
+            self, edit("    transport: diagnostic", "    transport: can"),
+            MappingError, "defaults.request.transport",
+        )
+
+    def test_an_invalid_default_fails_even_when_every_request_overrides_it(self):
+        for default, override, path in self.CASES:
+            with self.subTest(default=default):
+                text = edit(
+                    "    transport: diagnostic",
+                    "    transport: diagnostic\n    " + default,
+                )
+
+                if override:
+                    text = edit("    pid: 0x0C", override, text)
+
+                fails(self, text, MappingError, path)
+
+    def test_a_valid_default_is_inherited_and_overridable(self):
+        text = edit(
+            "    transport: diagnostic",
+            "    transport: diagnostic\n    polling: {class: paced}\n    timeout: 0.4",
+        )
+        text = edit("    polling: {class: fast}\n", "", text)
+        mapping = load_text(text, "test")
+
+        self.assertEqual(mapping.requests[0].polling_class, "paced")
+        self.assertEqual(mapping.requests[0].timeout, 0.4)
+
+    def test_every_inheritable_field_has_a_validator(self):
+        from bmwdiag.mapping.loader import REQUEST_FIELD_VALIDATORS
+
+        self.assertEqual(
+            tuple(REQUEST_FIELD_VALIDATORS), FIELDS_REQUEST_DEFAULTS
         )
 
 

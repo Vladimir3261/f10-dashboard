@@ -715,6 +715,119 @@ def _signal(
 # --------------------------------------------------------------- request
 
 
+#
+# One validator per wire-level field, shared by the request path and the
+# `defaults.request` block. A value written into a mapping file is
+# validated wherever it is written: a `timeout: .nan` under defaults must
+# fail at load even when every request overrides it, or the file's
+# validity would depend on which request happens to inherit what.
+#
+
+
+def _protocol(value: Any, source: str, path: str) -> str:
+    return _enum_value(value, PROTOCOLS, source, path)
+
+
+def _transport(value: Any, source: str, path: str) -> str:
+    return _enum_value(value, TRANSPORTS, source, path)
+
+
+def _byte_id(name: str, top: int):
+    def check(value: Any, source: str, path: str) -> int:
+        number = _as_int(value, source, path)
+
+        if not 0 <= number <= top:
+            raise InvalidFieldError(
+                f"{name} out of range: {number}", source, path
+            )
+
+        return number
+
+    return check
+
+
+_service = _byte_id("service", 0xFF)
+_pid = _byte_id("pid", 0xFF)
+_did = _byte_id("did", 0xFFFF)
+
+
+def _payload(value: Any, source: str, path: str) -> Tuple[int, ...]:
+    """
+    An explicit payload. `payload: []` is not "no payload", it is a
+    request to send nothing, which the transport would only discover on
+    the wire.
+    """
+    payload = _byte_seq(value, source, path)
+
+    if not payload:
+        raise InvalidFieldError("an explicit payload cannot be empty", source, path)
+
+    return payload
+
+
+def _polling_spec(value: Any, source: str, path: str) -> Tuple[str, str]:
+    """(class, pair) from `polling: name` or `polling: {class, pair}`."""
+    if isinstance(value, dict):
+        _only(value, FIELDS_POLLING, source, path)
+
+        return (
+            _as_str(value.get("class", "slow"), source, f"{path}.class"),
+            #: Optional. Requests sharing a tag inside a staggered class
+            #: are sent together rather than in consecutive rotation slots.
+            _as_str(value.get("pair", ""), source, f"{path}.pair"),
+        )
+
+    if isinstance(value, str):
+        return value, ""
+
+    raise InvalidFieldError(
+        "polling must be a class name or a mapping", source, path
+    )
+
+
+def _timeout(value: Any, source: str, path: str) -> float:
+    timeout = _as_float(value, source, path)
+
+    if timeout <= 0:
+        raise InvalidFieldError(
+            f"timeout must be positive, got {timeout}", source, path
+        )
+
+    return timeout
+
+
+#: Field -> validator, for every field a request can inherit.
+REQUEST_FIELD_VALIDATORS = {
+    "protocol": _protocol,
+    "transport": _transport,
+    "service": _service,
+    "pid": _pid,
+    "did": _did,
+    "payload": _payload,
+    "target": _target,
+    "polling": _polling_spec,
+    "timeout": _timeout,
+}
+
+assert tuple(REQUEST_FIELD_VALIDATORS) == FIELDS_REQUEST_DEFAULTS
+
+
+def _request_defaults(raw: Any, source: str, path: str) -> Dict[str, Any]:
+    """
+    The `defaults.request` block, every explicit value validated on its
+    own. Returns the raw values (a request re-runs the same validator on
+    whichever it inherits, which is cheap and keeps one code path).
+    """
+    defaults = _as_dict(raw, source, path)
+    _only(defaults, FIELDS_REQUEST_DEFAULTS, source, path)
+
+    for name, value in defaults.items():
+        if value is not None:
+            REQUEST_FIELD_VALIDATORS[name](value, source, f"{path}.{name}")
+
+    return defaults
+
+
 def _response_spec(
     raw: Any,
     protocol: str,
@@ -804,40 +917,20 @@ def _request(
 
         return fallback
 
-    protocol = _enum_value(
-        field("protocol", "obd"), PROTOCOLS, source, f"{path}.protocol"
-    )
-    transport = _enum_value(
-        field("transport", "diagnostic"), TRANSPORTS, source, f"{path}.transport"
-    )
+    def checked(name: str, fallback: Any = None) -> Any:
+        value = field(name, fallback)
 
-    pid = field("pid")
-    pid = None if pid is None else _as_int(pid, source, f"{path}.pid")
+        if value is None:
+            return None
 
-    did = field("did")
-    did = None if did is None else _as_int(did, source, f"{path}.did")
+        return REQUEST_FIELD_VALIDATORS[name](value, source, f"{path}.{name}")
 
-    service = field("service", 0x01 if protocol == "obd" else None)
-    service = None if service is None else _as_int(service, source, f"{path}.service")
-
-    if service is not None and not 0 <= service <= 0xFF:
-        raise InvalidFieldError(
-            f"service out of range: {service}", source, f"{path}.service"
-        )
-
-    payload = field("payload")
-    payload = (
-        None if payload is None else _byte_seq(payload, source, f"{path}.payload")
-    )
-
-    #
-    # `payload: []` is not "no payload", it is a request to send nothing,
-    # which the transport would only discover on the wire.
-    #
-    if payload is not None and not payload:
-        raise InvalidFieldError(
-            "an explicit payload cannot be empty", source, f"{path}.payload"
-        )
+    protocol = checked("protocol", "obd")
+    transport = checked("transport", "diagnostic")
+    pid = checked("pid")
+    did = checked("did")
+    service = checked("service", 0x01 if protocol == "obd" else None)
+    payload = checked("payload")
 
     #
     # `setup:` is an ordered list of payloads sent once per session before
@@ -904,13 +997,7 @@ def _request(
             source, f"{path}.did",
         )
 
-    if pid is not None and not 0 <= pid <= 0xFF:
-        raise InvalidFieldError(f"pid out of range: {pid}", source, f"{path}.pid")
-
-    if did is not None and not 0 <= did <= 0xFFFF:
-        raise InvalidFieldError(f"did out of range: {did}", source, f"{path}.did")
-
-    target = _target(field("target"), source, f"{path}.target")
+    target = checked("target") or Target()
 
     if target.address is None and target.name is None:
         raise MissingFieldError("request has no target", source, f"{path}.target")
@@ -919,26 +1006,7 @@ def _request(
         data.get("response"), protocol, service, pid, did, source, f"{path}.response"
     )
 
-    polling = field("polling")
-    polling_class = "slow"
-    polling_pair = ""
-
-    if isinstance(polling, dict):
-        _only(polling, FIELDS_POLLING, source, f"{path}.polling")
-        polling_class = _as_str(
-            polling.get("class", "slow"), source, f"{path}.polling.class"
-        )
-        #: Optional. Requests sharing a tag inside a staggered class are
-        #: sent together rather than in consecutive rotation slots.
-        polling_pair = _as_str(
-            polling.get("pair", ""), source, f"{path}.polling.pair"
-        )
-    elif isinstance(polling, str):
-        polling_class = polling
-    elif polling is not None:
-        raise InvalidFieldError(
-            "polling must be a class name or a mapping", source, f"{path}.polling"
-        )
+    polling_class, polling_pair = checked("polling") or ("slow", "")
 
     provenance = _provenance(
         data.get("source"), source, f"{path}.source", base_provenance
@@ -1013,16 +1081,7 @@ def _request(
     # 0.4` in the EGS and KOMBI candidates never applied and those ECUs
     # were polled on the transport's 3 s default.
     #
-    timeout = field("timeout")
-
-    if timeout is not None:
-        timeout = _as_float(timeout, source, f"{path}.timeout")
-
-        if timeout <= 0:
-            raise InvalidFieldError(
-                f"timeout must be positive, got {timeout}",
-                source, f"{path}.timeout",
-            )
+    timeout = checked("timeout")
 
     return RequestDef(
         id=request_id,
@@ -1295,10 +1354,9 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
 
     defaults_raw = _as_dict(document.get("defaults"), source, "defaults")
     _only(defaults_raw, FIELDS_DEFAULTS, source, "defaults")
-    defaults = _as_dict(
-        defaults_raw.get("request"), source, "defaults.request",
+    defaults = _request_defaults(
+        defaults_raw.get("request"), source, "defaults.request"
     )
-    _only(defaults, FIELDS_REQUEST_DEFAULTS, source, "defaults.request")
 
     if "target" not in defaults and (
         ecu.target.address is not None or ecu.target.name is not None

@@ -494,7 +494,11 @@ ever reaching the wire. Now:
 - **`defaults.request` is a closed list** — `protocol`, `transport`,
   `service`, `pid`, `did`, `payload`, `target`, `polling`, `timeout` —
   and every entry in it is actually inherited. `timeout` was not until
-  this change; see the EGS candidate.
+  this change; see the EGS candidate. Each field has one validator
+  (`REQUEST_FIELD_VALIDATORS`) shared by the defaults block and the
+  request path, so **a value is validated where it is written**: a
+  `timeout: .nan` under defaults fails at load even when every request
+  overrides it, and the error names `defaults.request.timeout`.
 
 The runtime dependency story is unchanged: the parser is still the
 bundled YAML subset, and none of this executes anything from the file.
