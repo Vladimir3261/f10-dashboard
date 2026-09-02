@@ -12,11 +12,18 @@ that #7 already established rather than against a fresh opinion:
     files, and a reordering could have swapped which pair worked.
 
 The synchronized burst that #19 also names was measured and left alone:
-in physical exchanges it is 7, not 26, because `ObdSession.read` packs
-six PIDs into one Mode 01 request. Spreading it would have cost +26.8%
-of `long` mode's wire traffic to save three exchanges once a minute.
-`TheWireCostIsAccountedFor` pins that reasoning so it is not re-litigated
-from the logical count.
+in physical exchanges it is 11, not 26, because `ObdSession.read` packs
+six PIDs into one Mode 01 request. Spreading it would have cost +16.9%
+of `long` mode's wire traffic while barely moving that worst cycle - it
+is dominated by a paired `dde_dyn` slot at six exchanges, which phasing
+the OBD side cannot touch. `TheWireCostIsAccountedFor` pins that
+reasoning so it is not re-litigated from the logical count.
+
+The figures above are the CORRECTED ones. An earlier version of this file
+quoted 7 exchanges and +26.8%, from a model that counted each generic
+request as one exchange and so missed F303 setup re-arming entirely -
+which is the exact accounting mistake these tests exist to prevent, left
+sitting in their own docstring.
 
 The alignment numbers here come from `analysis.alignment.align`, the same
 matcher the analysis layer uses. There is deliberately no second
@@ -471,7 +478,7 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         #
         # `long` is the mode that exists to reduce link load, and it is
         # the one a scheduling change is most likely to spoil - phase
-        # spreading raised it 26.8% before it was removed.
+        # spreading raised it 16.9% before it was removed.
         #
         table = load_modes()
         #
