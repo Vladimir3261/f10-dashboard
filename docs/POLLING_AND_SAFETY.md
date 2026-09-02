@@ -116,7 +116,7 @@ Measured over a simulated minute at the 10 Hz loop rate:
 |---|---|
 | before (v1 + EGS at 4 Hz + DDE) | 7,740 |
 | after (`normal`) | 2,735 |
-| after pair + medium tier (2026-09-01) | 2,854 |
+| after pair + medium tier (2026-09-01) | 2,855 |
 
 **A 65% cut**, with no channel lost and no decode changed. `long` mode
 takes it to 637/min (−92%).
@@ -223,11 +223,19 @@ polling: {class: dde_dyn, pair: rail}
 ```
 
 Members sharing a tag occupy **one rotation slot** and go out in the same
-firing — therefore under the same recorded timestamp, so the gap is zero
-rather than merely small. The class still fires once per period, so
-pairing costs no extra firings; it shortens the rotation by one slot per
-pair, which raises that class's request rate in proportion. Measured:
-+119 requests/min in `normal`, +4.4%.
+scheduler firing. The class still fires once per period, so pairing costs
+no extra firings; it shortens the rotation by one slot per pair.
+
+**That is a statement about scheduling, not about the wire.** The
+executor runs the two requests sequentially, and each F303 member
+normally re-arms its definition first — two setup frames plus the poll.
+So a paired slot is *six* exchanges, and the two ECU reads are separated
+by however long that takes. Measured cost with setup frames counted:
+1,098 → 1,133 exchanges/min in `normal` (+3.2%), worst cycle 8 → 11.
+
+The real separation is recorded, not assumed: each response carries its
+own completion timestamp (below). **How large it is on a car is not
+established here and needs supervised on-car validation.**
 
 `long` mode is where this mattered most and was least obvious. Its
 `dde_dyn` multiplier of 2.0 doubles the class period, so even the
@@ -243,8 +251,8 @@ every minute boundary against a baseline of 4.
 Measured in the unit that matters, that burst is not what it looks like.
 `MappingExecutor._run_obd` hands every OBD request due in a cycle to
 `ObdSession.read`, which packs **six PIDs into one Mode 01 exchange**. The
-26-request cycle is **seven physical exchanges**; batching had already
-absorbed it.
+26-request cycle is **eleven physical exchanges**, not twenty-six;
+batching absorbs the OBD half.
 
 Per-request phase spreading was implemented, measured and removed. It
 trades a rare worst cycle of 7 exchanges for 4, and pays by breaking
@@ -252,9 +260,14 @@ batches that were free:
 
 | mode | exchanges/min | worst cycle (physical) |
 |---|---|---|
-| `normal` | 870 → 852 | 7 → 4 |
-| `long` | 226 → **286 (+26.8%)** | 7 → 3 |
-| `sampling` | 289 → **319 (+10.2%)** | 7 → 5 |
+| `normal` | 1,133 → 1,115 (−1.6%) | 11 → 8 |
+| `long` | 357 → **418 (+16.9%)** | 11 → 7 |
+| `sampling` | 552 → **582 (+5.3%)** | 11 → 9 |
+
+Note where the worst cycle comes from: a paired `dde_dyn` slot is two
+setup-plus-poll sequences — six exchanges — and phasing the OBD side does
+not touch it. Spreading buys less than the logical count suggests *and*
+costs continuously.
 
 `long` exists to reduce link load on a motorway drive. Phasing would add
 a quarter to its wire traffic to save three exchanges on a cycle that
@@ -285,5 +298,9 @@ Each response now carries its own completion time (`DecodedResponse.at`),
 and the recorder stores it per signal. Derived channels have no exchange
 of their own and keep the cycle timestamp.
 
-So "the pair is scheduled in one firing" is a static, proven result. The
-physical separation is one exchange, and **measuring it needs a car.**
+So "the pair is scheduled in one firing" is a static, proven result, and
+it is the only claim this work supports on its own. The physical
+separation is a setup-plus-poll sequence per member, its size is a
+property of the car and the link, and **measuring it needs a car.** The
+per-signal timestamps are what will make that measurable on the first
+drive rather than assumed now.

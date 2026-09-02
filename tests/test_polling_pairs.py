@@ -363,10 +363,27 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
     #: same rule as ObdSession.read()
     PIDS_PER_EXCHANGE = 6
 
-    def exchanges(self, plan, seconds=600.0, rate=0.1):
-        """Best-case physical exchanges under multi_ok=True."""
+    def exchanges(self, plan, profile, seconds=600.0, rate=0.1):
+        """
+        Physical exchanges, modelled on what the executor actually sends.
+
+        Three details, each of which changes the number materially:
+
+        * `_run_obd` DEDUPES by PID before batching - two mappings wanting
+          signals out of one PID cost one slot, not two;
+        * six PIDs go into one Mode 01 exchange while `multi_ok` holds;
+        * `_run_generic` re-arms an F303 definition whenever the armed
+          setup for that destination differs, so a `dde_dyn` member is
+          normally TWO setup frames plus the poll - three exchanges, not
+          one - and a paired slot is two such sequences.
+
+        An earlier version of this test counted every generic request as
+        one exchange. It undercounted the DDE traffic by roughly a third
+        of the total and made pairing look cheaper than it is.
+        """
         import math
 
+        armed = {}
         total = worst = 0
         now, cycle = 0.0, 0
 
@@ -375,7 +392,25 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
             obd = [r for r in due
                    if r.protocol == "obd" and r.payload is None]
             other = [r for r in due if r not in obd]
-            count = math.ceil(len(obd) / self.PIDS_PER_EXCHANGE) + len(other)
+
+            pids = []
+
+            for request in obd:
+                if request.pid is not None and request.pid not in pids:
+                    pids.append(request.pid)
+
+            count = (
+                math.ceil(len(pids) / self.PIDS_PER_EXCHANGE) if pids else 0
+            )
+
+            for request in other:
+                dst = request.target.resolve(profile.targets) or 0x12
+
+                if request.setup and armed.get(dst) != request.setup:
+                    count += len(request.setup)
+                    armed[dst] = request.setup
+
+                count += 1
 
             total += count
 
@@ -393,10 +428,17 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         # "26-request burst" is seven exchanges. Batching already
         # absorbed it.
         #
-        _, plan = car_plan()
-        _, worst = self.exchanges(plan)
+        profile, plan = car_plan()
+        _, worst = self.exchanges(plan, profile)
 
-        self.assertLessEqual(worst, 8)
+        #
+        # 11: a paired dde_dyn slot is two setup+poll sequences (6), plus
+        # the OBD batch and the rest of the cycle. The "26-request burst"
+        # is nowhere near 26 exchanges - batching absorbs the OBD half -
+        # but it is not the 7 an earlier version of this test claimed
+        # either, because that one ignored F303 re-arming.
+        #
+        self.assertLessEqual(worst, 12)
 
     def test_pairing_does_not_inflate_wire_traffic(self):
         #
@@ -405,19 +447,23 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         # pairing suppressed, the increase must stay small.
         #
         profile, plan = car_plan()
-        paired, _ = self.exchanges(plan)
+        paired, _ = self.exchanges(plan, profile)
 
         import dataclasses
 
         unpaired_requests = [
             dataclasses.replace(r, polling_pair="") for r in profile.requests
         ]
-        registry_classes = plan.declared
-        flat = PollingPlan(unpaired_requests, registry_classes)
-        unpaired, _ = self.exchanges(flat)
+        flat = PollingPlan(unpaired_requests, plan.declared)
+        unpaired, _ = self.exchanges(flat, profile)
 
+        #
+        # Measured +3.2% in `normal` with F303 setup counted. Pairing is
+        # not free: a paired slot re-arms twice in one firing. It is
+        # bounded, which is the property worth pinning.
+        #
         self.assertLess(
-            paired, unpaired * 1.10,
+            paired, unpaired * 1.08,
             "pairing must not materially increase wire exchanges",
         )
 
@@ -428,12 +474,17 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         # spreading raised it 26.8% before it was removed.
         #
         table = load_modes()
-        budgets = {"normal": 1000, "long": 300, "sampling": 400, "debug": 2400}
+        #
+        # Measured with F303 setup counted; master is 1098 / 340 / 518 /
+        # 3320. Headroom is deliberately tight so a change that adds a
+        # fifth to the wire traffic fails here rather than on the car.
+        #
+        budgets = {"normal": 1250, "long": 400, "sampling": 620, "debug": 3800}
 
         for name, budget in budgets.items():
             with self.subTest(mode=name):
-                _, plan = car_plan(mode=table.get(name))
-                per_minute, _ = self.exchanges(plan, seconds=600.0)
+                profile, plan = car_plan(mode=table.get(name))
+                per_minute, _ = self.exchanges(plan, profile, seconds=600.0)
 
                 self.assertLess(per_minute, budget)
 
@@ -593,6 +644,21 @@ class PairDeclarationsAreValidated(unittest.TestCase):
             % (name, did, cls, tag, name)
         )
 
+    def test_a_three_member_pair_is_refused(self):
+        #
+        # Three members in one slot is not a pair: it would make a single
+        # firing cost three re-arm sequences, which is a different cost
+        # model wearing the same name.
+        #
+        from bmwdiag.mapping.errors import PollingError
+
+        with self.assertRaises(PollingError) as caught:
+            self.plan_for(self._request("a", "0xDA01", "st", "x")
+                          + self._request("b", "0xDA02", "st", "x")
+                          + self._request("c", "0xDA03", "st", "x"))
+
+        self.assertIn("exactly", str(caught.exception))
+
     def test_a_lone_pair_tag_is_refused(self):
         from bmwdiag.mapping.errors import PollingError
 
@@ -600,7 +666,7 @@ class PairDeclarationsAreValidated(unittest.TestCase):
             self.plan_for(self._request("a", "0xDA01", "st", "x")
                           + self._request("b", "0xDA02", "st"))
 
-        self.assertIn("only one member", str(caught.exception))
+        self.assertIn("has 1 members", str(caught.exception))
 
     def test_a_pair_on_an_unstaggered_class_is_refused(self):
         from bmwdiag.mapping.errors import PollingError
