@@ -2,9 +2,11 @@
 
 Every source inspected for the N47 research pipeline, what it actually
 contains, and how far it can be trusted. Pins and licenses are in
-`research/manifests/sources.yaml`; retrieval date for everything below
-is 2026-08-25. "F10 applicability" is `unverified` for every source —
-nothing in this audit has been validated against the target car.
+`research/manifests/sources.yaml`; most entries were retrieved on
+2026-08-25, with `obd-gauge-cluster` refreshed on 2026-09-02 after issue
+#1 identified newer on-car evidence. "F10 applicability" is `unverified`
+for every source — nothing in this audit has been validated against the
+target car.
 
 ## Primary evidence sources
 
@@ -59,25 +61,41 @@ nothing in this audit has been validated against the target car.
   distinguishes captured evidence from configuration claims. Independent
   of the SGBD-export family as far as ancestry is traceable.
 
-### obd-gauge-cluster (`cheeseprince/obd-gauge-cluster` @ `bb132396`)
+### obd-gauge-cluster (`cheeseprince/obd-gauge-cluster` @ `742f8a44`)
 
 - **License:** MIT.
 - **Vehicle:** BMW F10 535i — right chassis, **N55 petrol** engine.
-- **Raw captures:** yes — census/sweep/drive CSV summarized in
-  `docs/BMW-STATUS.md`.
-- **What it establishes (Tier A, for its car):** the F10 DME answers
-  enhanced Mode-22 on the plain `7DF` functional broadcast in a
-  `58xx/42xx/45xx` namespace; `22 586F` returns u16 big-endian
-  **millibar** oil pressure (159 samples, 144 distinct values); the
-  community `DAxx`/`6F1` EGS block was unreachable **through an ELM327**
-  (`612`/`618` silent, `22 DA25` → `7F 22 22`). That reachability
-  finding is adapter-specific and does not transfer to our ENET/HSFZ
-  transport, which demonstrably routes to `0x18`.
+- **Raw captures:** yes — census, 1,797-probe sweep and cold/warm drive
+  data summarized in `docs/BMW-STATUS.md`.
+- **What it establishes (Tier A, for its car):**
+  - the F10 DME answers enhanced Mode-22 on the plain `7DF` functional
+    broadcast; 462 DIDs answered across six blocks: `42xx`, `43xx`,
+    `44xx`, `45xx`, `4Axx` and `58xx`; the swept `DAxx` block returned
+    no answers;
+  - `22 586F` returns u16 big-endian **absolute millibar** oil pressure.
+    KOEO values of 1057–1058 mbar against roughly 1000 mbar barometric
+    pressure, plus the return to atmospheric as the engine stops, prove
+    the datum. Gauge pressure requires a contemporaneous barometric
+    subtraction; treating the raw value as gauge overstates it by about
+    one atmosphere (~14.5 psi);
+  - `22 4402` is u16 big-endian oil temperature at
+    `raw × 0.75 − 48 °C`, confirmed by a 24.8 → 74.2 °C cold-start ramp
+    and independent `22 4408` corroboration (`r = 0.99978`);
+  - the former `22 5817` / `22 58EB` oil-temperature candidates are not
+    oil temperature on the source car: they duplicate each other and
+    track ambient;
+  - the community `DAxx`/`6F1` EGS path was unreachable **through an
+    ELM327** (`612`/`618` silent, `22 DA25` → `7F 22 22`). That finding
+    is adapter-specific and does not transfer to our ENET/HSFZ transport,
+    which demonstrably routes to `0x18`.
 - **Methodology (adopted):** pre-scan assumptions kept separate from
   on-car results; failed assumptions documented; "a shape check cannot
   validate a scale" (their byte-0 oil-pressure decode was wrong by ~4×
-  and passed its own plausibility test).
+  and passed its own plausibility test). The absolute-pressure correction
+  adds the matching lesson that a scale does not establish its datum.
 - **Reliability:** high; it documents its own mistakes with evidence.
+  None of the N55 DIDs is treated as an N47 fact without target-car
+  validation.
 
 ## Structured-table sources (Tier B)
 
@@ -153,10 +171,10 @@ EGS `0x18` DIDs `DA12` (ATF temp, 8-bit scalar — decode incomplete),
 `DA25` (oil temp, s16 −48 offset), `DA2A` (converter + output-shaft
 speeds, 2 × s16 rpm), `DA2E` (gear enum P/R/N/D); DDE `0x12` `586F`
 (oil pressure, declared 8-bit scalar — **contradicted** by the
-obd-gauge-cluster on-car u16-millibar decode); KOMBI `0x63` `D031`
-(current gear). No per-signal provenance; year filters suggest F/G-era
-applicability. Tier C throughout; two rows pass decode-completeness but
-none pass verification beyond `discovered`.
+obd-gauge-cluster on-car u16 absolute-millibar decode); KOMBI `0x63`
+`D031` (current gear). No per-signal provenance; year filters suggest
+F/G-era applicability. Tier C throughout; two rows pass
+decode-completeness but none pass verification beyond `discovered`.
 
 ### bmw-dash-display (`anejckl/bmw-dash-display` @ `b25db4ac`, MIT)
 
@@ -218,9 +236,10 @@ and community E-series broadcast CAN IDs (`0x0AA`, `0x1D0`, `0x130`,
 - GitHub code search for `"DDE7N47"` returns zero code hits — the ECU
   ident string is effectively absent from public code.
 - No public repository was found carrying a raw F10/F11 **N47** DDE
-  capture of either the `F303` dynamic sequence or a `58xx` static read.
-  The F25 (klartext) and F10-N55 (obd-gauge-cluster) captures are the
-  nearest evidence on each side.
+  capture of either the `F303` dynamic sequence or a static read from the
+  N55-observed `42xx/43xx/44xx/45xx/4Axx/58xx` blocks. The F25
+  (klartext) and F10-N55 (obd-gauge-cluster) captures are the nearest
+  evidence on each side.
 - OBDb has no BMW-520d/F10-diesel-specific repository; BMW-5-Series is
   the closest and is hybrid/petrol-slanted (HV-battery heavy).
 - The `0x03EB`/`0x0AF1` WiCAN claims could not be corroborated by any
