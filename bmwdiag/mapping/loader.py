@@ -7,8 +7,10 @@ by the time the registry sees a `MappingFile`, offsets fit their response,
 decoder types exist, derived inputs resolve and keys are unique.
 """
 
+import difflib
+import math
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import yamlsubset
 from .decoder import PRIMITIVES, primitive_width
@@ -22,6 +24,7 @@ from .errors import (
     MappingError,
     MissingFieldError,
     UnknownDecoderError,
+    UnknownFieldError,
     UnknownDerivedInputError,
     UnsupportedSchemaVersion,
 )
@@ -54,6 +57,68 @@ MAPPING_SUFFIXES = (".yaml", ".yml")
 #: Late-bound targets the application is expected to supply at runtime.
 KNOWN_DYNAMIC_TARGETS = ("discovered_engine", "discovered_gateway")
 
+#
+# The field vocabulary of every schema object. A key outside its object's
+# set is a load error, not a no-op: the loader used to read the fields it
+# knew and ignore the rest, so `prodution: false` loaded a candidate file
+# into the production set and `defaults.request.timeout` was carried by
+# two tracked files for a week without ever reaching the wire. Anything
+# the format grows has to be added here, which is the point.
+#
+FIELDS_DOCUMENT = (
+    "schema_version", "mapping", "source", "verification", "ecu",
+    "defaults", "polling_classes", "requests", "derived",
+)
+FIELDS_MAPPING = ("id", "version", "description", "production")
+FIELDS_ECU = (
+    "family", "target", "sgbd", "variant", "hardware", "software", "match",
+)
+FIELDS_MATCH = ("capability",)
+FIELDS_TARGET = ("address", "name")
+FIELDS_SOURCE = ("type", "file", "sgbd", "job", "result", "notes")
+FIELDS_VERIFICATION = ("status", "method", "vehicle", "notes")
+FIELDS_DEFAULTS = ("request",)
+#: What a request may inherit from `defaults.request`. Deliberately not
+#: everything a request accepts: `setup`, `response` and `signals` are
+#: per-request by nature.
+FIELDS_REQUEST_DEFAULTS = (
+    "protocol", "transport", "service", "pid", "did", "payload", "target",
+    "polling", "timeout",
+)
+FIELDS_REQUEST = FIELDS_REQUEST_DEFAULTS + (
+    "setup", "response", "requires", "signals", "source", "verification",
+)
+FIELDS_RESPONSE = ("prefix", "payload_offset", "data_length", "min_length")
+FIELDS_POLLING = ("class", "pair")
+FIELDS_REQUIRES = ("capability",)
+FIELDS_SIGNAL = (
+    "label", "unit", "decode", "display", "source_name", "log", "source",
+    "verification",
+)
+FIELDS_DECODE = (
+    "type", "offset", "length", "bit", "mask", "shift", "pre_add", "scale",
+    "divide", "add", "round", "enum", "enum_default", "lookup", "invalid",
+    "saturated", "valid_min", "valid_max", "encoding",
+)
+FIELDS_DISPLAY = ("digits", "min", "max")
+FIELDS_CONFIG_BOUND = ("config", "default")
+FIELDS_DERIVED = (
+    "label", "unit", "operation", "inputs", "display", "fallback", "scale",
+    "divide", "add", "pre_add", "round", "log", "trigger", "position",
+    "source", "verification",
+)
+FIELDS_DERIVED_SCALE = ("config", "default")
+FIELDS_POLLING_CLASS = ("seconds", "priority", "stagger")
+
+#: Spellings that were once accepted and are now refused by name, with a
+#: pointer to the one that replaced them. A retired key silently ignored
+#: is the same bug as a typo silently ignored.
+RETIRED_FIELDS = {
+    "response": {"length": "data_length"},
+    "display": {"lo": "min", "hi": "max"},
+    "polling_class": {"hz": "seconds", "every": "seconds", "cycles": "seconds"},
+}
+
 
 # ------------------------------------------------------------ primitives
 
@@ -65,6 +130,52 @@ def _require(
         raise MissingFieldError(f"missing required field {key!r}", source, path)
 
     return data[key]
+
+
+def _only(
+    data: Dict[Any, Any],
+    allowed: Iterable[str],
+    source: str,
+    path: str,
+    retired: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Reject any key of `data` outside `allowed`, naming the key's path.
+
+    Walks the keys in declaration order and stops at the first stray
+    one, so the error points at a field the author actually wrote. A
+    close match in the vocabulary is offered as a hint (`prodution` ->
+    did you mean `production`?) because that is what the typo case
+    looks like.
+    """
+    allowed = tuple(allowed)
+    retired = retired or {}
+
+    for key in data:
+        if key in allowed:
+            continue
+
+        where = f"{path}.{key}" if path else str(key)
+
+        if key in retired:
+            raise InvalidFieldError(
+                f"{key!r} was retired; write {retired[key]!r} instead",
+                source, where,
+            )
+
+        hint = ""
+
+        if isinstance(key, str):
+            close = difflib.get_close_matches(key, allowed, n=1, cutoff=0.6)
+
+            if close:
+                hint = f" (did you mean {close[0]!r}?)"
+
+        raise UnknownFieldError(
+            f"unknown field {key!r}{hint}; allowed fields: "
+            + ", ".join(allowed),
+            source, where,
+        )
 
 
 def _as_dict(value: Any, source: str, path: str) -> Dict[str, Any]:
@@ -132,23 +243,36 @@ def _as_bool(value: Any, source: str, path: str, default: bool) -> bool:
     return value
 
 
-def _as_float(value: Any, source: str, path: str) -> float:
+def _as_number(value: Any, source: str, path: str) -> Any:
+    """
+    A finite number, keeping int as int so display bounds round-trip
+    verbatim.
+
+    NaN and the infinities parse (`.nan`, `.inf`) but never mean anything
+    in this format: a NaN scale poisons every sample, an infinite polling
+    period is a request that never runs, and neither is something an
+    author writes on purpose.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidFieldError(
             f"expected a number, got {value!r}", source, path
         )
 
-    return float(value)
-
-
-def _as_number(value: Any, source: str, path: str) -> Any:
-    """A number, keeping int as int so display bounds round-trip verbatim."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, float) and not math.isfinite(value):
         raise InvalidFieldError(
-            f"expected a number, got {value!r}", source, path
+            f"expected a finite number, got {value!r}", source, path
         )
 
     return value
+
+
+def _as_float(value: Any, source: str, path: str) -> float:
+    return float(_as_number(value, source, path))
+
+
+def _as_opt_str(value: Any, source: str, path: str) -> Optional[str]:
+    """A free-text field: absent or a string, never a number or a list."""
+    return None if value is None else _as_str(value, source, path)
 
 
 def _as_str(value: Any, source: str, path: str) -> str:
@@ -214,15 +338,20 @@ def _provenance(raw: Any, source: str, path: str, base: Provenance) -> Provenanc
     if not data:
         return base
 
+    _only(data, FIELDS_SOURCE, source, path)
+
     kind = data.get("type", base.type)
+
+    def text(name: str, fallback: Optional[str]) -> Optional[str]:
+        return _as_opt_str(data.get(name, fallback), source, f"{path}.{name}")
 
     return Provenance(
         type=_enum_value(kind, SOURCE_TYPES, source, f"{path}.type"),
-        file=data.get("file", base.file),
-        sgbd=data.get("sgbd", base.sgbd),
-        job=data.get("job", base.job),
-        result=data.get("result", base.result),
-        notes=data.get("notes", base.notes),
+        file=text("file", base.file),
+        sgbd=text("sgbd", base.sgbd),
+        job=text("job", base.job),
+        result=text("result", base.result),
+        notes=text("notes", base.notes),
     )
 
 
@@ -234,44 +363,48 @@ def _verification(
     if not data:
         return base
 
+    _only(data, FIELDS_VERIFICATION, source, path)
+
     status = data.get("status", base.status)
+
+    def text(name: str, fallback: Optional[str]) -> Optional[str]:
+        return _as_opt_str(data.get(name, fallback), source, f"{path}.{name}")
 
     return Verification(
         status=_enum_value(
             status, VERIFICATION_STATUS, source, f"{path}.status"
         ),
-        method=data.get("method", base.method),
-        vehicle=data.get("vehicle", base.vehicle),
-        notes=data.get("notes", base.notes),
+        method=text("method", base.method),
+        vehicle=text("vehicle", base.vehicle),
+        notes=text("notes", base.notes),
     )
 
 
 def _display(raw: Any, source: str, path: str) -> Display:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_DISPLAY, source, path, RETIRED_FIELDS["display"])
     digits = data.get("digits", 0)
     from_config: List[Tuple[str, str]] = []
     bounds: Dict[str, float] = {"lo": 0.0, "hi": 100.0}
 
-    for role, names in (("lo", ("min", "lo")), ("hi", ("max", "hi"))):
-        for name in names:
-            if name not in data:
-                continue
+    for role, name in (("lo", "min"), ("hi", "max")):
+        if name not in data or data[name] is None:
+            continue
 
-            value = data[name]
+        value = data[name]
 
-            if isinstance(value, dict):
-                config_key = _require(value, "config", source, f"{path}.{name}")
-                from_config.append((role, _as_str(
-                    config_key, source, f"{path}.{name}.config"
-                )))
-                bounds[role] = _as_number(
-                    value.get("default", bounds[role]), source,
-                    f"{path}.{name}.default",
-                )
-            else:
-                bounds[role] = _as_number(value, source, f"{path}.{name}")
-
-            break
+        if isinstance(value, dict):
+            _only(value, FIELDS_CONFIG_BOUND, source, f"{path}.{name}")
+            config_key = _require(value, "config", source, f"{path}.{name}")
+            from_config.append((role, _as_str(
+                config_key, source, f"{path}.{name}.config"
+            )))
+            bounds[role] = _as_number(
+                value.get("default", bounds[role]), source,
+                f"{path}.{name}.default",
+            )
+        else:
+            bounds[role] = _as_number(value, source, f"{path}.{name}")
 
     return Display(
         digits=_as_int(digits, source, f"{path}.digits"),
@@ -307,12 +440,28 @@ def _target(raw: Any, source: str, path: str) -> Target:
         return Target(name=raw)
 
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_TARGET, source, path)
+    address = data.get("address")
+    name = data.get("name")
 
-    if "address" in data and data["address"] is not None:
-        return Target(address=_as_int(data["address"], source, f"{path}.address"))
+    if address is not None and name is not None:
+        raise InvalidFieldError(
+            "target takes an address or a name, not both", source, path
+        )
 
-    if "name" in data and data["name"] is not None:
-        return Target(name=_as_str(data["name"], source, f"{path}.name"))
+    if address is not None:
+        address = _as_int(address, source, f"{path}.address")
+
+        if not 0 <= address <= 0xFF:
+            raise InvalidFieldError(
+                f"diagnostic address out of range: {address}",
+                source, f"{path}.address",
+            )
+
+        return Target(address=address)
+
+    if name is not None:
+        return Target(name=_as_str(name, source, f"{path}.name"))
 
     raise MissingFieldError("target needs an address or a name", source, path)
 
@@ -322,6 +471,7 @@ def _target(raw: Any, source: str, path: str) -> Target:
 
 def _decode(raw: Any, source: str, path: str) -> Decode:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_DECODE, source, path)
     kind = _as_str(_require(data, "type", source, path), source, f"{path}.type")
 
     if kind not in PRIMITIVES:
@@ -436,14 +586,20 @@ def _decode(raw: Any, source: str, path: str) -> Decode:
     if shift is not None:
         shift = _as_int(shift, source, f"{path}.shift")
 
-    invalid = data.get("invalid") or ()
+    #
+    # `is None`, not truthiness: `invalid: 0` declares zero as the
+    # sentinel and must not collapse to "no sentinel".
+    #
+    invalid = data.get("invalid")
+    invalid = () if invalid is None else invalid
 
-    if invalid and not isinstance(invalid, (list, tuple)):
+    if not isinstance(invalid, (list, tuple)):
         invalid = [invalid]
 
-    saturated = data.get("saturated") or ()
+    saturated = data.get("saturated")
+    saturated = () if saturated is None else saturated
 
-    if saturated and not isinstance(saturated, (list, tuple)):
+    if not isinstance(saturated, (list, tuple)):
         saturated = [saturated]
 
     rounding = data.get("round", 3)
@@ -464,7 +620,9 @@ def _decode(raw: Any, source: str, path: str) -> Decode:
         add=_as_float(data.get("add", 0.0), source, f"{path}.add"),
         round=rounding,
         enum=enum,
-        enum_default=data.get("enum_default"),
+        enum_default=_as_opt_str(
+            data.get("enum_default"), source, f"{path}.enum_default"
+        ),
         lookup=lookup,
         invalid=tuple(
             _as_int(v, source, f"{path}.invalid") for v in invalid
@@ -528,6 +686,7 @@ def _signal(
     order: int,
 ) -> SignalDef:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_SIGNAL, source, path)
 
     return SignalDef(
         key=key,
@@ -538,7 +697,9 @@ def _signal(
             _require(data, "decode", source, path), source, f"{path}.decode"
         ),
         display=_display(data.get("display"), source, f"{path}.display"),
-        source_name=data.get("source_name"),
+        source_name=_as_opt_str(
+            data.get("source_name"), source, f"{path}.source_name"
+        ),
         log=_as_bool(data.get("log"), source, f"{path}.log", True),
         provenance=_provenance(
             data.get("source"), source, f"{path}.source", base_provenance
@@ -554,6 +715,119 @@ def _signal(
 # --------------------------------------------------------------- request
 
 
+#
+# One validator per wire-level field, shared by the request path and the
+# `defaults.request` block. A value written into a mapping file is
+# validated wherever it is written: a `timeout: .nan` under defaults must
+# fail at load even when every request overrides it, or the file's
+# validity would depend on which request happens to inherit what.
+#
+
+
+def _protocol(value: Any, source: str, path: str) -> str:
+    return _enum_value(value, PROTOCOLS, source, path)
+
+
+def _transport(value: Any, source: str, path: str) -> str:
+    return _enum_value(value, TRANSPORTS, source, path)
+
+
+def _byte_id(name: str, top: int):
+    def check(value: Any, source: str, path: str) -> int:
+        number = _as_int(value, source, path)
+
+        if not 0 <= number <= top:
+            raise InvalidFieldError(
+                f"{name} out of range: {number}", source, path
+            )
+
+        return number
+
+    return check
+
+
+_service = _byte_id("service", 0xFF)
+_pid = _byte_id("pid", 0xFF)
+_did = _byte_id("did", 0xFFFF)
+
+
+def _payload(value: Any, source: str, path: str) -> Tuple[int, ...]:
+    """
+    An explicit payload. `payload: []` is not "no payload", it is a
+    request to send nothing, which the transport would only discover on
+    the wire.
+    """
+    payload = _byte_seq(value, source, path)
+
+    if not payload:
+        raise InvalidFieldError("an explicit payload cannot be empty", source, path)
+
+    return payload
+
+
+def _polling_spec(value: Any, source: str, path: str) -> Tuple[str, str]:
+    """(class, pair) from `polling: name` or `polling: {class, pair}`."""
+    if isinstance(value, dict):
+        _only(value, FIELDS_POLLING, source, path)
+
+        return (
+            _as_str(value.get("class", "slow"), source, f"{path}.class"),
+            #: Optional. Requests sharing a tag inside a staggered class
+            #: are sent together rather than in consecutive rotation slots.
+            _as_str(value.get("pair", ""), source, f"{path}.pair"),
+        )
+
+    if isinstance(value, str):
+        return value, ""
+
+    raise InvalidFieldError(
+        "polling must be a class name or a mapping", source, path
+    )
+
+
+def _timeout(value: Any, source: str, path: str) -> float:
+    timeout = _as_float(value, source, path)
+
+    if timeout <= 0:
+        raise InvalidFieldError(
+            f"timeout must be positive, got {timeout}", source, path
+        )
+
+    return timeout
+
+
+#: Field -> validator, for every field a request can inherit.
+REQUEST_FIELD_VALIDATORS = {
+    "protocol": _protocol,
+    "transport": _transport,
+    "service": _service,
+    "pid": _pid,
+    "did": _did,
+    "payload": _payload,
+    "target": _target,
+    "polling": _polling_spec,
+    "timeout": _timeout,
+}
+
+assert tuple(REQUEST_FIELD_VALIDATORS) == FIELDS_REQUEST_DEFAULTS
+
+
+def _request_defaults(raw: Any, source: str, path: str) -> Dict[str, Any]:
+    """
+    The `defaults.request` block, every explicit value validated on its
+    own. Returns the raw values (a request re-runs the same validator on
+    whichever it inherits, which is cheap and keeps one code path).
+    """
+    defaults = _as_dict(raw, source, path)
+    _only(defaults, FIELDS_REQUEST_DEFAULTS, source, path)
+
+    for name, value in defaults.items():
+        if value is not None:
+            REQUEST_FIELD_VALIDATORS[name](value, source, f"{path}.{name}")
+
+    return defaults
+
+
 def _response_spec(
     raw: Any,
     protocol: str,
@@ -564,6 +838,7 @@ def _response_spec(
     path: str,
 ) -> ResponseSpec:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_RESPONSE, source, path, RETIRED_FIELDS["response"])
 
     if "prefix" in data and data["prefix"] is not None:
         prefix = _byte_seq(data["prefix"], source, f"{path}.prefix")
@@ -589,7 +864,7 @@ def _response_spec(
             source, f"{path}.payload_offset",
         )
 
-    data_length = data.get("data_length", data.get("length"))
+    data_length = data.get("data_length")
 
     if data_length is not None:
         data_length = _as_int(data_length, source, f"{path}.data_length")
@@ -603,6 +878,12 @@ def _response_spec(
     min_length = _as_int(
         data.get("min_length", 0), source, f"{path}.min_length"
     )
+
+    if min_length < 0:
+        raise InvalidLengthError(
+            f"min_length must not be negative, got {min_length}",
+            source, f"{path}.min_length",
+        )
 
     return ResponseSpec(
         prefix=prefix,
@@ -625,6 +906,7 @@ def _request(
     seen_signals: Dict[str, str],
 ) -> RequestDef:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_REQUEST, source, path)
 
     def field(name: str, fallback: Any = None) -> Any:
         if name in data and data[name] is not None:
@@ -635,26 +917,20 @@ def _request(
 
         return fallback
 
-    protocol = _enum_value(
-        field("protocol", "obd"), PROTOCOLS, source, f"{path}.protocol"
-    )
-    transport = _enum_value(
-        field("transport", "diagnostic"), TRANSPORTS, source, f"{path}.transport"
-    )
+    def checked(name: str, fallback: Any = None) -> Any:
+        value = field(name, fallback)
 
-    pid = field("pid")
-    pid = None if pid is None else _as_int(pid, source, f"{path}.pid")
+        if value is None:
+            return None
 
-    did = field("did")
-    did = None if did is None else _as_int(did, source, f"{path}.did")
+        return REQUEST_FIELD_VALIDATORS[name](value, source, f"{path}.{name}")
 
-    service = field("service", 0x01 if protocol == "obd" else None)
-    service = None if service is None else _as_int(service, source, f"{path}.service")
-
-    payload = field("payload")
-    payload = (
-        None if payload is None else _byte_seq(payload, source, f"{path}.payload")
-    )
+    protocol = checked("protocol", "obd")
+    transport = checked("transport", "diagnostic")
+    pid = checked("pid")
+    did = checked("did")
+    service = checked("service", 0x01 if protocol == "obd" else None)
+    payload = checked("payload")
 
     #
     # `setup:` is an ordered list of payloads sent once per session before
@@ -700,13 +976,28 @@ def _request(
             "a uds request needs a did or an explicit payload", source, path
         )
 
-    if pid is not None and not 0 <= pid <= 0xFF:
-        raise InvalidFieldError(f"pid out of range: {pid}", source, f"{path}.pid")
+    #
+    # An identifier the protocol does not use would be carried on the
+    # RequestDef and never sent: `did:` on an obd request looks like it
+    # selects something and selects nothing.
+    #
+    if protocol == "obd" and did is not None:
+        raise InvalidFieldError(
+            "an obd request is addressed by pid, not did", source, f"{path}.did"
+        )
 
-    if did is not None and not 0 <= did <= 0xFFFF:
-        raise InvalidFieldError(f"did out of range: {did}", source, f"{path}.did")
+    if protocol == "uds" and pid is not None:
+        raise InvalidFieldError(
+            "a uds request is addressed by did, not pid", source, f"{path}.pid"
+        )
 
-    target = _target(field("target"), source, f"{path}.target")
+    if protocol == "raw" and did is not None:
+        raise InvalidFieldError(
+            "a raw request carries its identifier in the payload, not did",
+            source, f"{path}.did",
+        )
+
+    target = checked("target") or Target()
 
     if target.address is None and target.name is None:
         raise MissingFieldError("request has no target", source, f"{path}.target")
@@ -715,25 +1006,7 @@ def _request(
         data.get("response"), protocol, service, pid, did, source, f"{path}.response"
     )
 
-    polling = data.get("polling", defaults.get("polling"))
-    polling_class = "slow"
-    polling_pair = ""
-
-    if isinstance(polling, dict):
-        polling_class = _as_str(
-            polling.get("class", "slow"), source, f"{path}.polling.class"
-        )
-        #: Optional. Requests sharing a tag inside a staggered class are
-        #: sent together rather than in consecutive rotation slots.
-        polling_pair = _as_str(
-            polling.get("pair", ""), source, f"{path}.polling.pair"
-        )
-    elif isinstance(polling, str):
-        polling_class = polling
-    elif polling is not None:
-        raise InvalidFieldError(
-            "polling must be a class name or a mapping", source, f"{path}.polling"
-        )
+    polling_class, polling_pair = checked("polling") or ("slow", "")
 
     provenance = _provenance(
         data.get("source"), source, f"{path}.source", base_provenance
@@ -743,9 +1016,10 @@ def _request(
     )
 
     if "requires" in data and data["requires"] is not None:
+        requires_raw = _as_dict(data["requires"], source, f"{path}.requires")
+        _only(requires_raw, FIELDS_REQUIRES, source, f"{path}.requires")
         requires = _capabilities(
-            _as_dict(data["requires"], source, f"{path}.requires").get("capability"),
-            source, f"{path}.requires.capability",
+            requires_raw.get("capability"), source, f"{path}.requires.capability",
         )
     elif protocol == "obd" and pid is not None:
         #
@@ -801,7 +1075,13 @@ def _request(
 
         signals.append(signal)
 
-    timeout = data.get("timeout")
+    #
+    # Inherited like the other wire-level fields. It was read from the
+    # request block alone until 2026-09-03, so `defaults.request.timeout:
+    # 0.4` in the EGS and KOMBI candidates never applied and those ECUs
+    # were polled on the transport's 3 s default.
+    #
+    timeout = checked("timeout")
 
     return RequestDef(
         id=request_id,
@@ -819,9 +1099,7 @@ def _request(
         polling_class=polling_class,
         polling_pair=polling_pair,
         requires=requires,
-        timeout=None if timeout is None else _as_float(
-            timeout, source, f"{path}.timeout"
-        ),
+        timeout=timeout,
         provenance=provenance,
         verification=verification,
         order=order,
@@ -842,6 +1120,7 @@ def _derived(
     order: int,
 ) -> DerivedDef:
     data = _as_dict(raw, source, path)
+    _only(data, FIELDS_DERIVED, source, path)
     operation = _as_str(
         _require(data, "operation", source, path), source, f"{path}.operation"
     )
@@ -886,6 +1165,7 @@ def _derived(
     scale_config: Optional[str] = None
 
     if isinstance(scale_raw, dict):
+        _only(scale_raw, FIELDS_DERIVED_SCALE, source, f"{path}.scale")
         scale_config = _as_str(
             _require(scale_raw, "config", source, f"{path}.scale"),
             source, f"{path}.scale.config",
@@ -982,14 +1262,10 @@ def _polling_classes(raw: Any, source: str, path: str) -> Tuple[PollingClassDef,
         # load with a default period and poll at the wrong rate in
         # silence.
         #
-        for retired in ("hz", "every", "cycles"):
-            if retired in spec:
-                raise InvalidFieldError(
-                    f"polling class {name!r} uses {retired!r}, which was "
-                    f"replaced by `seconds` (one unit, wall clock). "
-                    f"Write the period in seconds instead.",
-                    source, f"{path}.{name}.{retired}",
-                )
+        _only(
+            spec, FIELDS_POLLING_CLASS, source, f"{path}.{name}",
+            RETIRED_FIELDS["polling_class"],
+        )
 
         if "seconds" not in spec:
             raise InvalidFieldError(
@@ -1010,7 +1286,9 @@ def _polling_classes(raw: Any, source: str, path: str) -> Tuple[PollingClassDef,
             period=value,
             priority=_as_int(spec.get("priority", index), source,
                              f"{path}.{name}.priority"),
-            stagger=bool(spec.get("stagger", False)),
+            stagger=_as_bool(
+                spec.get("stagger"), source, f"{path}.{name}.stagger", False
+            ),
         ))
 
     return tuple(out)
@@ -1035,14 +1313,18 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
 
     version = document["schema_version"]
 
-    if version not in SCHEMA_VERSIONS:
+    #: `True == 1` in Python; `schema_version: true` is not version 1.
+    if isinstance(version, bool) or version not in SCHEMA_VERSIONS:
         raise UnsupportedSchemaVersion(
             f"schema_version {version!r} is not supported; this build "
             f"understands {', '.join(str(v) for v in SCHEMA_VERSIONS)}",
             source, "schema_version",
         )
 
+    _only(document, FIELDS_DOCUMENT, source, "")
+
     meta = _as_dict(_require(document, "mapping", source, ""), source, "mapping")
+    _only(meta, FIELDS_MAPPING, source, "mapping")
     mapping_id = _as_str(
         _require(meta, "id", source, "mapping"), source, "mapping.id"
     )
@@ -1055,22 +1337,25 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
     )
 
     ecu_raw = _as_dict(document.get("ecu"), source, "ecu")
+    _only(ecu_raw, FIELDS_ECU, source, "ecu")
+    match_raw = _as_dict(ecu_raw.get("match"), source, "ecu.match")
+    _only(match_raw, FIELDS_MATCH, source, "ecu.match")
     ecu = EcuDef(
         family=_as_str(ecu_raw.get("family", "unknown"), source, "ecu.family"),
         target=_target(ecu_raw.get("target"), source, "ecu.target"),
-        sgbd=ecu_raw.get("sgbd"),
-        variant=ecu_raw.get("variant"),
-        hardware=ecu_raw.get("hardware"),
-        software=ecu_raw.get("software"),
+        sgbd=_as_opt_str(ecu_raw.get("sgbd"), source, "ecu.sgbd"),
+        variant=_as_opt_str(ecu_raw.get("variant"), source, "ecu.variant"),
+        hardware=_as_opt_str(ecu_raw.get("hardware"), source, "ecu.hardware"),
+        software=_as_opt_str(ecu_raw.get("software"), source, "ecu.software"),
         match=_capabilities(
-            _as_dict(ecu_raw.get("match"), source, "ecu.match").get("capability"),
-            source, "ecu.match.capability",
+            match_raw.get("capability"), source, "ecu.match.capability",
         ),
     )
 
-    defaults = _as_dict(
-        _as_dict(document.get("defaults"), source, "defaults").get("request"),
-        source, "defaults.request",
+    defaults_raw = _as_dict(document.get("defaults"), source, "defaults")
+    _only(defaults_raw, FIELDS_DEFAULTS, source, "defaults")
+    defaults = _request_defaults(
+        defaults_raw.get("request"), source, "defaults.request"
     )
 
     if "target" not in defaults and (
@@ -1130,7 +1415,9 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
             meta.get("description", ""), source, "mapping.description"
         ),
         version=_mapping_version(meta, source),
-        production=bool(meta.get("production", True)),
+        production=_as_bool(
+            meta.get("production"), source, "mapping.production", True
+        ),
         ecu=ecu,
         requests=tuple(requests),
         derived=tuple(derived),

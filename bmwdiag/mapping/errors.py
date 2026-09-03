@@ -49,6 +49,16 @@ class InvalidFieldError(MappingError):
     """A key is present but holds a value of the wrong shape or type."""
 
 
+class UnknownFieldError(MappingError):
+    """
+    A key this schema object does not define.
+
+    Raised rather than ignored: a misspelt `prodution: false` that fell
+    back to the default would put a candidate file into the production
+    set in silence, and a mapping decides which bytes reach the car.
+    """
+
+
 class DuplicateRequestError(MappingError):
     """Two requests claim the same id."""
 
