@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dynamic
-  version: 3
+  version: 4
   production: false
   description: >
     F-series N47 dynamic (0xF303) measurements from the d72n47a0
@@ -61,7 +61,10 @@ verification:
     ITMOT (4BC3) was disassembly-derived at authoring; it is now
     on-car confirmed.
   vehicle: F10-520d-dev (WBAFW...; VIN in local/VEHICLES.md)
-  source_vehicle: F25-X3-N47 (original pcap evidence)
+  notes: >
+    Original pcap evidence is from another vehicle, F25-X3-N47. (Was a
+    `source_vehicle:` key until v4; the loader had no such field and
+    silently dropped it.)
 
 ecu:
   family: engine

@@ -38,6 +38,7 @@ could differ and nothing would say so. The mode NAME is stored as plain
 text beside it, so the common query stays readable.
 """
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Tuple
@@ -189,11 +190,21 @@ def _positive_int(raw: Any, source: str, path: str) -> int:
     return raw
 
 
+def _positive_finite(raw: Any) -> bool:
+    """A number that scales a period: not a bool, not NaN, not infinite."""
+    return (
+        not isinstance(raw, bool)
+        and isinstance(raw, (int, float))
+        and math.isfinite(raw)
+        and raw > 0
+    )
+
+
 def _multiplier(raw: Any, source: str, mode: str, cls: str) -> float:
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+    if not _positive_finite(raw):
         raise MappingError(
             f"{source}: modes.{mode}.multipliers.{cls} must be a positive "
-            f"number, got {raw!r}"
+            f"finite number, got {raw!r}"
         )
 
     return float(raw)
@@ -214,11 +225,10 @@ def _duty(raw: Any, source: str, mode: str) -> Optional[Tuple[float, float]]:
     for key in ("awake", "asleep"):
         value = raw.get(key)
 
-        if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or value <= 0:
+        if not _positive_finite(value):
             raise MappingError(
                 f"{source}: modes.{mode}.duty.{key} must be a positive "
-                f"number of seconds, got {value!r}"
+                f"finite number of seconds, got {value!r}"
             )
 
         out.append(float(value))
@@ -289,6 +299,15 @@ def load_modes(path: Optional[str] = None) -> ModeTable:
 
     if not isinstance(document, dict):
         raise MappingError(f"{source}: expected a mapping at the top level")
+
+    unknown = set(document) - {"schema_version", "id", "version", "default",
+                               "modes"}
+
+    if unknown:
+        raise MappingError(
+            f"{source}: unknown top-level key(s) "
+            f"{', '.join(sorted(str(k) for k in unknown))}"
+        )
 
     raw_modes = document.get("modes")
 
