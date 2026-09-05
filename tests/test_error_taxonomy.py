@@ -305,6 +305,29 @@ class FromTheWire(unittest.TestCase):
 
         self.assertEqual(ctx.exception.reason, "not_connected")
 
+    def test_a_fin_queued_before_the_request_is_a_link_error_and_sends_nothing(self):
+        """
+        Review defect on #34: the pre-request drain in `_discard_queued`
+        raises HsfzLinkError("closed") when recv() returns b"" - and
+        that raise sat inside `except (BlockingIOError, OSError): pass`.
+        Once HsfzLinkError became a ConnectionError (an OSError) the
+        clause swallowed it: the request went out on a dead socket, the
+        failure surfaced later as an HsfzTimeout, and an outstanding
+        record was left dangling. The link error must win, before any
+        byte is sent, with nothing left outstanding.
+        """
+        client, sock, clock = make_client()
+        sock.inbox.append((0.0, b""))          # FIN already queued
+
+        with self.assertRaises(live.HsfzLinkError) as ctx:
+            client.request(bytes.fromhex("22 F3 03"), timeout=0.4, dst=DDE)
+
+        self.assertEqual(ctx.exception.reason, "closed")
+        self.assertIsInstance(ctx.exception, ConnectionError)
+        self.assertEqual(sock.bodies_sent(), [])
+        self.assertEqual(client.link_stats()["outstanding"], [])
+        self.assertEqual(fault_kind(ctx.exception), "transport_link")
+
 
 # ------------------------------------------------------- request_safe
 

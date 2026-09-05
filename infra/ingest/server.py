@@ -100,7 +100,14 @@ def ch_insert(table: str, rows: List[Dict[str, Any]]) -> None:
 
     body = "\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
     query = f"INSERT INTO {CH_DB}.{table} FORMAT JSONEachRow"
-    url = f"{CH_URL}/?query={urllib.parse.quote(query)}"
+    #
+    # The ingest may send a field the table does not (yet) have - the
+    # sync agent can run ahead of a lake migration, or behind one. That
+    # only works because ClickHouse skips unknown JSON fields; pin the
+    # setting rather than rely on the server default staying 1.
+    #
+    url = (f"{CH_URL}/?query={urllib.parse.quote(query)}"
+           "&input_format_skip_unknown_fields=1")
 
     request = urllib.request.Request(
         url, data=body.encode("utf-8"), method="POST"
