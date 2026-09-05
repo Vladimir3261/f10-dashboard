@@ -44,10 +44,18 @@ TRACKING = {
     "boost": {
         "actual": "n47d_boost_act", "setpoint": "n47d_boost_set", "unit": "hPa",
         "label": "boost tracking (actual - setpoint)",
+        #: What the read gap alone injects under transients - the figure
+        #: behind the pairing tolerance in `analysis/alignment.py`.
+        "transient_error": "up to ~140 hPa p90 on boost, lake measurement "
+                           "over 0.56 s (analysis/alignment.py)",
     },
     "rail": {
         "actual": "n47d_rail_act", "setpoint": "n47d_rail_set", "unit": "bar",
         "label": "rail pressure tracking (actual - setpoint)",
+        "transient_error": "not measured for rail: the two reads never "
+                           "aligned on the lake's clock-synced sessions "
+                           "(flow mapping v2 schedule), so the size of the "
+                           "gap's own error is unknown",
     },
 }
 
@@ -246,6 +254,22 @@ def warmup_model(trips: Sequence[TripData], definition: BaselineDefinition,
             ]
             comparison = compare(observations, definition, per_trip=True,
                                  context_flags=flags, digits=1)
+            #
+            # Survivorship: a crossing metric only sees the trips that
+            # reached its target, and a SLOWER warm-up is exactly what
+            # makes a trip fail to reach it - so the metric under-detects
+            # slowing. The fraction is reported per cell so the effect is
+            # visible, and noted when it is not 1.
+            #
+            reached = len(observations)
+            reached_fraction = round(reached / len(in_band), 2) if in_band else None
+            survivorship = (
+                [f"{len(in_band) - reached} of {len(in_band)} cold start(s) in "
+                 f"this band never produced {name} (trip ended first); a "
+                 f"slower warm-up is the likeliest reason, so a slowing "
+                 f"trend is under-detected here"]
+                if reached_fraction is not None and reached_fraction < 1.0 else []
+            )
             metric = HealthMetric(
                 model="warmup", metric=name, unit=unit,
                 condition={
@@ -258,6 +282,8 @@ def warmup_model(trips: Sequence[TripData], definition: BaselineDefinition,
                 drift=comparison.drift,
                 sample_count=sum(len(o.values) for o in observations),
                 coverage=dict(comparison.coverage, cold_starts_in_band=len(in_band),
+                              cold_starts_reached=reached,
+                              reached_fraction=reached_fraction,
                               trips_in_population=len(population.trips),
                               not_cold_starts=not_cold),
                 quality_filters=list(QUALITY_FILTER_TEXT),
@@ -276,6 +302,8 @@ def warmup_model(trips: Sequence[TripData], definition: BaselineDefinition,
                     for f in in_band
                 ],
             )
+
+            metric.notes.extend(survivorship)
 
             if flags:
                 metric.notes.extend(flags)
@@ -333,9 +361,23 @@ def _warmup_trip(trip: TripData, d: BaselineDefinition) -> Optional[Dict[str, An
             round(at - coolant[idx - 1][0], 1) if idx > 0 else None
         )
 
-    ramp_end = crossings.get(80.0) or coolant[-1][0]
+    #
+    # The slope is defined over the ramp to the 80 °C crossing and ONLY
+    # there. A trip that ended before 80 °C has a ramp that stops
+    # wherever the trip did, and the slope of a truncated exponential is
+    # steeper than the slope of the whole of it - pooling the two would
+    # make "drift" a function of trip length, and short winter trips are
+    # routine on this car. So: no crossing, no slope, and the flag is
+    # echoed so the reader can see which trips were complete.
+    #
+    t80 = crossings.get(80.0)
+    out["ramp_complete"] = t80 is not None
+    ramp_end = t80 if t80 is not None else coolant[-1][0]
     ramp = [(t - t0, v) for t, v in coolant if t <= ramp_end]
-    slope = least_squares_slope(ramp) if len(ramp) >= 3 else None
+    slope = (
+        least_squares_slope(ramp)
+        if t80 is not None and len(ramp) >= 3 else None
+    )
     out["warmup_slope_c_per_min"] = None if slope is None else round(slope * 60.0, 2)
 
     oil60 = first_crossing(oil, 60.0) if oil else None
@@ -349,7 +391,6 @@ def _warmup_trip(trip: TripData, d: BaselineDefinition) -> Optional[Dict[str, An
     # so a long idle at a light is not mistaken for the cruising plateau.
     #
     stabilised = None
-    t80 = crossings.get(80.0)
 
     if t80 is not None:
         tolerance = pairing_for(coolant_key, "speed").max_age_s
@@ -600,8 +641,8 @@ def tracking_model(kind: str, trips: Sequence[TripData],
             extra_notes=[
                 "transient pairs pooled across operating points: the "
                 f"{alignment.get('median_gap_s')} s between the two reads "
-                "injects error of its own here (up to ~140 hPa p90 on boost, "
-                "measured); descriptive only"
+                f"injects error of its own here ({spec['transient_error']}); "
+                "descriptive only"
             ],
         ))
 
