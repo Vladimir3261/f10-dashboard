@@ -92,6 +92,12 @@ vehicle `F10-520d-dev`. They remain `production: false`: wiring them into
 the live runtime needs a variant-aware capability provider (the
 `sgbd_variant` match), which is a separate integration step — see below.
 
+> **Superseded (2026-09-05):** the runtime integration below is done —
+> `run_car.sh` loads these files via `--extra-mappings`, and the match is
+> now `diagnostic_profile` (compatibility, proven by a nominated probe)
+> rather than the retired `sgbd_variant`; the exact SGBD stays `unknown`
+> until identity evidence exists. See `docs/MAPPING_ARCHITECTURE.md`.
+
 ## What is NOT yet done
 
 - **Runtime integration.** These are verified but not yet polled by
