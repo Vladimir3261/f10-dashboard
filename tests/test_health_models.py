@@ -320,6 +320,66 @@ class StableBaseline(unittest.TestCase):
         self.assertIn("unavailable - requested/actual not yet mapped", text)
 
 
+class ShortColdTrip(unittest.TestCase):
+    """
+    A cold trip that ends before 80 °C has no warm-up slope, and says
+    so. The slope of a truncated ramp is steeper than the slope of the
+    whole ramp (the exponential flattens), so pooling it unflagged with
+    complete ramps would make "drift" a function of trip length - and
+    short winter trips are routine on this car.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        synth = Synth(seed=3)
+        trips = [synth.trip(i) for i in range(8)]
+        #: two 150 s cold trips inside the current window
+        trips[5] = synth.trip(5, duration_s=150.0)
+        trips[7] = synth.trip(7, duration_s=150.0)
+        cls.report = build_report(build(trips))
+
+    def observation(self, metric, uid):
+        return next(o for o in metric.observations if o["trip_uid"] == uid)
+
+    def test_a_truncated_ramp_has_no_slope(self):
+        slope = metrics_of(self.report, "warmup", "warmup_slope")[0]
+        short = self.observation(slope, "synthetic-05")
+
+        self.assertFalse(short["ramp_complete"])
+        self.assertIsNone(short["time_to_80c_s"])
+        self.assertIsNone(short["warmup_slope_c_per_min"],
+                          "a slope with no 80 °C crossing is a slope of "
+                          "the trip length, not of the engine")
+        full = self.observation(slope, "synthetic-04")
+        self.assertTrue(full["ramp_complete"])
+        self.assertIsNotNone(full["warmup_slope_c_per_min"])
+
+    def test_the_short_trips_do_not_reach_the_pooled_figure(self):
+        slope = metrics_of(self.report, "warmup", "warmup_slope")[0]
+        #: 8 cold starts in the band, 6 reached 80 °C: not the 5 + 3
+        #: the definition needs, so the metric is unavailable rather
+        #: than computed on a mix of complete and truncated ramps
+        self.assertEqual(slope.coverage["cold_starts_in_band"], 8)
+        self.assertEqual(slope.coverage["cold_starts_reached"], 6)
+        self.assertAlmostEqual(slope.coverage["reached_fraction"], 0.75)
+        self.assertFalse(slope.available)
+        self.assertIn("insufficient trips", slope.unavailable_reason)
+        self.assertTrue(any("under-detected" in n for n in slope.notes), slope.notes)
+
+    def test_survivorship_is_reported_per_target(self):
+        t60 = metrics_of(self.report, "warmup", "time_to_60c")[0]
+        t90 = metrics_of(self.report, "warmup", "time_to_90c")[0]
+        #: from 14 °C at tau 360 the 60 °C crossing is at 360*ln(79/33)
+        #: = 314 s, so a 150 s trip reaches none of the targets
+        self.assertEqual(t60.coverage["cold_starts_reached"], 6)
+        self.assertEqual(t90.coverage["cold_starts_reached"], 6)
+        self.assertEqual(t60.coverage["reached_fraction"], 0.75)
+        #: a complete band carries the fraction too, at 1, with no note
+        complete = metrics_of(build_report(stable_drives()), "warmup", "time_to_60c")[0]
+        self.assertEqual(complete.coverage["reached_fraction"], 1.0)
+        self.assertFalse(any("under-detected" in n for n in complete.notes))
+
+
 class GradualDrift(unittest.TestCase):
     """A controlled drift across the eight drives is detected, and graded."""
 

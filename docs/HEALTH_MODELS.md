@@ -106,8 +106,8 @@ no result can be computed against a baseline nobody can name. The
 | `min_trip_observations_per_side` | 3 | per-trip metrics (warm-up): the smallest count whose median is not an extreme |
 | `material_fraction_of_spread` | 0.5 | a shift is material when the current median moves by at least half the baseline's own p10–p90 spread |
 | `drift_z` | 2.0 | rank-sum \|z\| at the conventional two-sided ~5 % level |
-| `steady_window_s` / `steady_rpm_range` / `steady_pedal_range_pct` | 2 s / 50 rpm / 2 % | *lake measurement*, 623 boost pairs: residual p10–p90 spread is 34 hPa when RPM stays within 50 over ±2 s, 283 hPa in the 50–100 band, 460–760 above; pedal within 2 % gives 41 hPa against 181+. A ±1 s window gave 50 hPa, ±3 s gave 28 hPa with fewer samples; ±2 s chosen |
-| `steady_min_context_samples` | 4 | fewer motion-tier samples in the window and the pair is *unassessed* (neither steady nor transient) |
+| `steady_window_s` / `steady_rpm_range` / `steady_pedal_range_pct` | 2 s / 50 rpm / 2 % | *lake measurement*, 623 boost pairs: residual p10–p90 spread is 34 hPa when RPM stays within 50 over ±2 s, 283 hPa in the 50–100 band, 460–760 above; pedal within 2 % gives 41 hPa against 181+. A ±1 s window gave 50 hPa, ±3 s gave 28 hPa with fewer samples; ±2 s chosen. **Provisional and circular**: the constants were chosen to minimise the residual spread on the same 623 pairs the model is then run over, so on today's lake they are tuned to the data rather than validated against it. They should be re-derived on a held-out set of drives once there are enough, and the definition `version` bumped if they move |
+| `steady_min_context_samples` | 4 | fewer motion-tier samples in the window and the pair is *unassessed* (neither steady nor transient). Chosen against the 10 Hz motion tier (≈ 40 samples in ±2 s). When the demand channel falls back to OBD `load` (the `control_ctx` tier, 1 s) the window holds only ~5 samples, so the gate is barely met and the range test rests on 4–5 points; a `load`-gated cell is a coarser judgement of "steady" than a `pedal`-gated one, and the observation's `demand` channel name says which applies |
 | `rpm_bins` | 600–1000, 1000–1500, 1500–2000, 2000–2500, 2500–3000, 3000–5000 | operating-condition cells; conventional diesel bands |
 | `demand_bins_pct` | 0–3, 3–15, 15–40, 40–100 | pedal (preferred, 10 Hz beside RPM), `n47d_pedal`, then `load` |
 | `cold_start_max_c` | 40 °C | a trip is a cold start when its first coolant reading is below this: under the thermostat, above any ambient the car sees |
@@ -135,7 +135,10 @@ rule it evaluated is in `confidence.rules`, the failing ones in
 | `high` | `moderate` plus: ≥ 100 samples from ≥ 3 trips on each side (per-trip metrics: ≥ 5 trips per side), alignment coverage ≥ 80 %, no context-channel version flag |
 
 Coverage rules are vacuous for per-trip warm-up figures (no pairwise
-alignment step); the alignment block says so.
+alignment step); the alignment block says so. Note that under the
+default definition (current window of 3 trips) a per-trip metric can
+never reach `high`: see "What per-trip drift can and cannot say" under
+the warm-up model.
 
 ## Drift — the rule, stated
 
@@ -172,6 +175,38 @@ coolant and oil channels the trip actually used (`n47d_coolant` before
 observation per trip; minimum 3 per side; `high` needs 5 per side.
 Cooling after shutdown: not observed, not modelled.
 
+**Truncated ramps.** `warmup_slope` exists only for a trip whose coolant
+crossed 80 °C; a trip that ended first has `warmup_slope_c_per_min:
+null` and `ramp_complete: false`. The slope of a truncated exponential
+is steeper than the slope of the whole ramp, so pooling the two would
+make "drift" a function of trip length — and short winter trips are
+routine on this car. The ramp context (`moving_fraction`,
+`load_mean_pct`, `ambient_c`) is still computed for an incomplete trip,
+over what there was of the ramp.
+
+**Survivorship.** A crossing metric (`time_to_60c` / `_80c` / `_90c`,
+`warmup_slope`, `stabilised_coolant`, `oil_lag_to_60c`) only sees the
+trips that reached its target — and a *slower* warm-up is exactly what
+makes a trip fail to reach it. The metric therefore **under-detects
+slowing**: the trips that would have carried the evidence are the ones
+missing from it. So every warm-up metric reports, under `coverage`,
+`cold_starts_in_band`, `cold_starts_reached` and `reached_fraction`,
+and carries a note whenever the fraction is below 1. A falling
+`reached_fraction` over time is itself a warm-up signal, and the honest
+one when the metric says "no change".
+
+**What per-trip drift can and cannot say.** With the default 5
+reference + 3 current trips the rank-sum |z| has a ceiling of 2.236
+(U ∈ [0, 15]), so `supported` (|z| ≥ 2.0) needs complete separation of
+the two sides with at most one cross-group tie: every current trip
+beyond every baseline trip. That is a deliberately hard bar for eight
+observations. And a per-trip metric can **never grade `high`** under the
+default definition — `high` needs 5 trips on each side and the current
+window holds 3 — so `detected` per trip tops out at `moderate`. To reach
+`high`, run with `--current-trips 5` (10 cold starts in the same ambient
+band, 5 + 5); the |z| ceiling then rises to 2.61 and `supported` allows
+at most two of the 25 cross-group comparisons to go the other way.
+
 ### boost tracking
 
 Residual = `n47d_boost_act` − `n47d_boost_set` (hPa) on pairs aligned
@@ -189,7 +224,10 @@ transients, so no drift claim rests on it.
 ### rail-pressure tracking
 
 The same shape on `n47d_rail_act` − `n47d_rail_set` (bar), the same 1.0 s
-tolerance, the same gate and cells.
+tolerance, the same gate and cells. The transient note is per model
+(`TRACKING[kind]["transient_error"]`): for rail the gap's own error is
+**not measured** — the two reads never aligned on the lake's clock-synced
+sessions — and the note says so rather than borrowing the boost figure.
 
 ### EGR
 
@@ -214,7 +252,8 @@ identifier read or printed:
   the 1.0 s tolerance and the model reports "the pair never aligned … a
   schedule fact, not a car fact". The tolerance was not loosened; the
   fix is on the polling side: the flow mapping has declared
-  `polling: {pair: rail}` since v3 (2026-09-02), so the two reads share
+  `polling: {pair: rail}` since v3 (commit `21bc171`, authored
+  2026-09-01), so the two reads share
   one rotation slot on drives recorded after that; the clock-synced
   sessions in the lake all predate it (flow v2).
 - Charge-air temperature moves 0.1 °C median / 0.7 °C p90 across one
