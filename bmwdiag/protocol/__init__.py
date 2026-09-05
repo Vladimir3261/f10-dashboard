@@ -6,6 +6,15 @@ testable, and diffable against captured traffic, without a socket, a
 gateway or a car anywhere in the picture.
 """
 
+from .errors import (
+    DiagnosticError,
+    LinkError,
+    NegativeResponse,
+    RequestTimeout,
+    ResponseMismatch,
+    RoutingNack,
+    TransportError,
+)
 from .request import (
     DecodedResponse,
     DiagnosticRequest,
@@ -21,10 +30,17 @@ from .safety import (
 
 __all__ = [
     "DecodedResponse",
+    "DiagnosticError",
     "DiagnosticRequest",
     "DiagnosticTransport",
+    "LinkError",
+    "NegativeResponse",
     "ObdPidReader",
     "ObservationalTransport",
+    "RequestTimeout",
+    "ResponseMismatch",
+    "RoutingNack",
+    "TransportError",
     "UnsafePayload",
     "assert_observational",
     "build_request",

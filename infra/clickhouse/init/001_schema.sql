@@ -142,9 +142,23 @@ CREATE TABLE IF NOT EXISTS telemetry.channel_errors
     session_id   UInt64,
     ts           DateTime64(3, 'UTC'),
     request_id   LowCardinality(String),
-    kind         LowCardinality(String),      -- transport_nack | transport_timeout
-                                              -- | transport_link | decode | other
+    -- The category, and the only thing to GROUP BY:
+    --   transport_link      the socket died (reconnect)
+    --   transport_nack      the gateway refused to route to the target
+    --   transport_timeout   no answer within the request's deadline
+    --   negative_response   the ECU answered 7F <service> <nrc>
+    --   response_mismatch   an answer of the wrong shape
+    --   no_response         an OBD PID the ECU left out of its reply
+    --   decode              bytes came back and could not be decoded
+    --   other               unclassified
+    kind         LowCardinality(String),
     message      String,
+    -- The structured half, as a JSON object: {"nrc":49,"nrc_hex":"0x31",
+    -- "nrc_name":"requestOutOfRange","service":34,"raw":"7f 22 31",
+    -- "target":18} for a negative response, {"target":24} for a NACK,
+    -- {"reason":"reset"} for a dead link. '' before it was recorded.
+    -- Read with JSONExtractUInt(detail, 'nrc') and friends.
+    detail       String DEFAULT '',
     mapping_ver  LowCardinality(String) DEFAULT '',
     ingested_at  DateTime64(3, 'UTC') DEFAULT now64(3)
 )

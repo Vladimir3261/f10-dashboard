@@ -75,9 +75,11 @@ class ReadOnlyGate(unittest.TestCase):
 
     def test_gate_transport_records_a_negative_response_as_data(self):
         """An NRC is captured in the frame log, not raised."""
+        from bmwdiag.protocol.errors import NegativeResponse
+
         class Nrc:
             def request(self, payload, *, dst, timeout=None):
-                raise vc.live.HsfzError("negative response to 0x22: NRC 0x31")
+                raise NegativeResponse(0x22, 0x31, hexb("7F 22 31"), 0x12)
 
         log = []
         gated = vc.GatedTransport(Nrc(), log)
@@ -85,7 +87,12 @@ class ReadOnlyGate(unittest.TestCase):
 
         self.assertEqual(out, b"")
         self.assertEqual(len(log), 1)
-        self.assertIn("NRC 0x31", log[0]["nrc"])
+        #: Numerically, with the readable forms beside it - never the
+        #: exception's sentence.
+        self.assertEqual(log[0]["nrc"], 0x31)
+        self.assertEqual(log[0]["nrc_hex"], "0x31")
+        self.assertEqual(log[0]["nrc_name"], "requestOutOfRange")
+        self.assertEqual(log[0]["service"], "0x22")
 
 
 class Redaction(unittest.TestCase):
