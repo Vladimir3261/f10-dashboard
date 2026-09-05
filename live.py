@@ -267,7 +267,7 @@ def load_extra(registry: MappingRegistry, paths: Sequence[str]) -> MappingRegist
 
     These files carry `production: false`, so they are loaded with the
     filter off; they still only activate on an ECU that satisfies their
-    capability match (see the variant probe in the poll loop).
+    capability match (the profile probe at connect, `bmwdiag.variant`).
     """
     for path in paths:
         for mapping in load_tree(path, production_only=False):
@@ -4325,7 +4325,8 @@ def main() -> int:
                          "verified-but-non-production files (e.g. the "
                          "F-series N47 dynamic channels under "
                          "mappings/candidates/bmw/dde/n47). Each activates "
-                         "only on an ECU that answers its variant probe. "
+                         "only on an ECU that answers a probe the file "
+                         "nominates for its diagnostic profile. "
                          "Repeatable.")
     ap.add_argument("--scan-timeout", type=float, default=0.3,
                     help="per-address probe timeout during ECU scan")

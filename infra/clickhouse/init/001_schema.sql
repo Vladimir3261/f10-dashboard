@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS telemetry.channel_errors
     ts           DateTime64(3, 'UTC'),
     request_id   LowCardinality(String),
     kind         LowCardinality(String),      -- transport_nack | transport_timeout
-                                              -- | transport_link | decode | other
+                                              -- | transport_link | no_response
+                                              -- | negative_response | decode | other
     message      String,
     mapping_ver  LowCardinality(String) DEFAULT '',
     ingested_at  DateTime64(3, 'UTC') DEFAULT now64(3)

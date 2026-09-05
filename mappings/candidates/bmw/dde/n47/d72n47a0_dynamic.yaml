@@ -3,10 +3,10 @@ schema_version: 1
 # ================================================ VERIFIED ON F10-520d-dev
 #
 # On-car confirmed 2026-08-25 (see verification: below and
-# validation-runs/). Still production: false - live.py does not load it
-# yet: wiring these into the runtime needs a variant-aware capability
-# provider (the `sgbd_variant` match below), which is a separate
-# integration step. The CLI, the tests and the validation runner use it.
+# validation-runs/). Still production: false - the production set stays
+# SAE-only; `run_car.sh` loads this file through `--extra-mappings`, and
+# it activates once the ECU answers a probe nominated below
+# (`ecu.match.probe`) for the `diagnostic_profile` it requires.
 #
 # ECU variant: d72n47a0 - "SGBD fuer N47TUe/N57TUe (DDE7.21/7.01/7.41)
 # verwendet in F0x, F1x, F2x, F3x (UDS, MV, FlexRay)" per the SGBD's own

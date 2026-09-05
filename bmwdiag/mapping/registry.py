@@ -580,7 +580,7 @@ class MappingRegistry:
                     dropped.append(Dropped(
                         "request", request.id, "capability",
                         "the ECU does not advertise "
-                        + ", ".join(_capability_text(c) for c in unmet),
+                        + ", ".join(_unmet_text(caps, c) for c in unmet),
                         mapping.id,
                     ))
                     continue

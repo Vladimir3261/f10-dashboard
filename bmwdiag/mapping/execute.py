@@ -151,6 +151,12 @@ def _is_request_fault(exc: Exception) -> bool:
     if isinstance(exc, TimeoutError):
         return True                     # this ECU did not answer in time
 
+    if isinstance(exc, NegativeResponse):
+        # The ECU itself answered `7F`: the link carried the request there
+        # and the reply back. It refused this one service or identifier,
+        # which says nothing about the next request. Skip and record it.
+        return True
+
     # A negative acknowledgement: the gateway is alive and refused to route
     # to one target (e.g. "gateway will not route to 0x18" for the EGS).
     return exc.__class__.__name__.endswith("Nack")
@@ -620,11 +626,12 @@ class MappingExecutor:
 
                 #
                 # A negative acknowledgement is the gateway ANSWERING, in
-                # order to refuse one target. That is positive evidence the
-                # link is alive, so it must not count towards concluding
-                # the link is dead - only silence can do that.
+                # order to refuse one target, and a negative response is
+                # the ECU answering to refuse one request. Both are
+                # positive evidence the link is alive, so neither may count
+                # towards concluding it is dead - only silence can do that.
                 #
-                if fault_kind(exc) != "transport_nack":
+                if fault_kind(exc) not in ("transport_nack", "negative_response"):
                     self._transport_faults += 1
 
                 faults = self._request_faults.get(request.id, 0) + 1

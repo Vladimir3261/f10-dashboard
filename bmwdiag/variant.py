@@ -86,8 +86,9 @@ class ProbeResult:
     request_id: str
     answered: bool
     #: Stable, groupable: "answered" | "wrong_prefix" | "short_response"
-    #: | a `fault_kind` ("negative_response", "transport_timeout",
-    #: "transport_nack", "transport_link", "other").
+    #: | "unsafe_payload" (our gate refused to send it: a mapping bug,
+    #: not the ECU) | a `fault_kind` ("negative_response",
+    #: "transport_timeout", "transport_nack", "transport_link", "other").
     reason: str
     #: Human detail: the NRC and the frame it refused, the bytes that
     #: came back, the exception text.
@@ -132,7 +133,10 @@ class ProfileResolution:
 
     def describe(self) -> str:
         if self.outcome == COMPATIBLE:
-            hit = next(p for p in self.probes if p.answered)
+            hit = next((p for p in self.probes if p.answered), None)
+
+            if hit is None:                 # hand-built, no probe record
+                return f"{COMPATIBLE}: {self.note or 'no probe recorded'}"
 
             return f"{COMPATIBLE}: {hit.request_id} answered"
 
@@ -350,6 +354,22 @@ class CombinedCapabilitySet(CapabilitySet):
 # ------------------------------------------------------------- probing
 
 
+def _probe_reason(exc: Exception) -> str:
+    """
+    The groupable reason a probe failed.
+
+    A frame our own safety gate refused never reached the car, so filing
+    it under `fault_kind`'s "other" would put a mapping bug in the same
+    bucket as an ECU that refused. It gets its own name.
+    """
+    from .protocol import UnsafePayload
+
+    if isinstance(exc, UnsafePayload):
+        return "unsafe_payload"
+
+    return fault_kind(exc)
+
+
 class ProfileProbe:
     """
     Resolves diagnostic profiles by replaying their nominated reads.
@@ -387,14 +407,14 @@ class ProfileProbe:
                     self._exchange(frame, dst)
                 except Exception as exc:
                     return ProbeResult(
-                        req.id, False, fault_kind(exc),
+                        req.id, False, _probe_reason(exc),
                         f"setup {frame.hex(' ')}: {exc}",
                     )
 
             payload = build_payload(req)
             response = self._exchange(payload, dst)
         except Exception as exc:
-            return ProbeResult(req.id, False, fault_kind(exc), str(exc))
+            return ProbeResult(req.id, False, _probe_reason(exc), str(exc))
 
         prefix = bytes(req.response.prefix)
 
@@ -467,6 +487,11 @@ def profile_nominations(
 
     A profile several files require is one nomination - its probes in
     mapping order, each request id once - so one connect probes it once.
+    "Mapping order" is the order the files were loaded: `run_car.sh`
+    lists them explicitly (dynamic first, so `4517` is the probe that
+    goes out); a directory given to `--extra-mappings` walks sorted, so
+    `dpf_egr`'s probe goes first there. Either way it is one probe when
+    the ECU answers - which is why the traffic stays at one define/read.
     A file that requires a profile but nominates nothing still puts the
     profile on the list: it resolves `unknown`, visibly, instead of the
     file vanishing from the profile without a word.

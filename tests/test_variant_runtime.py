@@ -34,6 +34,7 @@ from bmwdiag.variant import (
     IdentityFact,
     IdentityResolution,
     ProfileProbe,
+    ProfileResolution,
     profile_nominations,
 )
 
@@ -277,6 +278,34 @@ class Probing(unittest.TestCase):
                 self.assertEqual(
                     {p.reason for p in resolution.probes}, {reason}
                 )
+
+    def test_a_gate_refusal_is_a_mapping_bug_not_an_ecu_refusal(self):
+        """
+        A probe our own safety gate refuses to send never reached the car.
+        It must not land in the "ECU refused" bucket: `unsafe_payload` is
+        its own reason, so a broken nomination is visible as such.
+        """
+        from bmwdiag.protocol import UnsafePayload
+
+        class Gate:
+            def request(self, payload, *, dst, timeout=None):
+                raise UnsafePayload("service 0x2E is not observational")
+
+        identity = probe(Gate(), DYNAMIC)
+        [resolution] = identity.profiles.values()
+
+        self.assertEqual(resolution.outcome, UNSUPPORTED)
+        self.assertEqual(
+            {p.reason for p in resolution.probes}, {"unsafe_payload"}
+        )
+        self.assertIn("unsafe_payload", resolution.describe())
+
+    def test_a_hand_built_compatible_resolution_still_describes_itself(self):
+        """`describe()` feeds `/api/diagnostics`; it must never raise."""
+        bare = ProfileResolution("some-profile", COMPATIBLE)
+
+        self.assertEqual(bare.describe(), "compatible: no probe recorded")
+        self.assertEqual(bare.as_dict()["summary"], bare.describe())
 
     def test_a_profile_nobody_nominated_a_probe_for_is_unknown_not_false(self):
         text = text_of(DYNAMIC).replace(
