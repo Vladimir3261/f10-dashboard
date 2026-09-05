@@ -229,6 +229,11 @@ def build_channel_errors(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "request_id": r.get("request_id") or "",
             "kind": r.get("kind") or "other",
             "message": (r.get("message") or "")[:500],
+            #: JSON text: the structured fields of the fault (NRC, service,
+            #: target, elapsed_ms, pending). '' before issue #11 and for
+            #: faults outside the taxonomy. Passed through verbatim -
+            #: normalising it here would mean decoding it here.
+            "detail": (r.get("detail") or "")[:500],
             "mapping_ver": r.get("mapping_ver") or meta.get("mapping_ver", ""),
         })
 

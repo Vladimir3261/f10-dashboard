@@ -34,6 +34,13 @@ README's "Data and privacy" section).
 Nothing is promoted automatically — these artifacts are the evidence a
 human weighs before editing a mapping.
 
+A negative response in a frame is recorded as the **number** the ECU
+sent — `"nrc": 49` with `"nrc_hex": "0x31"`, `"nrc_name":
+"requestOutOfRange"`, `"service": 34` and, when the transport kept the
+frame, `"raw": "7f 22 31"` — since 2026-09-05 (issue #11). Runs before
+that date have `nrc` as prose (`"negative response to 0x22: NRC 0x31"`)
+or `null`; they are historical evidence and are not rewritten.
+
 The runner is **read-only**: every frame passes a service allowlist
 (`0x01/0x09/0x22/0x19/0x3E`, plus `0x2C` define/clear/read
 subfunctions) before it leaves the machine; write and control services
