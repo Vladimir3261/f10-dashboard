@@ -691,8 +691,12 @@
       </p>
       <p>
         Proprietary channels need a second, stricter probe. Rather than trusting
-        an identification string, we <strong>replay the mapping's own read</strong>
-        and see whether the ECU accepts it. A variant is confirmed by behaviour.
+        an identification string, we <strong>replay a read the mapping
+        nominates</strong> and see whether the ECU answers it in the declared
+        shape. That proves <em>compatibility</em> with a family of reads — it is
+        what activates the mapping — and nothing more: which exact SGBD revision
+        the ECU is stays <em>unknown</em> until identity evidence says otherwise,
+        and on this car the ident DIDs refuse.
       </p>
 
       <div class="panel">
@@ -700,7 +704,8 @@
         <ul class="notes">
           <li><span class="key">engine addr</span><span>0x12 — because it answered 0x0C, not because it is 0x12</span></li>
           <li><span class="key">supported PIDs</span><span>the 30-entry set this ECU advertises</span></li>
-          <li><span class="key">sgbd variant</span><span><code>d72n47a0</code>, confirmed by a read the ECU accepted</span></li>
+          <li><span class="key">profile</span><span><code>fseries-f303-d72-compatible</code>: compatible, because a nominated read answered — with the reason for every probe that did not</span></li>
+          <li><span class="key">exact SGBD</span><span>unknown — no identity evidence; the rows were <em>derived from</em> d72n47a0, which is provenance, not identity</span></li>
         </ul>
       </div>
     </div>
@@ -1009,6 +1014,7 @@ targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</sp
           <tbody>
             <tr><td class="mono">transport_nack</td><td>gateway will not route to that ECU — usually asleep</td><td>record, skip that request, carry on</td></tr>
             <tr><td class="mono">transport_timeout</td><td>the ECU did not answer in time</td><td>record, skip, carry on</td></tr>
+            <tr><td class="mono">negative_response</td><td>the ECU answered <code>7F</code> with an NRC — it is there, it just does not do this</td><td>record with the code, skip, carry on</td></tr>
             <tr><td class="mono">transport_link</td><td>the socket itself is gone</td><td>reconnect</td></tr>
             <tr><td class="mono">decode</td><td>bytes arrived but the mapping could not read them</td><td>record — this is a mapping bug</td></tr>
           </tbody>

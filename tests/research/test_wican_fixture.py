@@ -83,9 +83,10 @@ class CandidateMapping(unittest.TestCase):
 
     def test_capability_gate_disables_it_against_an_obd_ecu(self):
         """
-        Even force-loaded, the request requires an `sgbd_variant`
-        capability no existing provider understands - so resolution
-        against a real (OBD-discovered) ECU yields zero requests.
+        Even force-loaded, the file requires a `diagnostic_profile` the
+        OBD provider cannot answer - so resolution against a real
+        (OBD-discovered) ECU yields zero requests until a probe of its
+        nominated read has actually answered.
         """
         from bmwdiag.mapping import MappingRegistry
         from bmwdiag.obd import ObdCapabilitySet

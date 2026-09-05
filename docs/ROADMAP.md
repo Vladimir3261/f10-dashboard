@@ -149,7 +149,7 @@ clock and diagnostics paths. What remains:)*
 
 - No end-to-end test that the recorder persists proprietary channels
   (the `pid=NULL` path) under `--extra-mappings`.
-- No poll-loop-level test of the variant probe (only unit-level).
+- No poll-loop-level test of the profile probe (only unit-level).
 - No data-quality tests (no layer to test).
 - No test/measurement of F303 polling cost vs the fast-channel Hz.
 

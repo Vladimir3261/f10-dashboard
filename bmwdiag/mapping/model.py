@@ -163,6 +163,11 @@ class EcuDef:
     hardware: Optional[str] = None
     software: Optional[str] = None
     match: Tuple[Capability, ...] = ()
+    #: Request ids in this file that PROVE the `diagnostic_profile` the
+    #: match requires: the ECU is compatible when any one of them answers
+    #: in its declared shape. Explicit, in order - never "the first
+    #: request in the file", which made a reorder change what was probed.
+    probe: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

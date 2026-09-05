@@ -82,7 +82,9 @@ class AbsolutePressureCandidate(unittest.TestCase):
         self.signal = self.request.signals[0]
 
     def test_the_mapping_names_the_datum_explicitly(self):
-        self.assertEqual(self.mapping.version, 2)
+        #: v2 named the datum; v3 (2026-09-05) only re-declared the
+        #: match as a `diagnostic_profile` with a nominated probe.
+        self.assertEqual(self.mapping.version, 3)
         self.assertEqual(self.signal.key, "f10_oil_press_absolute")
         self.assertEqual(self.signal.label, "Oil pressure (absolute)")
         self.assertEqual(self.signal.unit, "mbar")

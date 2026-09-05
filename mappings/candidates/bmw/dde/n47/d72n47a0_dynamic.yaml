@@ -3,10 +3,10 @@ schema_version: 1
 # ================================================ VERIFIED ON F10-520d-dev
 #
 # On-car confirmed 2026-08-25 (see verification: below and
-# validation-runs/). Still production: false - live.py does not load it
-# yet: wiring these into the runtime needs a variant-aware capability
-# provider (the `sgbd_variant` match below), which is a separate
-# integration step. The CLI, the tests and the validation runner use it.
+# validation-runs/). Still production: false - the production set stays
+# SAE-only; `run_car.sh` loads this file through `--extra-mappings`, and
+# it activates once the ECU answers a probe nominated below
+# (`ecu.match.probe`) for the `diagnostic_profile` it requires.
 #
 # ECU variant: d72n47a0 - "SGBD fuer N47TUe/N57TUe (DDE7.21/7.01/7.41)
 # verwendet in F0x, F1x, F2x, F3x (UDS, MV, FlexRay)" per the SGBD's own
@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dynamic
-  version: 4
+  version: 5
   production: false
   description: >
     F-series N47 dynamic (0xF303) measurements from the d72n47a0
@@ -69,14 +69,22 @@ verification:
 ecu:
   family: engine
   target: discovered_engine
+  # The SGBD table these rows were derived from. Provenance, not a claim
+  # about the ECU: the runtime reports it beside `exact_sgbd: unknown`.
+  sgbd: d72n47a0
   match:
     capability:
-      # A deliberately unknown capability kind: the OBD capability
-      # provider refuses kinds it does not understand, so even with
-      # production: true this file would resolve to zero requests until
-      # a variant-aware capability provider exists and confirms the
-      # DDE variant on the car. Address is never evidence.
-      sgbd_variant: d72n47a0
+      # Behavioural compatibility, proven at connect by replaying one of
+      # the nominated reads below and checking the reply's shape. This is
+      # all activating the file needs. It is NOT proof the ECU is exactly
+      # d72n47a0 - the F303 sequence is d72-family behaviour, and the
+      # ident DIDs that would pin the revision return NRC 0x31 on this
+      # car - so no `exact_sgbd:` is required here. Address is never
+      # evidence.
+      diagnostic_profile: fseries-f303-d72-compatible
+    # The pcap-verified exchange first; engine temperature as the
+    # alternate, so one refused source id does not condemn the profile.
+    probe: [n47.d72.dyn.4517, n47.d72.dyn.4BC3]
 
 defaults:
   request:
