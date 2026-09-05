@@ -45,6 +45,10 @@ _spec = importlib.util.spec_from_file_location(
 live = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(live)
 
+from bmwdiag.protocol.errors import (  # noqa: E402
+    NegativeResponse,
+    RoutingNack,
+)
 from bmwdiag.protocol.safety import UnsafePayload  # noqa: E402
 
 
@@ -112,11 +116,10 @@ def probe_addr(client, addr, timeout, session) -> Optional[str]:
     ):
         try:
             resp = client.request(data, timeout=timeout, dst=addr)
-        except live.HsfzNack:
+        except RoutingNack:
             return None
-        except live.HsfzError as exc:
-            if "NRC" in str(exc):
-                notes.append(f"{tag}:NRC")
+        except NegativeResponse as exc:
+            notes.append(f"{tag}:NRC {exc.nrc_hex}")
             continue
         except Exception:
             continue
@@ -154,7 +157,7 @@ def cmd_find(args) -> None:
             resp = client.request_safe(
                 bytes([0x3E, 0x00]), timeout=args.scan_timeout, dst=addr
             )
-        except live.HsfzNack:
+        except RoutingNack:
             continue
         except Exception:
             continue

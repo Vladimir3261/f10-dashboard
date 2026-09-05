@@ -77,6 +77,7 @@ _spec.loader.exec_module(live)
 from bmwdiag.mapping import MappingRegistry, load_file          # noqa: E402
 from bmwdiag.mapping.decoder import decode_response, match_prefix  # noqa: E402
 from bmwdiag.mapping.registry import AllCapabilities            # noqa: E402
+from bmwdiag.protocol.errors import NegativeResponse           # noqa: E402
 from bmwdiag.protocol.request import build_payload             # noqa: E402
 
 
@@ -120,26 +121,33 @@ class GatedTransport:
         assert_read_only(bytes(payload))
 
         started = time.monotonic()
-        nrc = None
+        negative: Optional[NegativeResponse] = None
         response = b""
 
         try:
             response = self.inner.request(payload, dst=dst, timeout=timeout)
-        except live.HsfzError as exc:
+        except NegativeResponse as exc:
             #
-            # A negative response is data. live.HsfzClient raises on an
-            # NRC; capture it rather than letting it abort the run.
+            # A negative response is data. The client raises it as a
+            # structured category with the NRC as a field; capture it
+            # rather than letting it abort the run. Everything else
+            # (a dead link, a timeout, a refusal to route) propagates.
             #
-            if "NRC" in str(exc):
-                nrc = str(exc)
-            else:
-                raise
+            negative = exc
 
         self.log.append({
             "dst": f"0x{dst:02X}",
             "tx": bytes(payload).hex(" "),
             "rx": response.hex(" ") if response else None,
-            "nrc": nrc,
+            #: The NRC as a NUMBER, plus its hex form and ISO 14229 name
+            #: for reading. Never the exception's sentence: an artifact is
+            #: compared across runs, and prose is not stable.
+            "nrc": None if negative is None else negative.nrc,
+            "nrc_hex": None if negative is None else negative.nrc_hex,
+            "nrc_name": None if negative is None else negative.name,
+            "service": (
+                None if negative is None else f"0x{negative.service:02X}"
+            ),
             "ms": round((time.monotonic() - started) * 1000, 1),
         })
 
@@ -202,8 +210,8 @@ def read_ident(client: live.HsfzClient, addr: int) -> Dict[str, str]:
 
         try:
             resp = client.request(payload, timeout=1.0, dst=addr)
-        except live.HsfzError as exc:
-            out[key] = f"(NRC/{exc})" if "NRC" in str(exc) else "(no answer)"
+        except NegativeResponse as exc:
+            out[key] = f"(NRC {exc.nrc_hex} {exc.name})"
             continue
         except Exception:
             out[key] = "(no answer)"
@@ -354,8 +362,8 @@ class RunArtifacts:
             lines.append(f"- **ECU:** {record.get('ecu_addr', '?')}")
             lines.append(f"- **Outcome:** `{outcome}`")
 
-            if record.get("nrc"):
-                lines.append(f"- **Negative response:** {record['nrc']} "
+            if record.get("nrc") is not None:
+                lines.append(f"- **Negative response:** {_nrc_text(record)} "
                              "(recorded as evidence — the ECU rejects this "
                              "identifier on this variant)")
 
@@ -366,7 +374,8 @@ class RunArtifacts:
             for i, frame in enumerate(record.get("frames", [])):
                 lines.append(
                     f"| {i} | tx→{frame['dst']} | `{frame['tx']}` | "
-                    f"{frame.get('nrc') or '-'} | {frame.get('ms', '-')} |"
+                    f"{_nrc_text(frame) if frame.get('nrc') is not None else '-'}"
+                    f" | {frame.get('ms', '-')} |"
                 )
                 if frame.get("rx"):
                     lines.append(f"| {i} | rx | `{frame['rx']}` | - | - |")
@@ -507,10 +516,13 @@ def _run_one(client, engine, request, decode_ok: bool) -> Dict:
     result["frames"] = log
     last = log[-1] if log else {}
 
-    if last.get("nrc"):
+    if last.get("nrc") is not None:
         result["outcome"] = "negative_response"
         result["nrc"] = last["nrc"]
-        print(f"    [=] NEGATIVE: {last['nrc']}")
+        result["nrc_hex"] = last.get("nrc_hex")
+        result["nrc_name"] = last.get("nrc_name")
+        result["service"] = last.get("service")
+        print(f"    [=] NEGATIVE: NRC {_nrc_text(last)}")
         print("        (recorded - this is evidence the ECU rejects this "
               "on this variant)")
         return result
@@ -553,6 +565,17 @@ def _run_one(client, engine, request, decode_ok: bool) -> Dict:
     result["plausibility_note"] = args_note()
 
     return result
+
+
+def _nrc_text(record: Dict) -> str:
+    """`0x31 requestOutOfRange` from a frame or result record."""
+    code = record.get("nrc")
+    hexed = record.get("nrc_hex") or (
+        f"0x{int(code):02X}" if isinstance(code, int) else str(code)
+    )
+    name = record.get("nrc_name")
+
+    return f"{hexed} {name}" if name else hexed
 
 
 def args_note() -> str:
