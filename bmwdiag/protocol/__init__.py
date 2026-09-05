@@ -6,6 +6,12 @@ testable, and diffable against captured traffic, without a socket, a
 gateway or a car anywhere in the picture.
 """
 
+from .correlate import (
+    ResponseExpectation,
+    classify,
+    declared_response,
+    expected_response,
+)
 from .request import (
     DecodedResponse,
     DiagnosticRequest,
@@ -27,7 +33,11 @@ __all__ = [
     "NegativeResponse",
     "ObdPidReader",
     "ObservationalTransport",
+    "ResponseExpectation",
     "UnsafePayload",
     "assert_observational",
     "build_request",
+    "classify",
+    "declared_response",
+    "expected_response",
 ]

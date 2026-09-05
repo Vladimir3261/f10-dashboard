@@ -1877,6 +1877,20 @@ function renderCar(d) {
        `mode <b>${escape_(s.mode || "?")}</b>`,
        s.other_ecus && s.other_ecus.length
          ? `also on the bus: ${escape_(s.other_ecus.join(", "))}` : "",
+       /* What the transport refused to hand to anyone. A request's own
+          counters cannot show a discarded frame - no request received
+          it - so the link-level tally lives here (issue #12). */
+       d.transport
+         ? `link: <b>${d.transport.timeouts || 0}</b> timeouts · `
+           + `<b>${d.transport.late_response || 0}</b> late · `
+           + `<b>${d.transport.unexpected_response || 0}</b> stray · `
+           + `<b>${d.transport.pending_exhausted || 0}</b> pending exhausted`
+           + (d.transport.ambiguous_resends
+               ? ` · <b>${d.transport.ambiguous_resends}</b> ambiguous` : "")
+           + (d.transport.outstanding && d.transport.outstanding.length
+               ? ` · awaiting ${escape_(d.transport.outstanding
+                   .map(o => o.label || o.expected).join(", "))}` : "")
+         : "",
       ].filter(Boolean).map(x => `<span>${x}</span>`).join("")
     + `</div>`
     /* The full fingerprint: every versioned file that shaped this
@@ -1932,7 +1946,7 @@ function renderCar(d) {
           <td>${q.period_s == null ? "—" : q.period_s + "s"}</td>
           <td>${q.sent}</td><td>${q.ok}</td><td>${q.failed}</td>
           <td class="${cls}">${rate}</td>
-          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
+          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${q.late ? `<span class="tick no">${q.late} late</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
       }).join("")
     + `</tbody>`;
 

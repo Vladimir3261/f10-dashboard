@@ -29,7 +29,8 @@ class FakeHsfzClient:
         self.multi = multi
         self.requests = []
 
-    def request(self, payload, timeout=None, dst=None, expect_src=None):
+    def request(self, payload, timeout=None, dst=None, expect_src=None,
+                expect=None):
         self.requests.append(bytes(payload))
 
         if payload[0] != 0x01:

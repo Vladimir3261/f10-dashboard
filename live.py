@@ -41,9 +41,12 @@ import urllib.request
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple,
+)
 
 from bmwdiag.identity import new_ulid
 from bmwdiag.vehicle import load_profile
@@ -62,6 +65,13 @@ from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
 from bmwdiag.protocol import (
     NegativeResponse, ObservationalTransport, assert_observational,
+)
+from bmwdiag.protocol.correlate import (
+    FOREIGN,
+    NEGATIVE,
+    PENDING,
+    classify,
+    expected_response,
 )
 from bmwdiag.obd import (
     OBD_SUPPORT_PIDS,
@@ -361,8 +371,88 @@ class HsfzNegativeResponse(HsfzError, NegativeResponse):
         NegativeResponse.__init__(self, service, nrc)
 
 
+class HsfzPendingTimeout(HsfzError, TimeoutError):
+    """
+    The ECU kept asking for more time (NRC 0x78) and the absolute
+    deadline ran out. A TimeoutError, so the executor treats it as one
+    exchange that did not complete - and an HsfzError, so every existing
+    handler keeps working.
+    """
+
+
+#: After a request to an ECU times out, the line is listened to for
+#: this long with nothing arriving before the NEXT request to that ECU
+#: goes out - so a late answer lands as an attributed orphan instead of
+#: as the answer to the next request. SETTLE_MAX bounds the wait when
+#: frames keep arriving. Both are wall-clock seconds; a timeout already
+#: cost at least 1 s, so 0.2 s on top is noise, and it buys the one
+#: guarantee content cannot: a re-poll of the SAME identifier after its
+#: own timeout does not lock-step one answer behind.
+SETTLE_QUIET = 0.2
+SETTLE_MAX = 1.0
+
+#: How much one responsePending (NRC 0x78) extends the wait, and the
+#: absolute most one request may take from send to final answer however
+#: many of them arrive. ISO 14229 gives P2*server as 5 s; before this
+#: bound existed every 0x78 pushed the deadline out by 2 s with no limit,
+#: so a stuck ECU could hold the poll loop indefinitely.
+PENDING_EXTENSION = 2.0
+PENDING_MAX_TOTAL = 5.0
+
+#: Frames kept in the recent TX/RX trace for the diagnostics view. Small
+#: on purpose: the point is "what was on the wire around this orphan",
+#: not a capture.
+TRACE_FRAMES = 48
+
+#: Pseudo request ids for faults the transport cannot attribute to a
+#: mapped request: an orphan matching nothing outstanding is recorded
+#: under `hsfz:0x12` rather than dropped.
+ORPHAN_LABEL = "hsfz:0x{:02X}"
+
+
+@dataclass
+class _Outstanding:
+    """
+    A request this client gave up on, whose answer may still arrive.
+
+    Kept per ECU until something proves the ECU has moved on: its late
+    answer shows up (attributed, discarded), or a request that could
+    not be confused with it is answered.
+    """
+
+    expectation: Any
+    since: float
+    pending: int = 0
+    settled: bool = False
+
+    @property
+    def label(self) -> str:
+        return self.expectation.label
+
+
 class HsfzClient:
-    """Minimal HSFZ client: 4-byte length, 2-byte control, payload."""
+    """
+    Minimal HSFZ client: 4-byte length, 2-byte control, payload.
+
+    Correlation policy (issue #12) - a frame is returned as the answer
+    to a request only when ALL of these hold:
+
+      * it is a diagnostic frame from the expected ECU address to this
+        tester;
+      * its body fits the request's `ResponseExpectation` - the positive
+        service id AND the echoed identifier (DID / PID / sub-function)
+        the protocol or the mapping says it must carry, at the declared
+        minimum length; or it is a `7F <this service> <nrc>`.
+
+    Anything else from that ECU is an ORPHAN: it is never returned. It
+    is counted, traced, reported through `on_orphan`, and - when it fits
+    the expectation of a request that previously timed out - attributed
+    to that request as a `late_response`. Two further bounds exist for
+    what content cannot settle (the same identifier re-read, the F303
+    case): after any timeout the line is given a quiet window before the
+    next request to that ECU (`SETTLE_QUIET`), and a run of NRC 0x78
+    can never extend one request past `PENDING_MAX_TOTAL`.
+    """
 
     def __init__(
         self,
@@ -372,6 +462,10 @@ class HsfzClient:
         dst: int = DDE_ADDR,
         timeout: float = 3.0,
         permit_session_control: bool = False,
+        settle_quiet: float = SETTLE_QUIET,
+        settle_max: float = SETTLE_MAX,
+        pending_extension: float = PENDING_EXTENSION,
+        pending_max_total: float = PENDING_MAX_TOTAL,
     ):
         self.ip = ip
         self.local_ip = local_ip
@@ -385,8 +479,35 @@ class HsfzClient:
         #: and run_car.sh never set this - tools/egs.py sets it for its
         #: opt-in --session probe, and a test pins the default to False.
         self.permit_session_control = permit_session_control
+        self.settle_quiet = settle_quiet
+        self.settle_max = settle_max
+        self.pending_extension = pending_extension
+        self.pending_max_total = pending_max_total
         self.sock: Optional[socket.socket] = None
         self.buf = bytearray()
+        #: Every deadline in this client is measured on this clock. A
+        #: test substitutes a scripted one so the pending and settle
+        #: bounds can be exercised in milliseconds, not seconds.
+        self.clock = time.monotonic
+        #: (label, kind, message) for every discarded orphan. The
+        #: application wires this to the fault recorder and the
+        #: executor's per-request late counter; the client itself has
+        #: no notion of a request id beyond the label it was handed.
+        self.on_orphan: Optional[Any] = None
+        self._outstanding: Dict[int, _Outstanding] = {}
+        self._link: Dict[str, int] = {
+            "timeouts": 0,
+            "pending_seen": 0,
+            "pending_exhausted": 0,
+            "late_response": 0,
+            "unexpected_response": 0,
+            "settle_runs": 0,
+            "settle_caught": 0,
+            "ambiguous_resends": 0,
+        }
+        self._trace: Deque[Tuple[float, str, int, bytes, str]] = deque(
+            maxlen=TRACE_FRAMES
+        )
 
     def connect(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -400,6 +521,8 @@ class HsfzClient:
 
         self.sock = sock
         self.buf.clear()
+        #: A new TCP session: nothing from the old one can arrive on it.
+        self._outstanding.clear()
 
     def reconnect(self) -> None:
         self.close()
@@ -448,7 +571,7 @@ class HsfzClient:
     def _fill(self, deadline: float) -> None:
         assert self.sock is not None
 
-        remaining = deadline - time.monotonic()
+        remaining = deadline - self.clock()
 
         if remaining <= 0:
             raise TimeoutError("HSFZ read timeout")
@@ -462,25 +585,42 @@ class HsfzClient:
 
         self.buf.extend(chunk)
 
+    def _pop_frame(self) -> Optional[Tuple[int, bytes]]:
+        """One complete frame off the buffer, or None if none is whole."""
+        if len(self.buf) < 6:
+            return None
+
+        length, control = struct.unpack(">IH", self.buf[:6])
+
+        if length > 0x00100000:
+            raise HsfzError(f"absurd HSFZ length {length}")
+
+        if len(self.buf) < 6 + length:
+            return None
+
+        payload = bytes(self.buf[6:6 + length])
+        del self.buf[:6 + length]
+
+        return control, payload
+
     def _read_frame(self, deadline: float) -> Tuple[int, bytes]:
         while True:
-            if len(self.buf) >= 6:
-                length, control = struct.unpack(">IH", self.buf[:6])
+            frame = self._pop_frame()
 
-                if length > 0x00100000:
-                    raise HsfzError(f"absurd HSFZ length {length}")
-
-                if len(self.buf) >= 6 + length:
-                    payload = bytes(self.buf[6:6 + length])
-                    del self.buf[:6 + length]
-                    return control, payload
+            if frame is not None:
+                return frame
 
             self._fill(deadline)
 
-    def _drain(self) -> None:
-        """Throw away buffered frames left over from a previous request."""
-        self.buf.clear()
-
+    def _discard_queued(self) -> None:
+        """
+        Frames already queued before this request goes out belong to
+        nobody in flight. They used to be thrown away as bytes - which
+        could cut a half-received frame in two and desynchronise the
+        stream, and left no trace of what arrived. Now they are parsed,
+        classified against whatever is outstanding, counted and traced;
+        a partial tail stays in the buffer to be completed.
+        """
         if self.sock is None:
             return
 
@@ -488,16 +628,191 @@ class HsfzClient:
 
         try:
             while True:
-                if not self.sock.recv(8192):
-                    break
+                chunk = self.sock.recv(8192)
+
+                if not chunk:
+                    raise HsfzError("gateway closed the connection")
+
+                self.buf.extend(chunk)
         except (BlockingIOError, OSError):
             pass
         finally:
             self.sock.setblocking(True)
 
+        while True:
+            frame = self._pop_frame()
+
+            if frame is None:
+                return
+
+            self._stray(*frame)
+
     def _send(self, control: int, payload: bytes) -> None:
         assert self.sock is not None
         self.sock.sendall(struct.pack(">IH", len(payload), control) + payload)
+
+    # -- correlation state -----------------------------------------
+
+    def _record(self, direction: str, ecu: int, body: bytes, note: str = "") -> None:
+        self._trace.append((self.clock(), direction, ecu, bytes(body), note))
+
+    def _stray(self, control: int, payload: bytes) -> None:
+        """A frame that arrived with no request in flight."""
+        if control == HSFZ_ALIVE_REQ:
+            self._send(HSFZ_ALIVE_RESP, struct.pack(">H", self.src))
+            return
+
+        if control != HSFZ_DIAG_REQ or len(payload) < 3:
+            return
+
+        if payload[1] != self.src:
+            return
+
+        self._orphan(payload[0], payload[2:], None)
+
+    def _orphan(self, ecu: int, body: bytes, current: Any) -> None:
+        """
+        A diagnostic frame that is not the answer to the request in
+        flight. Never returned to a caller; attributed if it can be.
+        """
+        outstanding = self._outstanding.get(ecu)
+        now = self.clock()
+
+        if outstanding is not None and classify(
+            outstanding.expectation, body
+        )[0] != FOREIGN:
+            kind = "late_response"
+            label = outstanding.label or ORPHAN_LABEL.format(ecu)
+            message = (
+                f"discarded {body.hex(' ')} from 0x{ecu:02X}: the answer to "
+                f"{label} ({outstanding.expectation.describe()}), which "
+                f"timed out {now - outstanding.since:.2f}s ago"
+            )
+            del self._outstanding[ecu]
+        else:
+            kind = "unexpected_response"
+            label = ORPHAN_LABEL.format(ecu)
+            message = (
+                f"discarded {body.hex(' ')} from 0x{ecu:02X}: matches "
+                f"nothing asked"
+            )
+
+        if current is not None:
+            message += f"; in flight: {current.describe()}"
+
+        self._link[kind] += 1
+        self._record("rx", ecu, body, kind)
+
+        if self.on_orphan is not None:
+            self.on_orphan(label, kind, message)
+
+    def _timed_out(self, ecu: int, expectation: Any, pending: int) -> None:
+        """Remember what was asked, so its answer can be recognised."""
+        self._outstanding[ecu] = _Outstanding(
+            expectation, self.clock(), pending
+        )
+
+        if pending:
+            self._link["pending_exhausted"] += 1
+        else:
+            self._link["timeouts"] += 1
+
+    def _settle(self, ecu: int, expectation: Any) -> None:
+        """
+        After a timeout to this ECU: listen before sending again.
+
+        Runs once per timeout. Reads until the line has been quiet for
+        `settle_quiet` or `settle_max` has elapsed; whatever arrives is
+        classified against the outstanding request, so its late answer
+        is attributed and discarded here rather than returned to the
+        next caller. If the outstanding request is still unanswered
+        afterwards and the new request could not be told apart from it
+        by content, that is counted as an ambiguous resend - the
+        bounded residual, made visible.
+        """
+        outstanding = self._outstanding.get(ecu)
+
+        if outstanding is None or outstanding.settled:
+            return
+
+        outstanding.settled = True
+        self._link["settle_runs"] += 1
+        started = self.clock()
+        end = started + self.settle_max
+        quiet_until = started + self.settle_quiet
+
+        while True:
+            limit = min(quiet_until, end)
+
+            if limit <= self.clock():
+                break
+
+            try:
+                control, payload = self._read_frame(limit)
+            except TIMEOUTS:
+                break
+
+            quiet_until = self.clock() + self.settle_quiet
+            self._stray(control, payload)
+
+        if ecu in self._outstanding:
+            if outstanding.expectation.indistinguishable_from(expectation):
+                self._link["ambiguous_resends"] += 1
+                self._record(
+                    "tx", ecu, b"", "ambiguous: outstanding "
+                    + outstanding.expectation.describe()
+                    + " is indistinguishable from this request",
+                )
+        else:
+            self._link["settle_caught"] += 1
+
+    def _answered(self, ecu: int, expectation: Any) -> None:
+        """
+        The ECU answered the request in flight. An answer to a request
+        that could be told apart from the outstanding one is proof the
+        ECU has moved past it (it answers in order); one that could not
+        is the ambiguity the settle window bounded. Either way nothing
+        older is expected any more.
+        """
+        self._outstanding.pop(ecu, None)
+
+    def link_stats(self) -> Dict[str, Any]:
+        """
+        Correlation counters, what is outstanding, and the recent
+        trace - for the diagnostics view. Copied, not shared.
+        """
+        now = self.clock()
+
+        for _ in range(3):
+            try:
+                return {
+                    **self._link,
+                    "outstanding": [{
+                        "ecu": f"0x{ecu:02X}",
+                        "label": o.label,
+                        "expected": o.expectation.describe(),
+                        "age_s": round(now - o.since, 2),
+                        "pending": o.pending,
+                        "settled": o.settled,
+                    } for ecu, o in self._outstanding.items()],
+                    "trace": [{
+                        "age_s": round(now - t, 3),
+                        "dir": direction,
+                        "ecu": f"0x{ecu:02X}",
+                        "bytes": body.hex(" "),
+                        "note": note,
+                    } for t, direction, ecu, body, note in self._trace],
+                    "bounds": {
+                        "settle_quiet_s": self.settle_quiet,
+                        "settle_max_s": self.settle_max,
+                        "pending_extension_s": self.pending_extension,
+                        "pending_max_total_s": self.pending_max_total,
+                    },
+                }
+            except RuntimeError:                # changed size during iteration
+                continue
+
+        return {}
 
     # -- request/response -------------------------------------------
 
@@ -507,29 +822,60 @@ class HsfzClient:
         timeout: Optional[float] = None,
         dst: Optional[int] = None,
         expect_src: Optional[int] = None,
+        expect: Optional[Any] = None,
     ) -> bytes:
-        """Send a UDS/OBD payload, return the ECU's response bytes."""
-        self._gate(bytes(data))
+        """
+        Send a UDS/OBD payload, return the ECU's response bytes.
+
+        `expect` is the ResponseExpectation the answer must satisfy;
+        None derives one from the payload by the protocol's echo rule
+        (bmwdiag.protocol.correlate). See the class docstring for what
+        happens to everything that does not satisfy it.
+        """
+        data = bytes(data)
+        self._gate(data)
 
         if self.sock is None:
             raise HsfzError("not connected")
 
         target = self.dst if dst is None else dst
-        want_sid = data[0] + 0x40
         want_src = target if expect_src is None else expect_src
+        expectation = expect if expect is not None else expected_response(data)
 
         #
-        # Discard anything still queued from an earlier exchange, so a
-        # straggler cannot be mistaken for this request's answer.
+        # Anything still queued from an earlier exchange belongs to no
+        # request in flight; and if the last request to this ECU timed
+        # out, give its answer a bounded chance to arrive BEFORE this
+        # one is sent, so it cannot be mistaken for this one's.
         #
-        self._drain()
+        self._discard_queued()
+        self._settle(want_src, expectation)
 
         self._send(HSFZ_DIAG_REQ, bytes([self.src, target]) + data)
+        self._record("tx", target, data)
 
-        deadline = time.monotonic() + (timeout or self.timeout)
+        started = self.clock()
+        base = timeout or self.timeout
+        deadline = started + base
+        #: Absolute. A responsePending may move `deadline`, never this.
+        hard_deadline = started + max(base, self.pending_max_total)
+        pending = 0
 
         while True:
-            control, payload = self._read_frame(deadline)
+            try:
+                control, payload = self._read_frame(deadline)
+            except TIMEOUTS:
+                self._timed_out(want_src, expectation, pending)
+
+                if pending:
+                    raise HsfzPendingTimeout(
+                        f"no final answer within "
+                        f"{self.clock() - started:.1f}s: the ECU sent "
+                        f"responsePending {pending}x to 0x{data[0]:02X} "
+                        f"(expected {expectation.describe()})"
+                    )
+
+                raise
 
             if control == HSFZ_ALIVE_REQ:
                 self._send(HSFZ_ALIVE_RESP, struct.pack(">H", self.src))
@@ -554,33 +900,47 @@ class HsfzClient:
             if payload[1] != self.src:
                 continue
 
-            if payload[0] != want_src:
-                continue
-
             body = payload[2:]
 
-            #
-            # Correlate the reply with this request. Without this a frame
-            # that arrived late from a previous request is happily
-            # returned as the answer to this one.
-            #
-            if body[0] != want_sid and body[0] != 0x7F:
+            if payload[0] != want_src:
+                #
+                # Another ECU. Possibly the late answer to a request of
+                # ITS that timed out, in which case it is attributed.
+                #
+                self._orphan(payload[0], body, expectation)
                 continue
 
-            if body[0] == 0x7F and (len(body) < 2 or body[1] != data[0]):
+            #
+            # Correlate the reply with this request: service id, echoed
+            # identifier, minimum length - or a refusal of THIS service.
+            # A frame that fits none of those is an orphan, whatever it
+            # looks like, and is never returned.
+            #
+            outcome, nrc = classify(expectation, body)
+
+            if outcome == FOREIGN:
+                self._orphan(want_src, body, expectation)
                 continue
 
-            if body[0] == 0x7F and len(body) >= 3:
-                nrc = body[2]
+            if outcome == PENDING:
+                #
+                # responsePending - the ECU asked for more time. Granted,
+                # up to the absolute deadline and not one second past it.
+                #
+                pending += 1
+                self._link["pending_seen"] += 1
+                self._record("rx", want_src, body, "pending")
+                deadline = min(
+                    self.clock() + self.pending_extension, hard_deadline
+                )
+                continue
 
-                if nrc == 0x78:
-                    #
-                    # responsePending - the ECU asked for more time.
-                    #
-                    deadline = time.monotonic() + 2.0
-                    continue
-
+            if outcome == NEGATIVE:
+                self._record("rx", want_src, body, "negative")
                 raise HsfzNegativeResponse(body[1], nrc)
+
+            self._record("rx", want_src, body)
+            self._answered(want_src, expectation)
 
             return body
 
@@ -609,10 +969,10 @@ class HsfzClient:
 
         self._send(HSFZ_DIAG_REQ, bytes([self.src, dst]) + data)
 
-        deadline = time.monotonic() + window
+        deadline = self.clock() + window
         seen: List[Tuple[int, bytes]] = []
 
-        while time.monotonic() < deadline:
+        while self.clock() < deadline:
             try:
                 control, payload = self._read_frame(deadline)
             except TIMEOUTS:
@@ -660,8 +1020,9 @@ class HsfzTransport:
         *,
         dst: int,
         timeout: Optional[float] = None,
+        expect: Optional[Any] = None,
     ) -> bytes:
-        return self.client.request(payload, timeout, dst)
+        return self.client.request(payload, timeout, dst, expect=expect)
 
 
 # --------------------------------------------------------------- discovery
@@ -1636,6 +1997,15 @@ class Diagnostics:
         #: different questions, and a channel can be perfect on the first
         #: while answering nothing but sentinels on the second.
         quality = executor.quality_stats() if executor is not None else {}
+        #: Link-level: what the transport refused to hand to anyone, and
+        #: why. A request's own counters cannot show a discarded frame,
+        #: because by definition no request received it.
+        client = state.get("client")
+        transport = (
+            client.link_stats()
+            if client is not None and hasattr(client, "link_stats")
+            else None
+        )
         extra_ids = set(state.get("extra_ids") or ())
         now = time.time()
 
@@ -1655,7 +2025,7 @@ class Diagnostics:
             ) + 1
 
         requests = []
-        totals = {"sent": 0, "ok": 0, "failed": 0}
+        totals = {"sent": 0, "ok": 0, "failed": 0, "late": 0}
 
         for request in profile.requests:
             st = stats.get(request.id, {})
@@ -1699,6 +2069,13 @@ class Diagnostics:
                 "ok": ok,
                 "failed": st.get("failed", 0),
                 "kinds": st.get("kinds", {}),
+                #: Answers that arrived after the timeout was already
+                #: counted, and were discarded. Not in `failed` (that
+                #: would count one exchange twice) and not in `ok` (the
+                #: value never reached the decoder). Many of these means
+                #: the timeout is too short for this ECU, not that it
+                #: is silent.
+                "late": st.get("late", 0),
                 #: From the resting mechanism (cfbabd4): seconds this
                 #: request is standing down after repeated faults, and
                 #: the consecutive-fault count that caused it. A snapshot
@@ -1837,6 +2214,7 @@ class Diagnostics:
                     else round(100.0 * totals["ok"] / totals["sent"], 1)
                 ),
             },
+            "transport": transport,
         }
 
 
@@ -2231,7 +2609,9 @@ def poll_loop(
 
             if nominations:
                 identity = EcuIdentity(ProfileProbe(
-                    lambda p, dst, timeout=None: client.request(p, timeout, dst),
+                    lambda p, dst, timeout=None, expect=None: client.request(
+                        p, timeout, dst, expect=expect
+                    ),
                     timeout=1.0,
                 ).resolve(nominations, engine.addr))
 
@@ -2308,6 +2688,25 @@ def poll_loop(
                 on_error=note_fault,
             )
 
+            #
+            # A frame the transport refused to hand to anyone - a late
+            # answer to a request that already timed out, or something
+            # matching nothing asked - is reported, not dropped: into
+            # `channel_errors` under the request it answers (or a
+            # `hsfz:0x12` pseudo-id when nothing claims it), and onto
+            # that request's `late` counter in the diagnostics view.
+            # The timeout it belongs to was already recorded; this is
+            # the other half of that story.
+            #
+            def note_orphan(label: str, kind: str, message: str) -> None:
+                if rec is not None:
+                    rec.error(label, kind, message)
+
+                if kind == "late_response":
+                    executor.note_late_response(label, message)
+
+            client.on_orphan = note_orphan
+
             tel.set_meta(profile.meta())
 
             #
@@ -2316,7 +2715,7 @@ def poll_loop(
             # demand so a page nobody opens costs nothing per cycle.
             #
             diag.publish(
-                profile=profile, executor=executor, plan=plan,
+                profile=profile, executor=executor, plan=plan, client=client,
                 ecu=engine.label(), ecu_addr=engine.addr, gateway=ip,
                 other_ecus=[e.label() for e in ecus if e.addr != engine.addr],
                 identity=identity,

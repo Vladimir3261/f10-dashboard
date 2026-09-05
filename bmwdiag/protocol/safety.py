@@ -28,7 +28,7 @@ transport wraps itself in `ObservationalTransport` (or calls
 same policy with no new decisions to make.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 __all__ = [
     "OBSERVATIONAL_SERVICES",
@@ -130,7 +130,10 @@ class ObservationalTransport:
         self.inner = inner
 
     def request(self, payload: bytes, *, dst: int,
-                timeout: Optional[float] = None) -> bytes:
+                timeout: Optional[float] = None,
+                expect: Optional[Any] = None) -> bytes:
         assert_observational(bytes(payload))
 
-        return self.inner.request(payload, dst=dst, timeout=timeout)
+        return self.inner.request(
+            payload, dst=dst, timeout=timeout, expect=expect
+        )

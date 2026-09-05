@@ -61,7 +61,7 @@ class ReadOnlyGate(unittest.TestCase):
         class Spy:
             sent = []
 
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 self.sent.append(payload)
                 return b""
 
@@ -76,7 +76,7 @@ class ReadOnlyGate(unittest.TestCase):
     def test_gate_transport_records_a_negative_response_as_data(self):
         """An NRC is captured in the frame log, not raised."""
         class Nrc:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise vc.live.HsfzError("negative response to 0x22: NRC 0x31")
 
         log = []

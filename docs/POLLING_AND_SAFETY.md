@@ -304,3 +304,126 @@ separation is a setup-plus-poll sequence per member, its size is a
 property of the car and the link, and **measuring it needs a car.** The
 per-signal timestamps are what will make that measurable on the first
 drive rather than assumed now.
+
+
+## Response correlation, and what happens to a late answer
+
+*(issue #12, 2026-09-05. Verified offline through a scripted socket and
+clock; the on-car counts below are what a drive will show, not what one
+has shown yet.)*
+
+### The problem
+
+`HsfzClient.request` used to accept the first frame from the right ECU
+address whose first byte was the expected positive service id. It
+correlated by **address and service**, nothing more. That is enough
+while every request gets its answer before the next goes out, and wrong
+the moment one does not: a `22 1234` that times out, followed by a
+`22 5678`, could have its late `62 1234 …` handed back as the answer to
+`22 5678`. The decoder caught the cases where the echoed identifier
+differed — and labelled them `decode`, as if the mapping were wrong —
+and could not catch the case where it does not differ. That case is the
+one this car uses most: every d72 dynamic channel is read through the
+same DID (`22 F3 03`), so a late answer under an old definition is
+**byte-identical in shape** to the fresh answer under a new one, and
+would have been decoded on the wrong scale with no fault anywhere.
+
+Two further gaps: a `responsePending` (NRC `78`) extended the deadline
+by 2 s every time it arrived, with no bound, so a stuck ECU could hold
+the poll loop indefinitely; and the pre-request "drain" threw away raw
+bytes, which could cut a half-received frame in two.
+
+### The rule now
+
+A frame is returned as the answer to a request only when **all** of
+these hold:
+
+1. it is a diagnostic frame from the expected ECU address to this tester;
+2. its body fits the request's `ResponseExpectation`
+   (`bmwdiag/protocol/correlate.py`): the positive service id **and** the
+   echoed identifier — DID for `22`, PID for `01`/`09` (any one of a
+   multi-PID list), sub-function + DID for `2C`, sub-function for
+   `19`/`3E`, one byte for the KWP reads — at the declared minimum
+   length; **or** it is `7F <this service> <nrc>`.
+
+The expectation comes from the protocol's echo rule by default. A
+mapping that declares `response.prefix` overrides it — that is how a
+non-echoing protocol works: `dde7_kwp_local_id.yaml` declares
+`prefix: "6C 10"`, so the transport accepts `6C 10 <data>` and does not
+apply the `2C` rule on top. The executor hands the transport each
+request's expectation labelled with the request id; the connect-time
+profile probe does the same for the read it replays; setup frames and
+ad-hoc probes get the structural rule. The seam
+(`DiagnosticTransport.request(payload, *, dst, timeout, expect)`) stays
+transport-agnostic — the expectation is plain data, no callables, so it
+can travel to a C runtime unchanged.
+
+Everything else from that ECU is an **orphan**. It is never returned.
+It is counted, traced, and reported:
+
+- if it fits the expectation of a request to that ECU that previously
+  timed out, it is a **`late_response`**, recorded in `channel_errors`
+  under *that* request's id and ticked onto its `late` counter in
+  `/api/diagnostics` — the other half of the timeout that was already
+  recorded;
+- otherwise it is an **`unexpected_response`**, recorded under the
+  pseudo request id `hsfz:0x<ecu>`.
+
+A `7F` naming a *different* service is an orphan too: a refusal of
+somebody else's request is not a refusal of this one.
+
+### The bounds for what content cannot settle
+
+Content correlation cannot tell apart two reads of the same identifier
+— the F303 case, or any DID re-polled after its own timeout. Three
+bounds cover that:
+
+- **Settle window.** After a request to an ECU times out, the next
+  request to that ECU is preceded by a listen: until the line has been
+  quiet for `SETTLE_QUIET` (0.2 s), at most `SETTLE_MAX` (1.0 s).
+  Whatever arrives is classified against the outstanding request, so
+  its late answer is attributed and discarded *before* the next request
+  is on the wire. Runs once per timeout. If the window passes with the
+  late answer still unaccounted for and the new request could not be
+  told apart from it by content, that is counted as an
+  `ambiguous_resends` — the residual, made visible rather than silent.
+- **Re-arm on fault.** A fault anywhere in a define-then-read sequence
+  makes the executor forget that the DID is armed, so the next read of
+  it re-sends the clear and define. Those are two exchanges the ECU
+  answers in order, and they sit between the old poll and the new one:
+  a late `62 F3 03` cannot arrive after `6C 03 F3 03` and `6C 01 F3 03`
+  on an ECU that processes one request at a time.
+- **Absolute pending deadline.** A `responsePending` extends the wait by
+  `PENDING_EXTENSION` (2 s) but never past `PENDING_MAX_TOTAL` (5 s,
+  ISO 14229's P2\*server) from the send. Past that the request fails as
+  `HsfzPendingTimeout` — a `TimeoutError`, so to the executor it is one
+  exchange that did not complete (`transport_timeout`), and the answer
+  that eventually arrives is a `late_response` like any other.
+
+An outstanding request is forgotten when its late answer shows up, when
+the ECU answers a later request (it answers in order, so it has moved
+past the old one), or on reconnect (a new TCP session carries nothing
+from the old one).
+
+**The residual, stated honestly:** a late answer that arrives after the
+settle window *and* after the ECU has answered two further requests is
+assumed impossible on an in-order ECU. If this DDE reorders — nothing
+observed suggests it, and nothing proves it does not — the
+`ambiguous_resends` counter and the per-request `late` counts are where
+it would first show.
+
+### What to look at after a drive
+
+`/api/diagnostics` → `transport`: `timeouts`, `pending_seen`,
+`pending_exhausted`, `late_response`, `unexpected_response`,
+`settle_runs`, `settle_caught`, `ambiguous_resends`, what is
+`outstanding`, the bounds in force, and the last 48 frames on the wire
+with a note on each orphan. The Car link tab shows the tally on the
+session card and a `late` mark on any request that has one. In the
+lake, `telemetry.channel_errors` gains the two new `kind` values (the
+column is a string; no migration).
+
+The counters that should stay at zero on a healthy drive are
+`unexpected_response` and `ambiguous_resends`. `late_response` will
+track `timeouts` closely on a sleeping EGS — that is the expected
+pairing, not a fault.
