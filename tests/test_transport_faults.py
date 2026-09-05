@@ -28,14 +28,19 @@ from bmwdiag.mapping.loader import load_text
 from bmwdiag.mapping.registry import AllCapabilities, MappingRegistry
 
 
-# Stand-ins for the transport's exceptions. bmwdiag never imports live.py, so
-# the classifier matches structurally - these mimic the shapes it must handle.
+from bmwdiag.protocol.errors import RoutingNack
+
+
+# The transport's real categories. bmwdiag owns them since issue #11, so the
+# executor classifies by TYPE - a class merely named `...Nack` no longer
+# counts (see tests/test_diagnostic_errors.py). This keeps the call sites
+# below reading as they did.
+def HsfzNack(message="gateway will not route to 0x18"):
+    return RoutingNack(0x18, message=message)
+
+
 class HsfzError(Exception):
-    pass
-
-
-class HsfzNack(HsfzError):
-    pass
+    """An exception the executor has never heard of."""
 
 
 TWO_REQUESTS = """
