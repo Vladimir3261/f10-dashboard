@@ -22,6 +22,14 @@ Adding a protocol means adding a branch here, not touching the decoder.
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..protocol.errors import (
+    DiagnosticError,
+    LinkError,
+    NegativeResponse,
+    RequestTimeout,
+    ResponseMismatch,
+    RoutingNack,
+)
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
@@ -32,7 +40,13 @@ from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
 
-__all__ = ["MappingExecutor", "obd_logical_response"]
+__all__ = [
+    "MappingExecutor",
+    "NoResponse",
+    "fault_detail",
+    "fault_kind",
+    "obd_logical_response",
+]
 
 
 def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
@@ -84,7 +98,7 @@ REQUEST_REST_SECONDS = 5.0
 REQUEST_REST_MAX_SECONDS = 60.0
 
 
-class NoResponse(Exception):
+class NoResponse(DiagnosticError):
     """
     A PID the OBD reader asked for and did not get back.
 
@@ -95,6 +109,14 @@ class NoResponse(Exception):
     place and reported in another.
     """
 
+    kind = "no_response"
+
+
+#: The failures that are one ECU's answer to one request - the far side
+#: spoke, so the link carrying everything else is demonstrably alive. They
+#: are skipped per request and never count towards a reconnect.
+_ANSWERED = (RoutingNack, NegativeResponse, ResponseMismatch)
+
 
 def fault_kind(exc: Exception) -> str:
     """
@@ -104,23 +126,57 @@ def fault_kind(exc: Exception) -> str:
     exception messages - a message is prose that changes; a kind is data you
     can group by. Used to attribute errors per request in the lake, which is
     what makes "this channel fails 8% of the time" answerable at all.
+
+    Classified diagnostic errors carry their own kind. The remaining
+    branches cover what a transport may let through raw: a socket error is
+    a link fault, a bare timeout is a timeout, and a mapping-layer failure
+    is a decode. Never by class name and never by message text.
     """
+    if isinstance(exc, DiagnosticError):
+        return exc.kind
+
     if isinstance(exc, (DecodeError, MappingError)):
         return "decode"
 
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
+    if isinstance(exc, ConnectionError):
         return "transport_link"
 
     if isinstance(exc, TimeoutError):
         return "transport_timeout"
 
-    if isinstance(exc, NoResponse):
-        return "no_response"
-
-    if exc.__class__.__name__.endswith("Nack"):
-        return "transport_nack"
-
     return "other"
+
+
+def fault_detail(exc: Exception) -> Dict[str, Any]:
+    """
+    The structured evidence behind a fault, as a plain dict.
+
+    `kind` says what class of thing happened; this says the specifics the
+    Car link and a validation artifact need as VALUES - `nrc: 49`, the
+    service byte, the target address, why a link died. Empty when the
+    exception carries nothing structured, which is honest rather than
+    padding it out of the message.
+    """
+    if isinstance(exc, DiagnosticError):
+        return dict(exc.detail())
+
+    if isinstance(exc, MappingError):
+        out: Dict[str, Any] = {}
+
+        if exc.source:
+            out["source"] = exc.source
+
+        if exc.path:
+            out["path"] = exc.path
+
+        return out
+
+    return {}
+
+
+def _answered(exc: Exception) -> bool:
+    """The far side replied - to refuse, but it replied. The link is alive."""
+    return isinstance(exc, _ANSWERED)
 
 
 def _is_request_fault(exc: Exception) -> bool:
@@ -130,23 +186,27 @@ def _is_request_fault(exc: Exception) -> bool:
     Skipping a request is only safe while the link is still good; otherwise
     every later request fails identically and the reconnect never happens.
 
-    Classified structurally rather than by importing the transport's own
-    exceptions: `bmwdiag` deliberately knows nothing about HSFZ, imports
-    nothing outside the standard library and opens no sockets, so it cannot
-    reference `HsfzNack` by type. Anything unrecognised counts as a link
-    fault, which is the conservative direction - a needless reconnect costs
-    a few seconds, whereas mistaking a dead link for a slow ECU means polling
-    a closed socket forever.
+    Decided by category. A link error, or a raw socket error a transport
+    let through, means reconnect. A timeout, a routing refusal, a negative
+    response or a malformed reply is one exchange's failure and the other
+    channels keep flowing. Anything unclassified counts as a link fault,
+    which is the conservative direction - a needless reconnect costs a few
+    seconds, whereas mistaking a dead link for a slow ECU means polling a
+    closed socket forever.
     """
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
-        return False                    # socket gone: let it reconnect
+    if isinstance(exc, LinkError):
+        return False                    # the link itself: let it reconnect
+
+    if isinstance(exc, (RequestTimeout,) + _ANSWERED):
+        return True
+
+    if isinstance(exc, ConnectionError):
+        return False                    # raw socket error: socket gone
 
     if isinstance(exc, TimeoutError):
         return True                     # this ECU did not answer in time
 
-    # A negative acknowledgement: the gateway is alive and refused to route
-    # to one target (e.g. "gateway will not route to 0x18" for the EGS).
-    return exc.__class__.__name__.endswith("Nack")
+    return False
 
 
 def _usable(readings: Dict[str, Any]) -> Dict[str, Any]:
@@ -290,6 +350,7 @@ class MappingExecutor:
                     rid: {
                         **st,
                         "kinds": dict(st["kinds"]),
+                        "last_detail": dict(st.get("last_detail") or {}),
                         **self._rest_fields(rid),
                     }
                     for rid, st in self._stats.items()
@@ -352,6 +413,10 @@ class MappingExecutor:
         stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
         stat["last_error"] = f"{kind}: {message}"
         stat["last_error_at"] = time.time()
+        #: The structured half of the last fault - `nrc: 49`, the target,
+        #: the link reason - so the diagnostics view can show a value
+        #: rather than only the sentence above.
+        stat["last_detail"] = fault_detail(exc) if exc is not None else {}
 
         if self.on_error is not None:
             #: A PID the reader simply dropped has no exception of its
@@ -602,8 +667,8 @@ class MappingExecutor:
 
                 #
                 # This ONE exchange failed: the gateway refused to route to
-                # that ECU, or it did not answer in time. Skipping it keeps
-                # the other ~45 channels flowing. Before this, a single
+                # that ECU, the ECU said no, or it did not answer in time.
+                # Skipping it keeps the other ~45 channels flowing. Before this, a single
                 # `HsfzNack: gateway will not route to 0x18` tore down the
                 # whole link and split the drive into a new run - 1.35% of
                 # wall time lost, but every drive needing to be stitched
@@ -612,12 +677,13 @@ class MappingExecutor:
                 self._note(request.id, exc)
 
                 #
-                # A negative acknowledgement is the gateway ANSWERING, in
-                # order to refuse one target. That is positive evidence the
-                # link is alive, so it must not count towards concluding
-                # the link is dead - only silence can do that.
+                # A routing NACK, a negative response or a malformed reply
+                # is the far side ANSWERING - the gateway refusing one
+                # target, the ECU declining one request. That is positive
+                # evidence the link is alive, so it must not count towards
+                # concluding the link is dead - only silence can do that.
                 #
-                if fault_kind(exc) != "transport_nack":
+                if not _answered(exc):
                     self._transport_faults += 1
 
                 faults = self._request_faults.get(request.id, 0) + 1

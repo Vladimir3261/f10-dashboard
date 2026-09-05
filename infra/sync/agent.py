@@ -364,8 +364,15 @@ def read_errors(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         ).fetchone():
             return []
 
+        #
+        # The structured half of a fault (NRC as a number, service byte,
+        # target, link reason). '' on databases recorded before it was
+        # stored - unknown, not "nothing happened".
+        #
+        det = "e.detail" if _has_column(con, "errors", "detail") else "''"
         rows = con.execute(
-            "SELECT e.rowid, r.vin, e.run_id, e.ts, e.request_id, e.kind, e.message "
+            "SELECT e.rowid, r.vin, e.run_id, e.ts, e.request_id, e.kind, "
+            f"e.message, {det} "
             "FROM errors e JOIN runs r ON r.id = e.run_id "
             "WHERE e.rowid > ? ORDER BY e.rowid LIMIT ?",
             (after_rowid, limit),
@@ -377,8 +384,9 @@ def read_errors(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         {"_rowid": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, run_id),
          "ts": ts, "request_id": request_id, "kind": kind,
-         "message": (message or "")[:500]}
-        for rid, vin, run_id, ts, request_id, kind, message in rows
+         "message": (message or "")[:500],
+         "detail": detail or ""}
+        for rid, vin, run_id, ts, request_id, kind, message, detail in rows
     ]
 
 

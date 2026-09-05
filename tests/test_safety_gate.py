@@ -20,6 +20,7 @@ import live
 from bmwdiag.mapping import MappingExecutor, MappingRegistry, load_text, load_tree
 from bmwdiag.mapping.registry import AllCapabilities
 from bmwdiag.protocol import build_request
+from bmwdiag.protocol.errors import LinkError
 from bmwdiag.protocol.safety import (
     DDD_SUBFUNCTIONS,
     OBSERVATIONAL_SERVICES,
@@ -213,7 +214,7 @@ class TheRuntimeIsGated(unittest.TestCase):
         with self.assertRaises(UnsafePayload):
             client.request(bytes([0x2E, 0xF1, 0x90]))
 
-        with self.assertRaises(live.HsfzError):
+        with self.assertRaises(LinkError):
             client.request(bytes([0x22, 0xF1, 0x90]))
 
     def test_collect_gates_before_any_io(self):
@@ -230,7 +231,7 @@ class TheRuntimeIsGated(unittest.TestCase):
         with self.assertRaises(UnsafePayload):
             client.collect(bytes([0x2E, 0xF1, 0x90]), 0xDF, window=0.1)
 
-        with self.assertRaises(live.HsfzError):
+        with self.assertRaises(LinkError):
             client.collect(bytes([0x01, 0x00]), 0xDF, window=0.1)
 
     def test_session_control_is_rejected_by_default(self):
@@ -254,7 +255,7 @@ class TheRuntimeIsGated(unittest.TestCase):
         )
 
         #: 0x10 passes the gate - proven by reaching "not connected".
-        with self.assertRaises(live.HsfzError):
+        with self.assertRaises(LinkError):
             client.request(bytes([0x10, 0x03]))
 
         for service in sorted(set(WRITE_SERVICES) - {0x10}):
