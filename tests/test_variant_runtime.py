@@ -65,8 +65,8 @@ class DeadEcu:
 
 
 def support_hsfz_error():
-    import live
-    return live.HsfzError("negative response to 0x22: NRC 0x31")
+    from bmwdiag.protocol.errors import NegativeResponse
+    return NegativeResponse(0x22, 0x31, b"\x7f\x22\x31")
 
 
 class VariantProbing(unittest.TestCase):
