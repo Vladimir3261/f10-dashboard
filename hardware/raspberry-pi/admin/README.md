@@ -103,8 +103,10 @@ Staggered classes are where declared and measured differ by design.
 The DDE reads declare 0.5 s, but that is the gap between firings of the
 class and one member goes out per firing — so the measured refresh is
 ~11 s, not 0.5, and that is the number a dataset actually has.
-`sampling` mode shows as a median of the polling cadence with a `last`
-of ten minutes: the pause is not hidden in the average.
+`sampling` mode shows as a median of the polling cadence with the
+ten-minute pause as `max` of the window (the last 16 refreshes) — and
+as `last` only until the next decode: the pause is not hidden in the
+median, and it ages out of the window rather than being averaged away.
 
 The session line above carries the physical wire count (once per
 frame; the per-request rows attribute a shared OBD batch to every

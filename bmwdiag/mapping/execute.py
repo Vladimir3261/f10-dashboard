@@ -21,9 +21,9 @@ Adding a protocol means adding a branch here, not touching the decoder.
 
 import math
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from ..errors import DiagnosticError, classify_exception
+from ..errors import DiagnosticError, RequestTimeout, classify_exception
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
@@ -37,8 +37,8 @@ from .model import RequestDef
 from .registry import ResolvedProfile
 
 __all__ = [
-    "MappingExecutor", "Retired", "fault_detail", "fault_kind",
-    "obd_logical_response",
+    "BatchOmitted", "MappingExecutor", "NoResponse", "Retired", "fault_detail",
+    "fault_kind", "obd_logical_response",
 ]
 
 
@@ -111,6 +111,22 @@ class NoResponse(DiagnosticError):
     answered = False
 
 
+class BatchOmitted(NoResponse):
+    """
+    A PID the ECU left out of an answered batch and then delivered to
+    the single re-read in the same cycle.
+
+    The same wire event as `NoResponse` - one answered frame without
+    this PID - counted on the same `no_response` outcome, but its own
+    kind in the error stream: it happens once per connection, when the
+    reader learns the ECU will not batch, and recovers immediately. A
+    row that says `batch_omitted` is "the reader adapted"; a row that
+    says `no_response` is a PID the ECU is not delivering at all.
+    """
+
+    kind = "batch_omitted"
+
+
 class Retired(DiagnosticError):
     """
     The OBD reader gave up on a PID: it will not be asked again this
@@ -149,6 +165,7 @@ _OUTCOME_OF_KIND = {
     "pending_timeout": "timeout",
     "transport_nack": "nack",
     "no_response": "no_response",
+    "batch_omitted": "no_response",
     "decode": "decode_failed",
 }
 
@@ -198,6 +215,10 @@ class _Series:
             #: doing NOW, not what it averaged since the driveway.
             "p95": round(recent[rank], digits),
             "median": round(recent[len(recent) // 2], digits),
+            #: The largest value still in the window: a pause stays
+            #: visible here for `window` more refreshes, where `last`
+            #: forgets it on the very next one.
+            "max": round(recent[-1], digits),
             "last": round(self.last, digits),
             "n": self.n,
             "window": len(recent),
@@ -272,8 +293,45 @@ def _answered(exc: BaseException) -> bool:
     answering to refuse one request. Both are positive evidence the link
     is alive, so neither may count towards concluding it is dead - only
     silence can do that.
+
+    Liveness, not accounting: what a failed exchange put on the wire is
+    `_rx_of`. A pending timeout is `answered` (the ECU said "wait", so
+    the link is alive) and yet has no answer to time.
     """
     return classify_exception(exc)[2]
+
+
+def _rx_of(exc: BaseException) -> Tuple[int, bool]:
+    """
+    What a failed exchange received: (frames, timed answer?).
+
+    The single place both accounting paths (the generic loop and the OBD
+    report) get this from, so they cannot disagree:
+
+    * negative response - one frame from the ECU, and it IS the answer:
+      its latency is the ECU's latency;
+    * routing NACK - one frame, from the gateway, refusing the target.
+      Nothing the ECU did, so no latency sample;
+    * pending timeout - every `responsePending` the ECU sent is a
+      received frame, but the final answer never came. The elapsed time
+      is the deadline, not a latency: recording it would put the full
+      wait into `latency_ms.p95` for exactly the 0x78-then-silent
+      identifiers the view exists to expose;
+    * timeout - nothing received.
+    """
+    kind, _scope, answered = classify_exception(exc)
+
+    if isinstance(exc, RequestTimeout) or kind in ("transport_timeout",
+                                                    "pending_timeout"):
+        return int(fault_detail(exc).get("pending") or 0), False
+
+    if kind == "transport_nack":
+        return 1, False
+
+    if answered:
+        return 1, True
+
+    return 0, False
 
 
 def _mark_stale(readings: Dict[str, Any]) -> Dict[str, Any]:
@@ -937,17 +995,37 @@ class MappingExecutor:
         exchange is a fault on every request it carried, with the
         exception's OWN kind; an answered exchange missing a PID is a
         `no_response` on that PID alone - the batch was answered, the
-        ECU just did not include it.
+        ECU just did not include it. When a later frame in the same
+        read carried the PID (the reader's single re-read), the omission
+        is labelled `batch_omitted` instead: same outcome counter, a
+        distinct row, so the once-per-connection "ECU does not batch"
+        event is not read as a PID going unanswered.
         """
+        delivered: Set[int] = set()
+
+        for exchange in report.exchanges:
+            delivered.update(exchange.returned)
+
         for exchange in report.exchanges:
             self._wire["exchanges"] += 1
             self._wire["tx_frames"] += 1
             self._wire["obd_batches"] += 1
             self._wire["obd_batched_pids"] += len(exchange.pids)
 
-            if exchange.answered:
-                self._wire["rx_frames"] += 1
+            #
+            # What came back is decided by the SAME rule as the generic
+            # path (`_rx_of`): the reader's `answered` flag says the far
+            # side spoke, which is liveness, not a frame count - a
+            # pending timeout is "answered" and has no answer to time.
+            #
+            if exchange.error is not None:
+                rx, timed = _rx_of(exchange.error)
+            elif exchange.answered:
+                rx, timed = 1, True
+            else:
+                rx, timed = 0, False
 
+            self._wire["rx_frames"] += rx
             latency = exchange.finished - exchange.started
             returned = set(exchange.returned)
 
@@ -961,14 +1039,23 @@ class MappingExecutor:
                 stat["exchanges"] += 1
                 stat["tx_frames"] += 1
 
-                if exchange.answered:
-                    self._record_rx(stat)
+                if rx:
+                    self._record_rx(stat, rx)
+
+                if timed:
                     self._record_latency(request.id, latency)
 
                 if exchange.error is not None:
                     self._note(request.id, exchange.error)
                 elif pid in returned:
                     stat["positive_response"] += 1
+                elif pid in delivered:
+                    self._record_fault(
+                        request.id, BatchOmitted.kind,
+                        "the ECU answered the batch without this PID; "
+                        "the single re-read delivered it",
+                        BatchOmitted("batch answered without this PID"),
+                    )
                 else:
                     self._record_fault(
                         request.id, "no_response",
@@ -1069,18 +1156,24 @@ class MappingExecutor:
                 # latency); a timeout is not, though the responsePending
                 # frames that preceded it were.
                 #
-                if in_setup:
-                    stat["setup_faults"] += 1
-                elif _answered(exc):
-                    self._record_rx(stat)
-                    self._wire["rx_frames"] += 1
-                    self._record_latency(request.id, time.monotonic() - started)
-                else:
-                    pending = fault_detail(exc).get("pending") or 0
+                rx, timed = _rx_of(exc)
 
-                    if pending:
-                        self._record_rx(stat, pending)
-                        self._wire["rx_frames"] += pending
+                if in_setup:
+                    #
+                    # An NRC or a NACK to a `2C` define is a frame the
+                    # setup exchange received, and the fault; a timed-out
+                    # define is the fault alone.
+                    #
+                    stat["setup_faults"] += 1
+                    stat["setup_rx_frames"] += rx
+                    self._wire["setup_rx_frames"] += rx
+                else:
+                    if rx:
+                        self._record_rx(stat, rx)
+                        self._wire["rx_frames"] += rx
+
+                    if timed:
+                        self._record_latency(request.id, time.monotonic() - started)
                 #
                 # A fault anywhere in a dynamic-identifier sequence means
                 # the ECU's definition can no longer be trusted to be

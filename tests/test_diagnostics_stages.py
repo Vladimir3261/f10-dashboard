@@ -208,6 +208,118 @@ class OneBatchIsOneExchange(unittest.TestCase):
         self.assertEqual(stats["obd.mode01.0B"]["exchanges"], 2)
         self.assertEqual(stats["obd.mode01.0B"]["no_response"], 1)
         self.assertEqual(stats["obd.mode01.0B"]["timeout"], 1)
+        #: never delivered in this read: the plain kind
+        self.assertEqual(stats["obd.mode01.0B"]["kinds"],
+                         {"no_response": 1, "transport_timeout": 1})
+
+    def test_an_omission_the_single_re_read_recovers_is_labelled_as_such(self):
+        """
+        The ECU will not batch: the first cycle's batch comes back
+        without a PID, the single re-read delivers it. That is one
+        `no_response` outcome on the wire but a `batch_omitted` row in
+        the error stream - the reader adapting, once per connection,
+        not a PID the ECU is refusing.
+        """
+        class OnePidOnly(ScriptedClient):
+            def request(self, payload, *a, **k):
+                self.frames.append(bytes(payload))
+                pids = list(payload[1:])
+                out = bytearray([0x41])
+                for pid in pids[:1]:            # answers the first PID only
+                    out.append(pid)
+                    out.extend(self.data[pid])
+                return bytes(out)
+
+        seen = []
+        profile = engine_profile()
+        client = OnePidOnly(SAMPLE)
+        session = live.ObdSession(client, profile.obd_pid_lengths())
+        executor = MappingExecutor(
+            profile, obd_reader=session,
+            on_error=lambda rid, exc: seen.append((rid, fault_kind(exc))),
+        )
+
+        for _ in range(2):
+            got = executor.execute(requests(profile, 0x0C, 0x0B))
+            self.assertEqual(set(got), {"rpm", "map"})
+
+        st = executor.stats()["obd.mode01.0B"]
+        #: cycle 1: batch without it + single; cycle 2: single only
+        self.assertEqual(st["exchanges"], 3)
+        self.assertEqual(st["positive_response"], 2)
+        self.assertEqual(st["no_response"], 1)
+        self.assertEqual(st["kinds"], {"batch_omitted": 1})
+        self.assertTrue(st["last_error"].startswith("batch_omitted:"))
+        self.assertEqual(seen, [("obd.mode01.0B", "batch_omitted")])
+        self.assertEqual(executor.stats()["obd.mode01.0C"]["failed"], 0)
+
+
+class TheObdPathBooksWhatTheFailureReceived(unittest.TestCase):
+    """
+    The OBD reader hands the executor an `ObdExchange` whose `answered`
+    is liveness: a pending timeout is answered (the ECU said wait) yet
+    it delivered no answer. The frames received and whether a latency
+    was measured come from the error, as on the UDS path - the same
+    `_rx_of` rule, so the two paths cannot drift apart again.
+    """
+
+    def test_a_pending_timeout_is_the_pending_frames_and_no_latency(self):
+        profile, client, session, executor = build(
+            data={}, multi=False, missing=lambda pid: live.HsfzPendingTimeout(
+                "gave up waiting", elapsed=2.0, pending=3
+            ),
+        )
+
+        session.multi_ok = False
+        executor.execute(requests(profile, 0x0C))
+
+        st = executor.stats()["obd.mode01.0C"]
+        self.assertEqual(st["exchanges"], 1)
+        self.assertEqual(st["tx_frames"], 1)
+        self.assertEqual(st["rx_frames"], 3)
+        self.assertEqual(st["timeout"], 1)
+        self.assertEqual(st["kinds"], {"pending_timeout": 1})
+        self.assertIsNotNone(st["last_rx"])
+        self.assertIsNone(st["latency_ms"])
+        self.assertEqual(executor.wire_stats()["rx_frames"], 3)
+
+    def test_a_nack_is_one_frame_and_no_latency(self):
+        profile, client, session, executor = build(
+            data={}, multi=False, missing=lambda pid: live.HsfzNack(0x12),
+        )
+
+        session.multi_ok = False
+        executor.execute(requests(profile, 0x0C))
+
+        st = executor.stats()["obd.mode01.0C"]
+        self.assertEqual(st["rx_frames"], 1)
+        self.assertEqual(st["nack"], 1)
+        self.assertIsNone(st["latency_ms"])
+        self.assertEqual(executor.wire_stats()["rx_frames"], 1)
+
+    def test_a_timeout_receives_nothing_and_an_nrc_is_timed(self):
+        profile, client, session, executor = build(data={}, multi=False)
+        session.multi_ok = False
+        executor.execute(requests(profile, 0x0C))
+
+        st = executor.stats()["obd.mode01.0C"]
+        self.assertEqual(st["rx_frames"], 0)
+        self.assertEqual(st["timeout"], 1)
+        self.assertIsNone(st["latency_ms"])
+
+        profile, client, session, executor = build(
+            data={}, multi=False,
+            missing=lambda pid: live.HsfzNegativeResponse(
+                0x01, 0x12, b"\x7f\x01\x12"
+            ),
+        )
+        session.multi_ok = False
+        executor.execute(requests(profile, 0x0C))
+
+        st = executor.stats()["obd.mode01.0C"]
+        self.assertEqual(st["rx_frames"], 1)
+        self.assertEqual(st["negative_response"], 1)
+        self.assertIsNotNone(st["latency_ms"])
 
 
 class RetirementMeansNotAsked(unittest.TestCase):
@@ -373,6 +485,84 @@ class SetupFramesAreNotThePoll(unittest.TestCase):
         self.assertEqual(st["timeout"], 1)
         self.assertIsNone(st["last_rx"])
         self.assertIsNone(st["latency_ms"])
+
+    def test_a_pending_timeout_receives_the_pending_frames_and_no_latency(self):
+        """
+        Three responsePending then silence: three frames came back and
+        no answer did. Booking it as one answered exchange (the
+        `answered` liveness flag read as a frame count) put the whole
+        deadline into the latency p95 for exactly the 0x78-then-silent
+        identifiers the diagnostics view exists to expose.
+        """
+        from bmwdiag.errors import PendingTimeout
+
+        class Stalling:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise PendingTimeout("gave up", elapsed=2.0, pending=3)
+
+        executor = MappingExecutor(self.profile, transport=Stalling())
+
+        for _ in range(3):
+            executor.execute([self.profile.request("plain")])
+
+        st = executor.stats()["plain"]
+        self.assertEqual(st["tx_frames"], 3)
+        self.assertEqual(st["rx_frames"], 9)
+        self.assertEqual(st["timeout"], 3)
+        self.assertEqual(st["kinds"], {"pending_timeout": 3})
+        self.assertIsNotNone(st["last_rx"])
+        self.assertIsNone(st["latency_ms"])
+        self.assertEqual(executor.wire_stats()["rx_frames"], 9)
+
+    def test_a_nack_is_one_gateway_frame_without_a_latency(self):
+        from bmwdiag.errors import RoutingNack
+
+        class Nacking:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise RoutingNack(0x12)
+
+        executor = MappingExecutor(self.profile, transport=Nacking())
+        executor.execute([self.profile.request("plain")])
+
+        st = executor.stats()["plain"]
+        self.assertEqual(st["rx_frames"], 1)
+        self.assertEqual(st["nack"], 1)
+        self.assertIsNotNone(st["last_rx"])
+        self.assertIsNone(st["latency_ms"])
+
+    def test_a_refused_define_is_a_setup_fault_and_a_received_frame(self):
+        """NRC 0x31 to the `2C` define: the ECU answered the setup."""
+        from bmwdiag.errors import NegativeResponse
+
+        class RefusingDefine:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                self.calls.append(bytes(payload))
+
+                if payload[0] == 0x2C:
+                    raise NegativeResponse(0x2C, 0x31)
+
+                raise AssertionError("the poll must not go out")
+
+        transport = RefusingDefine()
+        executor = MappingExecutor(self.profile, transport=transport)
+        executor.execute([self.profile.request("oil")])
+
+        st = executor.stats()["oil"]
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(st["setup_tx_frames"], 1)
+        self.assertEqual(st["setup_rx_frames"], 1)
+        self.assertEqual(st["setup_faults"], 1)
+        self.assertEqual(st["negative_response"], 1)
+        #: the poll itself never happened - nothing on its counters
+        self.assertEqual(st["tx_frames"], 0)
+        self.assertEqual(st["rx_frames"], 0)
+        self.assertIsNone(st["latency_ms"])
+        wire = executor.wire_stats()
+        self.assertEqual(wire["setup_rx_frames"], 1)
+        self.assertEqual(wire["rx_frames"], 0)
 
 
 class PositiveButNothingUsable(unittest.TestCase):
@@ -550,15 +740,18 @@ class EffectiveRefreshIsMeasured(unittest.TestCase):
         """
         `sampling` mode goes quiet for minutes at a time. The median of
         the last window is what the channel does while it is polling;
-        `last` is the pause. Neither is hidden by the other.
+        the pause is `last` for one refresh and `max` for the next
+        `window` of them. Neither is hidden by the median.
         """
         self.drive(30)
         import bmwdiag.mapping.execute as execute
 
         class Later:
+            now = 1000.0 + 30 * 0.1 + 600.0
+
             @staticmethod
             def monotonic():
-                return 1000.0 + 30 * 0.1 + 600.0
+                return Later.now
 
             @staticmethod
             def time():
@@ -568,12 +761,22 @@ class EffectiveRefreshIsMeasured(unittest.TestCase):
         execute.time = Later
         try:
             self.executor.execute([self.profile.request("fastone")])
+            refresh = self.executor.stats()["fastone"]["refresh_s"]
+            self.assertAlmostEqual(refresh["median"], 0.1)
+            self.assertGreater(refresh["last"], 599.0)
+            self.assertGreater(refresh["max"], 599.0)
+
+            #: one more decode: `last` is back to the cadence, the
+            #: pause is still the window's `max`
+            Later.now += 0.1
+            self.executor.execute([self.profile.request("fastone")])
         finally:
             execute.time = real
 
         refresh = self.executor.stats()["fastone"]["refresh_s"]
+        self.assertAlmostEqual(refresh["last"], 0.1)
+        self.assertGreater(refresh["max"], 599.0)
         self.assertAlmostEqual(refresh["median"], 0.1)
-        self.assertGreater(refresh["last"], 599.0)
 
 
 class LatencyIsCheapAndBounded(unittest.TestCase):
@@ -632,6 +835,7 @@ class TheReportSaysWhereEveryRequestStands(unittest.TestCase):
         self.assertEqual(dead["stages"]["wire"]["tx_frames"], 4)   # 1 batch + 3
         self.assertEqual(dead["stages"]["wire"]["rx_frames"], 1)   # the NRC
         self.assertIsNone(dead["stages"]["persisted_signals"])     # not recording
+        self.assertIsNone(report["totals"]["persisted_signals"])   # consistently
         self.assertIsNotNone(dead["last_tx_age"])
         self.assertIsNotNone(dead["last_rx_age"])                  # the NRC
 

@@ -2702,6 +2702,12 @@ class Diagnostics:
             "channels": channels,
             "totals": {
                 **totals,
+                #: Null when nothing is recording, like the per-request
+                #: figure - a zero here beside null rows read as "decoded
+                #: and lost".
+                "persisted_signals": (
+                    None if persisted is None else totals["persisted_signals"]
+                ),
                 "requests": len(profile.requests),
                 "channels": len(channels),
                 "success_pct": (

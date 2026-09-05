@@ -1927,8 +1927,12 @@ function renderCar(d) {
          ? `wire: <b>${(t.wire.exchanges || 0).toLocaleString()}</b> exchanges · `
            + `<b>${(t.wire.tx_frames || 0).toLocaleString()}</b> tx · `
            + `<b>${(t.wire.rx_frames || 0).toLocaleString()}</b> rx`
-           + (t.wire.setup_tx_frames
-               ? ` · <b>${t.wire.setup_tx_frames}</b> setup` : "")
+           + (t.wire.setup_tx_frames || t.wire.setup_faults
+               ? ` · setup <b>${t.wire.setup_tx_frames || 0}</b> tx / `
+                 + `<b>${t.wire.setup_rx_frames || 0}</b> rx`
+                 + (t.wire.setup_faults
+                     ? ` (<b>${t.wire.setup_faults}</b> failed)` : "")
+               : "")
            + (t.wire.obd_batches
                ? ` · ${t.wire.obd_batched_pids} PIDs in ${t.wire.obd_batches} batches`
                : "")
@@ -1997,16 +2001,26 @@ function renderCar(d) {
      so the summary stays a summary. Every number here is in the JSON
      (`stages`, `latency_ms`, `refresh_s`); the row only picks. */
   const detail = q => {
-    const st = q.stages || {}, w = st.wire || {};
+    /* An older live.py has no `stages` at all. Zeros would read as "a
+       request that never went out"; say there is nothing to show. */
+    if (!q.stages) return `<span class="stage">— (this live.py reports no stage counters; update it)</span>`;
+    const st = q.stages, w = st.wire || {};
     const skipped = [];
     if (st.skipped_resting) skipped.push(`${st.skipped_resting} resting`);
     if (st.skipped_retired) skipped.push(`${st.skipped_retired} retired`);
+    /* `decode_failed` is a subset of `positive` (a frame that fitted
+       the request and the mapping could not read), not another
+       outcome beside it - so it is shown inside the positive count. */
+    const positive = st.positive_response
+      ? `positive <b>${n(st.positive_response)}</b>`
+        + (st.decode_failed ? ` (of which <b>${n(st.decode_failed)}</b> decode failed)` : "")
+      : "";
     const outcomes = [
-      ["positive", st.positive_response], ["negative (NRC)", st.negative_response],
+      ["negative (NRC)", st.negative_response],
       ["timeout", st.timeout], ["nack", st.nack],
       ["no answer in batch", st.no_response], ["late", st.late],
-      ["decode failed", st.decode_failed],
     ].filter(([, v]) => v).map(([k, v]) => `${k} <b>${n(v)}</b>`);
+    if (positive) outcomes.unshift(positive);
     const setup = w.setup_tx_frames || w.setup_rx_frames || w.setup_faults
       ? ` (+ setup <b>${n(w.setup_tx_frames)}</b> tx / <b>${n(w.setup_rx_frames)}</b> rx`
         + (w.setup_faults ? `, <b>${w.setup_faults}</b> failed in setup` : "") + ")"
@@ -2032,7 +2046,7 @@ function renderCar(d) {
       + (lat ? `avg <b>${ms(lat.avg)}</b> · p95 <b>${ms(lat.p95)}</b> (last ${lat.window}) · last <b>${ms(lat.last)}</b>` : "—")
       + ` · last tx <b>${secs(q.last_tx_age)}</b> ago · last rx <b>${secs(q.last_rx_age)}</b> ago</span>`
       + `<span class="stage">refresh: declared <b>${secs(q.period_s)}</b> · measured `
-      + (ref ? `median <b>${secs(ref.median)}</b> · avg <b>${secs(ref.avg)}</b> · last <b>${secs(ref.last)}</b> (over ${ref.n} refreshes)` : "<b>—</b>")
+      + (ref ? `median <b>${secs(ref.median)}</b> · avg <b>${secs(ref.avg)}</b> · max <b>${secs(ref.max)}</b> (last ${ref.window}) · last <b>${secs(ref.last)}</b> (over ${ref.n} refreshes)` : "<b>—</b>")
       + `</span>`;
   };
 
@@ -2078,8 +2092,10 @@ function renderCar(d) {
     + `</tbody>`;
 
   /* Tap a summary row to open its pipeline. Rows opened before a
-     refresh stay open across it: the table is rebuilt every poll, and
-     a detail that closed itself under your thumb would be unreadable. */
+     refresh stay open across it: the table is rebuilt whenever the tab
+     is (re)opened - `loadCar(true)` on every switch to it, never on the
+     system poll - and a detail that closed itself under your thumb
+     would be unreadable. */
   for (const row of $("carrequests").querySelectorAll("tr.reqrow")) {
     const id = reqs[row.dataset.i].id;
     if (openRequests.has(id)) {
