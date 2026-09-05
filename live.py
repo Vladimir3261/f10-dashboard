@@ -447,6 +447,12 @@ class HsfzUnexpectedReply(HsfzError, ResponseMismatch):
     request called for. The car answered; the mismatch is between what
     was asked and what came back - a decode-side fault, never a reason
     to touch the link.
+
+    Its fault kind is ``decode``. Before the taxonomy it would have been
+    classified ``other`` - but no such record was ever written: the
+    class was introduced together with the taxonomy, and every earlier
+    ``other`` in the lake came from exceptions outside it. So the
+    ``other`` -> ``decode`` change splits no existing lake series.
     """
 
 
@@ -633,7 +639,12 @@ class HsfzClient:
         """
         try:
             return self.request(data, timeout, dst)
-        except (RequestTimeout,) + TIMEOUTS:
+        except TIMEOUTS:
+            #
+            # HsfzTimeout is a TimeoutError, so the taxonomy's timeout
+            # is covered here without naming it: a timeout is not a dead
+            # link and never triggers a reconnect.
+            #
             raise
         except LinkError:
             #
@@ -727,6 +738,16 @@ class HsfzClient:
                     raise HsfzLinkError("gateway closed the connection", "closed")
 
                 self.buf.extend(chunk)
+        except HsfzLinkError:
+            #
+            # Ahead of the OSError clause, because HsfzLinkError IS an
+            # OSError now (ConnectionError, so callers can keep their
+            # generic handlers). Without this the "closed" raise above
+            # was swallowed by the clause below it, the dead socket got
+            # the request anyway, and the failure surfaced later as a
+            # timeout with a dangling outstanding record.
+            #
+            raise
         except (BlockingIOError, OSError):
             pass
         finally:
