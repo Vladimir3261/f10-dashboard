@@ -427,6 +427,38 @@ engine. The executor rebuilds the logical `41 <pid> <data...>` response
 from what the session returns, so prefix matching and offsets work
 identically for OBD and for everything else.
 
+### Failures are categories, not prose (2026-09-05, issue #11)
+
+What the transport raises is part of the seam. `bmwdiag.protocol.errors`
+defines one type per thing that can go wrong, and every policy decision
+in the runtime keys on the type:
+
+| type | `kind` | meaning | executor policy |
+|---|---|---|---|
+| `LinkError` (a `ConnectionError`) | `transport_link` | socket closed / reset / never connected / stream desynchronised; `reason` says which | propagate → reconnect |
+| `RoutingNack` | `transport_nack` | the gateway refused to route to `target` | skip this exchange; proof the link is alive |
+| `RequestTimeout` (a `TimeoutError`) | `transport_timeout` | no answer within the deadline | skip; counts towards the link budget |
+| `NegativeResponse` | `negative_response` | the ECU answered `7F <service> <nrc>`; `service`, `nrc`, `raw` are fields | skip; proof the link is alive |
+| `ResponseMismatch` | `response_mismatch` | an answer of the wrong shape | skip; proof the link is alive |
+| `DecodeError` (mapping layer) | `decode` | bytes came back, the mapping could not read them | skip |
+
+`HsfzClient.request()` converts every socket-level `OSError` into a
+`LinkError` at one place, so no caller needs to know what an errno from
+`recv` means, and `request_safe()` reconnects on `LinkError` and nothing
+else. Before this, a negative response was an unclassified `HsfzError`,
+the executor took anything it did not recognise for a dead link, and one
+ECU declining one DID tore the whole session down into a new run.
+
+Each type carries its evidence as fields and `detail()` returns them as
+a plain dict (`{"nrc": 49, "nrc_hex": "0x31", "nrc_name":
+"requestOutOfRange", "service": 34, ...}`). That dict is stored beside
+`kind` and `message` — `errors.detail` locally,
+`telemetry.channel_errors.detail` in the lake, `last_error_detail` in
+`/api/diagnostics`, and `nrc` as a number in validation artifacts — so
+"which NRC does the DDE return for this DID" is a `GROUP BY`, not a
+regular expression over messages. Nothing on the runtime or validation
+path inspects exception text or class names; a test pins that.
+
 ---
 
 ## The YAML subset

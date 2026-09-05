@@ -29,12 +29,17 @@ from ingest import server as ingest_server    # noqa: E402
 from common import wire                       # noqa: E402
 
 
-class HsfzError(Exception):
-    pass
+from bmwdiag.protocol.errors import (  # noqa: E402
+    LinkError,
+    NegativeResponse,
+    RequestTimeout,
+    ResponseMismatch,
+    RoutingNack,
+)
 
 
-class HsfzNack(HsfzError):
-    pass
+def HsfzNack(message="gateway will not route to 0x18"):
+    return RoutingNack(0x18, message=message)
 
 
 class Classification(unittest.TestCase):
@@ -43,6 +48,11 @@ class Classification(unittest.TestCase):
     def test_each_fault_gets_a_stable_kind(self):
         cases = [
             (HsfzNack("will not route to 0x18"), "transport_nack"),
+            (RequestTimeout(0x12, 0.4), "transport_timeout"),
+            (LinkError("gateway closed", reason="closed"), "transport_link"),
+            (NegativeResponse(0x22, 0x31, b"\x7f\x22\x31"), "negative_response"),
+            (ResponseMismatch("unexpected reply", raw=b"\x7e"), "response_mismatch"),
+            # what a transport may still let through raw
             (TimeoutError("HSFZ read timeout"), "transport_timeout"),
             (ConnectionResetError("reset"), "transport_link"),
             (BrokenPipeError("pipe"), "transport_link"),
