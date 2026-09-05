@@ -22,10 +22,10 @@ Adding a protocol means adding a branch here, not touching the decoder.
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..errors import DiagnosticError, classify_exception
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
-    NegativeResponse,
     build_request,
 )
 from .decoder import OK, STALE, Reading, read_response
@@ -33,7 +33,7 @@ from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
 
-__all__ = ["MappingExecutor", "obd_logical_response"]
+__all__ = ["MappingExecutor", "fault_detail", "fault_kind", "obd_logical_response"]
 
 
 def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
@@ -85,7 +85,7 @@ REQUEST_REST_SECONDS = 5.0
 REQUEST_REST_MAX_SECONDS = 60.0
 
 
-class NoResponse(Exception):
+class NoResponse(DiagnosticError):
     """
     A PID the OBD reader asked for and did not get back.
 
@@ -96,8 +96,12 @@ class NoResponse(Exception):
     place and reported in another.
     """
 
+    kind = "no_response"
+    scope = "request"
+    answered = False
 
-def fault_kind(exc: Exception) -> str:
+
+def fault_kind(exc: BaseException) -> str:
     """
     A stable, structured name for what went wrong.
 
@@ -105,73 +109,66 @@ def fault_kind(exc: Exception) -> str:
     exception messages - a message is prose that changes; a kind is data you
     can group by. Used to attribute errors per request in the lake, which is
     what makes "this channel fails 8% of the time" answerable at all.
+
+    The names are the taxonomy's (bmwdiag.errors): `transport_link`,
+    `transport_nack`, `transport_timeout`, `negative_response`, `decode`,
+    `no_response`, `other`. They are already in `telemetry.channel_errors`
+    and are not renamed; finer distinctions travel in `fault_detail()`.
+    A mapping error that is not a decode failure (a loader problem
+    surfacing at poll time) is still reported as `decode`: it is our data,
+    not the car, and that is what the kind has always meant.
     """
-    if isinstance(exc, (DecodeError, MappingError)):
+    if isinstance(exc, DiagnosticError):
+        return exc.kind
+
+    if isinstance(exc, MappingError):
         return "decode"
 
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
-        return "transport_link"
-
-    #
-    # An exception may declare its own kind as data (`kind`, a string):
-    # the transport's pending-exhaustion timeout does, because "the ECU
-    # kept saying wait, then went silent" and "the ECU said nothing"
-    # are different diagnoses that would otherwise share one label.
-    # Read as an attribute, never inferred from the class name.
-    #
-    declared = getattr(exc, "kind", None)
-
-    if isinstance(declared, str) and declared:
-        return declared
-
-    if isinstance(exc, TimeoutError):
-        return "transport_timeout"
-
-    if isinstance(exc, NoResponse):
-        return "no_response"
-
-    if isinstance(exc, NegativeResponse):
-        #: The ECU answered and refused. Until 2026-09-05 this was "other",
-        #: which hid the one fault kind that says "the ECU is there, it
-        #: just does not do this" behind the same label as a bug.
-        return "negative_response"
-
-    if exc.__class__.__name__.endswith("Nack"):
-        return "transport_nack"
-
-    return "other"
+    return classify_exception(exc)[0]
 
 
-def _is_request_fault(exc: Exception) -> bool:
+def fault_detail(exc: BaseException) -> Dict[str, Any]:
+    """
+    The structured part of a fault: the NRC and service of a negative
+    response, the target of a routing NACK, the elapsed time and pending
+    count of a timeout. Empty for exceptions outside the taxonomy. Always
+    JSON-safe, so it can be stored next to the kind and shipped as-is.
+    """
+    if isinstance(exc, DiagnosticError):
+        return dict(exc.detail())
+
+    return {}
+
+
+def _is_request_fault(exc: BaseException) -> bool:
     """
     Did ONE exchange fail, or has the link died?
 
     Skipping a request is only safe while the link is still good; otherwise
     every later request fails identically and the reconnect never happens.
 
-    Classified structurally rather than by importing the transport's own
-    exceptions: `bmwdiag` deliberately knows nothing about HSFZ, imports
-    nothing outside the standard library and opens no sockets, so it cannot
-    reference `HsfzNack` by type. Anything unrecognised counts as a link
+    Decided by the exception's category, never by its name or text: the
+    transport raises into the taxonomy (`LinkError`, `RoutingNack`,
+    `RequestTimeout`, `NegativeResponse`), and `bmwdiag` - which knows
+    nothing about HSFZ, imports nothing outside the standard library and
+    opens no sockets - reads the category. A bare socket exception is
+    classified by its stdlib type. Anything unrecognised counts as a link
     fault, which is the conservative direction - a needless reconnect costs
     a few seconds, whereas mistaking a dead link for a slow ECU means polling
     a closed socket forever.
     """
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
-        return False                    # socket gone: let it reconnect
+    return classify_exception(exc)[1] == "request"
 
-    if isinstance(exc, TimeoutError):
-        return True                     # this ECU did not answer in time
 
-    if isinstance(exc, NegativeResponse):
-        # The ECU itself answered `7F`: the link carried the request there
-        # and the reply back. It refused this one service or identifier,
-        # which says nothing about the next request. Skip and record it.
-        return True
-
-    # A negative acknowledgement: the gateway is alive and refused to route
-    # to one target (e.g. "gateway will not route to 0x18" for the EGS).
-    return exc.__class__.__name__.endswith("Nack")
+def _answered(exc: BaseException) -> bool:
+    """
+    Did the far side demonstrably reply? A routing NACK is the gateway
+    answering to refuse one target; a negative response is the ECU
+    answering to refuse one request. Both are positive evidence the link
+    is alive, so neither may count towards concluding it is dead - only
+    silence can do that.
+    """
+    return classify_exception(exc)[2]
 
 
 def _mark_stale(readings: Dict[str, Any]) -> Dict[str, Any]:
@@ -288,6 +285,10 @@ class MappingExecutor:
             "sent": 0, "ok": 0, "failed": 0,
             "kinds": {}, "last_ok": None, "last_error": None,
             "last_error_at": None,
+            #: The structured fields of the last fault (`fault_detail`):
+            #: for a negative response the service and NRC, for a NACK
+            #: the target. What the message says in prose, as data.
+            "last_detail": None,
             #: Answers that arrived after this request had already been
             #: given up on, and were discarded by the transport. NOT a
             #: failure - the timeout was already counted as one - and
@@ -405,7 +406,7 @@ class MappingExecutor:
         stat["last_ok"] = when
 
     def _record_fault(self, request_id: str, kind: str, message: str,
-                      exc: Optional[Exception] = None) -> None:
+                      exc: Optional[BaseException] = None) -> None:
         """
         Count a fault AND report it. Both, always.
 
@@ -421,6 +422,7 @@ class MappingExecutor:
         stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
         stat["last_error"] = f"{kind}: {message}"
         stat["last_error_at"] = time.time()
+        stat["last_detail"] = fault_detail(exc) if exc is not None else None
 
         if self.on_error is not None:
             #: A PID the reader simply dropped has no exception of its
@@ -723,7 +725,7 @@ class MappingExecutor:
                 # positive evidence the link is alive, so neither may count
                 # towards concluding it is dead - only silence can do that.
                 #
-                if fault_kind(exc) not in ("transport_nack", "negative_response"):
+                if not _answered(exc):
                     self._transport_faults += 1
 
                 faults = self._request_faults.get(request.id, 0) + 1

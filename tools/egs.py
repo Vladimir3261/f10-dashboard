@@ -114,9 +114,12 @@ def probe_addr(client, addr, timeout, session) -> Optional[str]:
             resp = client.request(data, timeout=timeout, dst=addr)
         except live.HsfzNack:
             return None
-        except live.HsfzError as exc:
-            if "NRC" in str(exc):
-                notes.append(f"{tag}:NRC")
+        except live.HsfzNegativeResponse:
+            # A negative response is still an answer: the ECU is there.
+            # Decided by type, not by grepping the message for "NRC".
+            notes.append(f"{tag}:NRC")
+            continue
+        except live.HsfzError:
             continue
         except Exception:
             continue

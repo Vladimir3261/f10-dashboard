@@ -23,7 +23,7 @@ import live
 from bmwdiag.mapping import fault_kind
 from bmwdiag.mapping.execute import TRANSPORT_FAULT_BUDGET
 from bmwdiag.mapping.errors import DecodeError
-from bmwdiag.protocol import NegativeResponse
+from bmwdiag.protocol import DiagnosticError, NegativeResponse, RoutingNack
 
 sys.path.insert(0, os.path.join(support.ROOT, "infra"))
 from sync import agent as sync_agent          # noqa: E402
@@ -31,12 +31,15 @@ from ingest import server as ingest_server    # noqa: E402
 from common import wire                       # noqa: E402
 
 
-class HsfzError(Exception):
+class HsfzError(DiagnosticError):
     pass
 
 
-class HsfzNack(HsfzError):
-    pass
+class HsfzNack(HsfzError, RoutingNack):
+    """A routing NACK as live.py raises it: by inheritance, not by name."""
+
+    def __init__(self, message):
+        RoutingNack.__init__(self, target=0x18, message=message)
 
 
 class Classification(unittest.TestCase):
@@ -310,7 +313,7 @@ class TheWiring(unittest.TestCase):
 
 
 class Shipping(unittest.TestCase):
-    def _db_with_errors(self, path, include_table=True):
+    def _db_with_errors(self, path, include_table=True, with_detail=False):
         con = sqlite3.connect(path)
         con.executescript(
             "CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, started_at REAL,"
@@ -318,7 +321,23 @@ class Shipping(unittest.TestCase):
         )
         con.execute("INSERT INTO runs(id,started_at,vin) VALUES(1,1.0,'V')")
 
-        if include_table:
+        if include_table and with_detail:
+            con.executescript(
+                "CREATE TABLE errors(run_id INTEGER, ts REAL, request_id TEXT,"
+                " kind TEXT, message TEXT, detail TEXT);"
+            )
+            con.execute(
+                "INSERT INTO errors VALUES(1, 1.5, 'egs.selector.DA2E',"
+                " 'transport_nack', 'will not route to 0x18',"
+                " '{\"target\":24}')"
+            )
+            con.execute(
+                "INSERT INTO errors VALUES(1, 1.6, 'n47.d72.dyn.4517',"
+                " 'negative_response', 'negative response to 0x22: NRC 0x31',"
+                " '{\"nrc\":49,\"nrc_name\":\"requestOutOfRange\","
+                "\"raw\":\"7f 22 31\",\"service\":34}')"
+            )
+        elif include_table:
             con.executescript(
                 "CREATE TABLE errors(run_id INTEGER, ts REAL, request_id TEXT,"
                 " kind TEXT, message TEXT);"
@@ -340,6 +359,62 @@ class Shipping(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["request_id"], "egs.selector.DA2E")
         self.assertEqual(rows[0]["kind"], "transport_nack")
+
+    def test_a_database_without_the_detail_column_ships_it_empty(self):
+        """Files recorded before issue #11 have no `detail`; they still sync."""
+        db = os.path.join(tempfile.mkdtemp(), "t.db")
+        self._db_with_errors(db)
+
+        rows = sync_agent.read_errors(db, 0, 100)
+
+        self.assertEqual(rows[0]["detail"], "")
+
+    def test_the_detail_ships_as_the_json_the_recorder_wrote(self):
+        import json
+
+        db = os.path.join(tempfile.mkdtemp(), "t.db")
+        self._db_with_errors(db, with_detail=True)
+
+        rows = sync_agent.read_errors(db, 0, 100)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(json.loads(rows[0]["detail"]), {"target": 24})
+        nrc = json.loads(rows[1]["detail"])
+        self.assertEqual(nrc["nrc"], 0x31)                # a number, not prose
+        self.assertEqual(nrc["service"], 0x22)
+        self.assertEqual(nrc["nrc_name"], "requestOutOfRange")
+
+        batch = wire.columnar(
+            "channel_errors",
+            [{k: v for k, v in r.items() if k != "_rowid"} for r in rows],
+            meta={"db": "t.db"},
+        )
+        built = ingest_server.build_channel_errors(
+            wire.decode(wire.encode(batch))
+        )
+
+        self.assertEqual(json.loads(built[1]["detail"])["nrc"], 0x31)
+        self.assertEqual(built[1]["kind"], "negative_response")
+        # A pre-#11 row lands with the column present and empty, which is
+        # what the migration's DEFAULT gives the rows before it.
+        self.assertEqual(
+            ingest_server.build_channel_errors(
+                wire.columnar("channel_errors", [{"request_id": "x", "kind": "other"}])
+            )[0]["detail"], "",
+        )
+
+    def test_the_schema_and_the_migration_agree_on_the_column(self):
+        """The init schema and the dated migration must add the same column."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        schema = open(os.path.join(
+            root, "infra", "clickhouse", "init", "001_schema.sql")).read()
+        migration = open(os.path.join(
+            root, "infra", "clickhouse", "migrations",
+            "2026-09-05_channel_errors_detail.sql")).read()
+
+        self.assertIn("detail       String DEFAULT ''", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS detail String DEFAULT ''", migration)
+        self.assertIn("telemetry.channel_errors", migration)
 
     def test_a_database_without_the_table_is_empty_not_an_error(self):
         """Databases recorded before fault logging existed must still sync."""
