@@ -28,7 +28,7 @@ from ..protocol.request import (
     NegativeResponse,
     build_request,
 )
-from .decoder import read_response
+from .decoder import OK, STALE, Reading, read_response
 from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
@@ -112,6 +112,18 @@ def fault_kind(exc: Exception) -> str:
     if isinstance(exc, (ConnectionError, BrokenPipeError)):
         return "transport_link"
 
+    #
+    # An exception may declare its own kind as data (`kind`, a string):
+    # the transport's pending-exhaustion timeout does, because "the ECU
+    # kept saying wait, then went silent" and "the ECU said nothing"
+    # are different diagnoses that would otherwise share one label.
+    # Read as an attribute, never inferred from the class name.
+    #
+    declared = getattr(exc, "kind", None)
+
+    if isinstance(declared, str) and declared:
+        return declared
+
     if isinstance(exc, TimeoutError):
         return "transport_timeout"
 
@@ -160,6 +172,21 @@ def _is_request_fault(exc: Exception) -> bool:
     # A negative acknowledgement: the gateway is alive and refused to route
     # to one target (e.g. "gateway will not route to 0x18" for the EGS).
     return exc.__class__.__name__.endswith("Nack")
+
+
+def _mark_stale(readings: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Downgrade every `ok` reading to `stale`: the bytes decoded fine, but
+    the transport could not tell whether they answer THIS request or the
+    previous, timed-out one with the same content - they may be one
+    period old. A reading already flagged for another reason keeps its
+    own label; `stale` is not usable, so the display and the derived
+    channels drop it and the lake keeps the number with the label.
+    """
+    return {
+        key: Reading(reading.value, STALE) if reading.quality == OK else reading
+        for key, reading in readings.items()
+    }
 
 
 def _usable(readings: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,6 +296,12 @@ class MappingExecutor:
             #: short for the ECU, which is a different fix from one
             #: that never answers at all.
             "late": 0,
+            #: Answers accepted but marked `stale` because the transport
+            #: could not tell them from the previous, timed-out request
+            #: of the same content (an ambiguous re-poll). Counted as
+            #: `ok` at the request level - the exchange worked - with
+            #: the readings themselves carrying the flag.
+            "ambiguous": 0,
         })
 
     def note_late_response(self, request_id: str, message: str = "") -> None:
@@ -362,6 +395,9 @@ class MappingExecutor:
 
     def _record_sent(self, request_id: str) -> None:
         self._stat(request_id)["sent"] += 1
+
+    def _record_ambiguous(self, request_id: str) -> None:
+        self._stat(request_id)["ambiguous"] += 1
 
     def _record_ok(self, request_id: str, when: float) -> None:
         stat = self._stat(request_id)
@@ -530,6 +566,13 @@ class MappingExecutor:
 
         got = self.obd_reader.read(pids)
         out: List[DecodedResponse] = []
+        #
+        # PIDs whose bytes came back under correlation ambiguity (the
+        # reader's transport re-polled the same batch after a timeout
+        # and could not tell the two answers apart). Optional on the
+        # reader; a reader without it never flags.
+        #
+        ambiguous = set(getattr(self.obd_reader, "ambiguous_pids", ()) or ())
 
         #
         # A PID the reader dropped is not an exception - the session
@@ -561,6 +604,10 @@ class MappingExecutor:
             except Exception as exc:            # defensive: never kill the loop
                 self._note(request.id, exc)
                 continue
+
+            if pid in ambiguous:
+                readings = _mark_stale(readings)
+                self._record_ambiguous(request.id)
 
             completed = time.time()
             self._record_ok(request.id, completed)
@@ -717,6 +764,17 @@ class MappingExecutor:
             except Exception as exc:            # defensive: never kill the loop
                 self._note(request.id, exc)
                 continue
+
+            #
+            # The transport says whether the answer it just returned
+            # could equally be the previous request's (same content,
+            # re-polled after a timeout, nothing arrived in the quiet
+            # window to break the tie). A valid answer, possibly one
+            # period old: recorded, but as `stale`, never as `ok`.
+            #
+            if getattr(self.transport, "last_answer_ambiguous", False):
+                readings = _mark_stale(readings)
+                self._record_ambiguous(request.id)
 
             completed = time.time()
             self._record_ok(request.id, completed)

@@ -6,6 +6,11 @@ testable, and diffable against captured traffic, without a socket, a
 gateway or a car anywhere in the picture.
 """
 
+# Import order, not a dependency: `request` needs `mapping.errors`, and
+# importing `bmwdiag.mapping` first runs `mapping.execute`, which needs
+# `protocol.request` back. Loading the mapping package before this one's
+# own modules lets either package be imported first.
+from .. import mapping as _mapping  # noqa: F401  (import-order guard)
 from .correlate import (
     ResponseExpectation,
     classify,

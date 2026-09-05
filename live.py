@@ -376,8 +376,12 @@ class HsfzPendingTimeout(HsfzError, TimeoutError):
     The ECU kept asking for more time (NRC 0x78) and the absolute
     deadline ran out. A TimeoutError, so the executor treats it as one
     exchange that did not complete - and an HsfzError, so every existing
-    handler keeps working.
+    handler keeps working. Recorded under its own fault kind: the ECU
+    that answered 0x78 and then nothing is not the ECU that answered
+    nothing, and the lake should be able to tell them apart.
     """
+
+    kind = "pending_timeout"
 
 
 #: After a request to an ECU times out, the line is listened to for
@@ -424,6 +428,12 @@ class _Outstanding:
     since: float
     pending: int = 0
     settled: bool = False
+    #: One answer has already been returned for this label under
+    #: ambiguity (see `HsfzClient.request`). The record is kept only so
+    #: a SECOND answer - the one that would prove the first was stale -
+    #: is attributed and discarded rather than handed to the next
+    #: request; it never flags another answer.
+    answered: bool = False
 
     @property
     def label(self) -> str:
@@ -504,7 +514,20 @@ class HsfzClient:
             "settle_runs": 0,
             "settle_caught": 0,
             "ambiguous_resends": 0,
+            #: Answers returned under that ambiguity - each one was
+            #: flagged to the caller (`last_answer_ambiguous`) because
+            #: it may be the previous request's, one period stale.
+            "ambiguous_answers": 0,
+            #: Timed-out requests forgotten unanswered after
+            #: `pending_max_total`: nothing can be their answer any more.
+            "outstanding_expired": 0,
         }
+        #: Set by every `request()`: True when the answer it returned
+        #: could equally have been the answer to the previous, timed-out
+        #: request of the same content to the same ECU - it is a valid
+        #: answer, but possibly one period old. The executor marks the
+        #: readings decoded from it `stale`. False for any other outcome.
+        self.last_answer_ambiguous = False
         self._trace: Deque[Tuple[float, str, int, bytes, str]] = deque(
             maxlen=TRACE_FRAMES
         )
@@ -675,18 +698,38 @@ class HsfzClient:
         A diagnostic frame that is not the answer to the request in
         flight. Never returned to a caller; attributed if it can be.
         """
-        outstanding = self._outstanding.get(ecu)
         now = self.clock()
+        outstanding = self._expire(ecu, now)
+        outcome = (
+            FOREIGN if outstanding is None
+            else classify(outstanding.expectation, body)[0]
+        )
 
-        if outstanding is not None and classify(
-            outstanding.expectation, body
-        )[0] != FOREIGN:
+        if outcome == PENDING:
+            #
+            # A late responsePending: not the answer, a promise of one.
+            # The request stays outstanding - forgetting it here would
+            # leave the answer it announces with nothing to be
+            # attributed to - and its clock restarts, since the ECU has
+            # just said it is still working on it.
+            #
+            outstanding.since = now
+            outstanding.pending += 1
+            self._link["pending_seen"] += 1
+            self._record("rx", ecu, body, "late pending")
+            return
+
+        if outcome != FOREIGN:
             kind = "late_response"
             label = outstanding.label or ORPHAN_LABEL.format(ecu)
+            what = (
+                "was answered ambiguously" if outstanding.answered
+                else "timed out"
+            )
             message = (
                 f"discarded {body.hex(' ')} from 0x{ecu:02X}: the answer to "
                 f"{label} ({outstanding.expectation.describe()}), which "
-                f"timed out {now - outstanding.since:.2f}s ago"
+                f"{what} {now - outstanding.since:.2f}s ago"
             )
             del self._outstanding[ecu]
         else:
@@ -717,23 +760,33 @@ class HsfzClient:
         else:
             self._link["timeouts"] += 1
 
-    def _settle(self, ecu: int, expectation: Any) -> None:
+    def _settle(self, ecu: int, expectation: Any) -> bool:
         """
         After a timeout to this ECU: listen before sending again.
 
-        Runs once per timeout. Reads until the line has been quiet for
-        `settle_quiet` or `settle_max` has elapsed; whatever arrives is
-        classified against the outstanding request, so its late answer
-        is attributed and discarded here rather than returned to the
-        next caller. If the outstanding request is still unanswered
-        afterwards and the new request could not be told apart from it
-        by content, that is counted as an ambiguous resend - the
-        bounded residual, made visible.
+        Runs once per outstanding record. Reads until the line has been
+        quiet for `settle_quiet` or `settle_max` has elapsed; whatever
+        arrives is classified against the outstanding request, so its
+        late answer is attributed and discarded here rather than
+        returned to the next caller. Returns True when the outstanding
+        request is still unanswered afterwards and the new request
+        could not be told apart from it by content - the ambiguous
+        resend, counted, and the reason the answer that follows will be
+        flagged.
         """
-        outstanding = self._outstanding.get(ecu)
+        outstanding = self._expire(ecu, self.clock())
 
-        if outstanding is None or outstanding.settled:
-            return
+        if outstanding is None:
+            return False
+
+        if outstanding.settled:
+            #
+            # Settled once already and still unanswered. The ambiguity
+            # (if any) with THIS request is what the caller needs to
+            # know; a second listen would only cost time the first one
+            # already spent.
+            #
+            return self._ambiguous(ecu, outstanding, expectation)
 
         outstanding.settled = True
         self._link["settle_runs"] += 1
@@ -755,16 +808,56 @@ class HsfzClient:
             quiet_until = self.clock() + self.settle_quiet
             self._stray(control, payload)
 
-        if ecu in self._outstanding:
-            if outstanding.expectation.indistinguishable_from(expectation):
-                self._link["ambiguous_resends"] += 1
-                self._record(
-                    "tx", ecu, b"", "ambiguous: outstanding "
-                    + outstanding.expectation.describe()
-                    + " is indistinguishable from this request",
-                )
-        else:
+        if ecu not in self._outstanding:
             self._link["settle_caught"] += 1
+            return False
+
+        return self._ambiguous(ecu, outstanding, expectation)
+
+    def _ambiguous(
+        self, ecu: int, outstanding: _Outstanding, expectation: Any
+    ) -> bool:
+        """
+        Could the outstanding request's answer be mistaken for this
+        one's? Only a genuine timeout can make the next answer
+        ambiguous; a record kept after an ambiguous answer exists to
+        attribute a second answer, and never flags another.
+        """
+        if outstanding.answered:
+            return False
+
+        if not outstanding.expectation.indistinguishable_from(expectation):
+            return False
+
+        self._link["ambiguous_resends"] += 1
+        self._record(
+            "tx", ecu, b"", "ambiguous: outstanding "
+            + outstanding.expectation.describe()
+            + " is indistinguishable from this request",
+        )
+
+        return True
+
+    def _expire(self, ecu: int, now: float) -> Optional[_Outstanding]:
+        """
+        The outstanding record for an ECU, or None once it is too old
+        to matter. No request may take longer than `pending_max_total`
+        from send to final answer (the bound `request` itself applies
+        to a run of responsePending), so nothing arriving later than
+        that after a timeout can be its answer, and it must not keep
+        flagging re-polls as ambiguous for ever.
+        """
+        outstanding = self._outstanding.get(ecu)
+
+        if outstanding is None:
+            return None
+
+        if now - outstanding.since > self.pending_max_total:
+            del self._outstanding[ecu]
+            self._link["outstanding_expired"] += 1
+            return None
+
+        return outstanding
 
     def _answered(self, ecu: int, expectation: Any) -> None:
         """
@@ -772,9 +865,23 @@ class HsfzClient:
         that could be told apart from the outstanding one is proof the
         ECU has moved past it (it answers in order); one that could not
         is the ambiguity the settle window bounded. Either way nothing
-        older is expected any more.
+        older is expected any more - with one exception: a request the
+        ECU explicitly promised to answer (responsePending) and has
+        not. A long job can run beside short ones, so answering a newer
+        request first is no proof the promised answer will never come;
+        that record stays until the answer arrives or the pending bound
+        expires it, at the cost of at most one settle window if the
+        same identifier is polled again meanwhile.
         """
-        self._outstanding.pop(ecu, None)
+        outstanding = self._outstanding.get(ecu)
+
+        if outstanding is None:
+            return
+
+        if outstanding.pending and not outstanding.answered:
+            return
+
+        del self._outstanding[ecu]
 
     def link_stats(self) -> Dict[str, Any]:
         """
@@ -794,6 +901,7 @@ class HsfzClient:
                         "age_s": round(now - o.since, 2),
                         "pending": o.pending,
                         "settled": o.settled,
+                        "answered": o.answered,
                     } for ecu, o in self._outstanding.items()],
                     "trace": [{
                         "age_s": round(now - t, 3),
@@ -848,8 +956,9 @@ class HsfzClient:
         # out, give its answer a bounded chance to arrive BEFORE this
         # one is sent, so it cannot be mistaken for this one's.
         #
+        self.last_answer_ambiguous = False
         self._discard_queued()
-        self._settle(want_src, expectation)
+        ambiguous = self._settle(want_src, expectation)
 
         self._send(HSFZ_DIAG_REQ, bytes([self.src, target]) + data)
         self._record("tx", target, data)
@@ -939,6 +1048,26 @@ class HsfzClient:
                 self._record("rx", want_src, body, "negative")
                 raise HsfzNegativeResponse(body[1], nrc)
 
+            if ambiguous and want_src in self._outstanding:
+                #
+                # The residual content cannot settle: this frame fits
+                # the request in flight AND the one that timed out
+                # before it, and nothing arrived in the quiet window to
+                # break the tie. It IS an answer - it is returned - but
+                # it is flagged, and the record is kept (as this
+                # request's, not the old one's) so that if a second
+                # answer follows it is attributed here rather than
+                # handed to the next caller.
+                #
+                self.last_answer_ambiguous = True
+                self._link["ambiguous_answers"] += 1
+                self._record("rx", want_src, body, "ambiguous")
+                self._outstanding[want_src] = _Outstanding(
+                    expectation, started, answered=True
+                )
+
+                return body
+
             self._record("rx", want_src, body)
             self._answered(want_src, expectation)
 
@@ -1024,6 +1153,13 @@ class HsfzTransport:
     ) -> bytes:
         return self.client.request(payload, timeout, dst, expect=expect)
 
+    @property
+    def last_answer_ambiguous(self) -> bool:
+        """Was the answer `request` last returned possibly one period
+        stale? See `HsfzClient.last_answer_ambiguous`; the executor
+        marks the readings it decodes from such an answer `stale`."""
+        return self.client.last_answer_ambiguous
+
 
 # --------------------------------------------------------------- discovery
 
@@ -1096,6 +1232,12 @@ class ObdSession:
         #
         self.pid_len: Dict[int, int] = dict(OBD_SUPPORT_PIDS)
         self.pid_len.update(pid_len or {})
+        #: PIDs of the last `read()` whose bytes came from an answer the
+        #: client flagged as ambiguous (`HsfzClient.last_answer_ambiguous`):
+        #: a re-poll of the same batch after a timeout, where the answer
+        #: may be the previous one. The executor marks those readings
+        #: `stale`. Rebuilt on every `read()`.
+        self.ambiguous_pids: set = set()
 
     def _mode01(self, pids: List[int], timeout: Optional[float] = None) -> Dict[int, bytes]:
         resp = self.client.request(bytes([0x01] + pids), timeout)
@@ -1116,11 +1258,15 @@ class ObdSession:
             out[pid] = resp[i + 1:i + 1 + n]
             i += 1 + n
 
+        if getattr(self.client, "last_answer_ambiguous", False):
+            self.ambiguous_pids.update(out)
+
         return out
 
     def read(self, pids: List[int]) -> Dict[int, bytes]:
         """Read a set of PIDs, batching where the ECU allows it."""
         result: Dict[int, bytes] = {}
+        self.ambiguous_pids = set()
 
         if self.multi_ok:
             try:
@@ -2025,7 +2171,7 @@ class Diagnostics:
             ) + 1
 
         requests = []
-        totals = {"sent": 0, "ok": 0, "failed": 0, "late": 0}
+        totals = {"sent": 0, "ok": 0, "failed": 0, "late": 0, "ambiguous": 0}
 
         for request in profile.requests:
             st = stats.get(request.id, {})
@@ -2076,6 +2222,12 @@ class Diagnostics:
                 #: the timeout is too short for this ECU, not that it
                 #: is silent.
                 "late": st.get("late", 0),
+                #: Answers accepted but flagged: the transport could not
+                #: tell them from the previous, timed-out request of the
+                #: same content, so their readings went in as `stale`.
+                #: Counted in `ok` (the exchange worked); this says how
+                #: many of those ok's carry a suspect value.
+                "ambiguous": st.get("ambiguous", 0),
                 #: From the resting mechanism (cfbabd4): seconds this
                 #: request is standing down after repeated faults, and
                 #: the consecutive-fault count that caused it. A snapshot
