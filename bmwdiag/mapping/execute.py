@@ -19,6 +19,7 @@ differently on the wire:
 Adding a protocol means adding a branch here, not touching the decoder.
 """
 
+import math
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -26,6 +27,8 @@ from ..errors import DiagnosticError, classify_exception
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
+    ObdExchange,
+    ObdReadReport,
     build_request,
 )
 from .decoder import OK, STALE, Reading, read_response
@@ -33,7 +36,10 @@ from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
 
-__all__ = ["MappingExecutor", "fault_detail", "fault_kind", "obd_logical_response"]
+__all__ = [
+    "MappingExecutor", "Retired", "fault_detail", "fault_kind",
+    "obd_logical_response",
+]
 
 
 def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
@@ -94,11 +100,108 @@ class NoResponse(DiagnosticError):
     exists so the no-response case can travel down the same `on_error`
     path as a real transport fault, rather than being counted in one
     place and reported in another.
+
+    Since the reader started reporting its exchanges (issue #16) this is
+    precisely "the batch was answered and this PID was not in it" - a
+    timed-out or refused exchange keeps its own kind.
     """
 
     kind = "no_response"
     scope = "request"
     answered = False
+
+
+class Retired(DiagnosticError):
+    """
+    The OBD reader gave up on a PID: it will not be asked again this
+    connection.
+
+    Reported ONCE, at the moment of retirement, so the persistent error
+    stream carries the state change with the strike count that caused
+    it. Before this, a retired PID was still counted as sent and
+    "unanswered" on every cycle it came due - 600 phantom faults an hour
+    for a PID the car was never being asked about.
+    """
+
+    kind = "retired"
+    scope = "request"
+    answered = False
+
+    def __init__(self, pid: int, strikes: int):
+        super().__init__(
+            f"PID 0x{pid:02X} retired after {strikes} consecutive faults; "
+            f"not asked again this connection"
+        )
+        self.pid = pid
+        self.strikes = strikes
+
+    def detail(self) -> Dict[str, Any]:
+        return {"pid": self.pid, "strikes": self.strikes}
+
+
+#: Which stage counter a fault kind lands on. `failed` and `kinds` keep
+#: counting everything; these are the unambiguous names the diagnostics
+#: view is built from. A kind outside the table (`transport_link`,
+#: `other`) counts in `failed` only.
+_OUTCOME_OF_KIND = {
+    "negative_response": "negative_response",
+    "transport_timeout": "timeout",
+    "pending_timeout": "timeout",
+    "transport_nack": "nack",
+    "no_response": "no_response",
+    "decode": "decode_failed",
+}
+
+#: Ring sizes for the per-request latency and per-request refresh
+#: series. Small and fixed: the hot path writes one float per exchange,
+#: and the percentile is computed only when a report is built.
+LATENCY_WINDOW = 32
+REFRESH_WINDOW = 16
+
+
+class _Series:
+    """
+    A fixed ring of the last N values plus a running count and sum.
+
+    Push is one list assignment and two additions - cheap enough for
+    every exchange. Anything that needs a sort (p95, median) happens in
+    `summary()`, which only the diagnostics report calls.
+    """
+
+    __slots__ = ("ring", "idx", "n", "total", "last")
+
+    def __init__(self, size: int):
+        self.ring = [0.0] * size
+        self.idx = 0
+        self.n = 0
+        self.total = 0.0
+        self.last: Optional[float] = None
+
+    def push(self, value: float) -> None:
+        self.ring[self.idx] = value
+        self.idx = (self.idx + 1) % len(self.ring)
+        self.n += 1
+        self.total += value
+        self.last = value
+
+    def summary(self, digits: int = 1) -> Optional[Dict[str, Any]]:
+        if not self.n:
+            return None
+
+        recent = sorted(self.ring[:min(self.n, len(self.ring))])
+        rank = max(0, math.ceil(0.95 * len(recent)) - 1)
+
+        return {
+            #: Over the whole session.
+            "avg": round(self.total / self.n, digits),
+            #: Over the last `window` values only - what the link is
+            #: doing NOW, not what it averaged since the driveway.
+            "p95": round(recent[rank], digits),
+            "median": round(recent[len(recent) // 2], digits),
+            "last": round(self.last, digits),
+            "n": self.n,
+            "window": len(recent),
+        }
 
 
 def fault_kind(exc: BaseException) -> str:
@@ -114,6 +217,8 @@ def fault_kind(exc: BaseException) -> str:
     `transport_nack`, `transport_timeout`, `negative_response`, `decode`,
     `no_response`, `other`. They are already in `telemetry.channel_errors`
     and are not renamed; finer distinctions travel in `fault_detail()`.
+    `retired` (issue #16) is the one state change recorded through the
+    same stream: an OBD PID struck out and will not be asked again.
     A mapping error that is not a decode failure (a loader problem
     surfacing at poll time) is still reported as `decode`: it is our data,
     not the car, and that is what the kind has always meant.
@@ -253,6 +358,29 @@ class MappingExecutor:
         #: channel key -> {quality label: count}. Signal-level, unlike
         #: _stats which is request-level; see _record_quality().
         self._quality: Dict[str, Dict[str, int]] = {}
+        #: Per-request answered-exchange latency, ms (`_Series`).
+        self._latency: Dict[str, _Series] = {}
+        #: Per-request interval between successful decodes, seconds,
+        #: on the monotonic clock - the EFFECTIVE refresh period, as
+        #: opposed to the one the polling class declares.
+        self._refresh: Dict[str, _Series] = {}
+        self._last_ok_mono: Dict[str, float] = {}
+        #
+        # The physical wire, counted once per frame regardless of how
+        # many logical requests a frame carried. The per-request
+        # counters ATTRIBUTE a shared OBD batch to each member, so their
+        # sum is not this; both are reported and named.
+        #
+        self._wire: Dict[str, int] = {
+            "exchanges": 0, "tx_frames": 0, "rx_frames": 0,
+            "setup_tx_frames": 0, "setup_rx_frames": 0,
+            "obd_batches": 0, "obd_batched_pids": 0,
+        }
+        #: PIDs the OBD reader has retired, mirrored here so a request
+        #: keeps reading `retired` even between reads.
+        self._retired_pids: set = set()
+        #: request id -> PID, for the OBD requests seen so far.
+        self._pid_of: Dict[str, int] = {}
         #
         # Consecutive per-request transport faults. One ECU that is slow or
         # absent must not tear down a link that is otherwise fine, but a link
@@ -281,8 +409,47 @@ class MappingExecutor:
     # -- helpers ----------------------------------------------------
 
     def _stat(self, request_id: str) -> Dict[str, Any]:
-        return self._stats.setdefault(request_id, {
-            "sent": 0, "ok": 0, "failed": 0,
+        stat = self._stats.get(request_id)
+
+        if stat is None:
+            stat = self._stats[request_id] = self._new_stat()
+
+        return stat
+
+    @staticmethod
+    def _new_stat() -> Dict[str, Any]:
+        #
+        # Built once per request, not once per lookup: `setdefault` with
+        # a literal default evaluates the literal every call, and this
+        # one is ~30 keys on the hot path.
+        #
+        return {
+            #: The stage counters (issue #16). Each is one unambiguous
+            #: point in the pipeline; `sent` is kept as the historical
+            #: name for `submitted`.
+            #:
+            #:   scheduled   the plan handed the request to the executor
+            #:   submitted   it was actually put on the wire (not resting,
+            #:               not retired)
+            #:   skipped_*   scheduled but not submitted, and why
+            "scheduled": 0, "submitted": 0, "sent": 0,
+            "skipped_resting": 0, "skipped_retired": 0,
+            #: Frames, attributed: a shared OBD batch counts once for
+            #: EACH logical request it carried. Setup frames (the 2C
+            #: clear/define before an F303 poll) are separate from the
+            #: poll itself.
+            "exchanges": 0, "tx_frames": 0, "rx_frames": 0,
+            "setup_tx_frames": 0, "setup_rx_frames": 0, "setup_faults": 0,
+            #: What came back, by outcome. `positive_response` is counted
+            #: before decoding, so it can exceed `ok`.
+            "positive_response": 0, "negative_response": 0, "timeout": 0,
+            "nack": 0, "no_response": 0, "decode_failed": 0,
+            #: Signals: produced by the decoder, usable by quality, and
+            #: cycles where a positive response decoded to nothing usable.
+            "decoded_signals": 0, "accepted_signals": 0, "all_rejected": 0,
+            "last_rejection": None,
+            "last_tx": None, "last_rx": None,
+            "ok": 0, "failed": 0,
             "kinds": {}, "last_ok": None, "last_error": None,
             "last_error_at": None,
             #: The structured fields of the last fault (`fault_detail`):
@@ -303,7 +470,7 @@ class MappingExecutor:
             #: `ok` at the request level - the exchange worked - with
             #: the readings themselves carrying the flag.
             "ambiguous": 0,
-        })
+        }
 
     def note_late_response(self, request_id: str, message: str = "") -> None:
         """
@@ -354,17 +521,50 @@ class MappingExecutor:
         for _ in range(3):
             try:
                 return {
-                    rid: {
-                        **st,
-                        "kinds": dict(st["kinds"]),
-                        **self._rest_fields(rid),
-                    }
+                    rid: self._snapshot(rid, st)
                     for rid, st in self._stats.items()
                 }
             except RuntimeError:                # changed size during iteration
                 continue
 
         return {}
+
+    def _snapshot(self, request_id: str, st: Dict[str, Any]) -> Dict[str, Any]:
+        rest = self._rest_fields(request_id)
+        latency = self._latency.get(request_id)
+        refresh = self._refresh.get(request_id)
+        pid = self._pid_of.get(request_id)
+
+        if pid is not None and pid in self._retired_pids:
+            state = "retired"
+        elif rest["resting_for"]:
+            state = "resting"
+        elif st["scheduled"]:
+            state = "active"
+        else:
+            state = "idle"
+
+        return {
+            **st,
+            "kinds": dict(st["kinds"]),
+            **rest,
+            #: Where the request stands right now - one word, so the
+            #: view never has to infer "retired" from a frozen counter.
+            "state": state,
+            "latency_ms": latency.summary() if latency else None,
+            "refresh_s": refresh.summary(2) if refresh else None,
+        }
+
+    def wire_stats(self) -> Dict[str, int]:
+        """
+        The physical frame counts, once per frame. Copied.
+
+        Distinct from the per-request counters, which attribute a shared
+        OBD batch to every logical request it carried: 19 PIDs in four
+        batches is `exchanges: 4` here and `exchanges: 1` on each of the
+        19 requests.
+        """
+        return dict(self._wire)
 
     def _record_quality(self, readings: Dict[str, Any]) -> None:
         """
@@ -395,15 +595,75 @@ class MappingExecutor:
         return {}
 
     def _record_sent(self, request_id: str) -> None:
-        self._stat(request_id)["sent"] += 1
+        stat = self._stat(request_id)
+        stat["submitted"] += 1
+        stat["sent"] = stat["submitted"]
+        stat["last_tx"] = time.time()
+
+    def _record_scheduled(self, request_id: str) -> Dict[str, Any]:
+        stat = self._stat(request_id)
+        stat["scheduled"] += 1
+
+        return stat
+
+    def _record_latency(self, request_id: str, seconds: float) -> None:
+        series = self._latency.get(request_id)
+
+        if series is None:
+            series = self._latency[request_id] = _Series(LATENCY_WINDOW)
+
+        series.push(seconds * 1000.0)
+
+    def _record_rx(self, stat: Dict[str, Any], frames: int = 1) -> None:
+        stat["rx_frames"] += frames
+        stat["last_rx"] = time.time()
+
+    def _record_signals(self, request_id: str, readings: Dict[str, Any]) -> None:
+        """
+        The decode -> accept boundary, per request: how many signals the
+        decoder produced and how many survived quality. A positive
+        response whose every signal was rejected is the case the
+        request counters could never show - it looks like a clean `ok`
+        - so it gets its own count and the labels that caused it.
+        """
+        stat = self._stat(request_id)
+        accepted = sum(1 for r in readings.values() if r.usable)
+        stat["decoded_signals"] += len(readings)
+        stat["accepted_signals"] += accepted
+
+        if readings and not accepted:
+            stat["all_rejected"] += 1
+            stat["last_rejection"] = sorted({
+                r.quality for r in readings.values()
+            })
 
     def _record_ambiguous(self, request_id: str) -> None:
         self._stat(request_id)["ambiguous"] += 1
 
-    def _record_ok(self, request_id: str, when: float) -> None:
+    def _record_ok(self, request_id: str, when: float,
+                   mono: Optional[float] = None) -> None:
         stat = self._stat(request_id)
         stat["ok"] += 1
         stat["last_ok"] = when
+
+        #
+        # The effective refresh interval, from the acquisition clock. A
+        # staggered class declares 0.5 s and delivers one member every
+        # ~11 s; `sampling` mode delivers nothing for ten minutes at a
+        # time. Only a measured interval can say what a channel's real
+        # cadence was.
+        #
+        mono = time.monotonic() if mono is None else mono
+        previous = self._last_ok_mono.get(request_id)
+        self._last_ok_mono[request_id] = mono
+
+        if previous is not None:
+            series = self._refresh.get(request_id)
+
+            if series is None:
+                series = self._refresh[request_id] = _Series(REFRESH_WINDOW)
+
+            series.push(mono - previous)
 
     def _record_fault(self, request_id: str, kind: str, message: str,
                       exc: Optional[BaseException] = None) -> None:
@@ -420,6 +680,11 @@ class MappingExecutor:
         stat = self._stat(request_id)
         stat["failed"] += 1
         stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
+        outcome = _OUTCOME_OF_KIND.get(kind)
+
+        if outcome is not None:
+            stat[outcome] += 1
+
         stat["last_error"] = f"{kind}: {message}"
         stat["last_error_at"] = time.time()
         stat["last_detail"] = fault_detail(exc) if exc is not None else None
@@ -550,6 +815,16 @@ class MappingExecutor:
         if self.obd_reader is None:
             raise MappingError("no OBD reader configured for obd requests")
 
+        #
+        # What the reader will no longer ask for. Consulted BEFORE the
+        # request is counted as submitted: a retired PID is scheduled
+        # (the plan does not know) but never attempted, and must not
+        # appear in the diagnostics as asked-and-unanswered. Until #16
+        # it did, every cycle, with a phantom `no_response` fault each.
+        #
+        retired = set(getattr(self.obd_reader, "retired", ()) or ())
+        self._retired_pids |= retired
+
         by_pid: Dict[int, RequestDef] = {}
         pids: List[int] = []
 
@@ -561,12 +836,54 @@ class MappingExecutor:
             # One request per PID, so a PID never goes on the wire twice
             # even if two mappings both want a signal out of it.
             #
-            if request.pid not in by_pid:
-                by_pid[request.pid] = request
-                pids.append(request.pid)
-                self._record_sent(request.id)
+            if request.pid in by_pid:
+                continue
 
+            by_pid[request.pid] = request
+            self._pid_of[request.id] = request.pid
+            stat = self._record_scheduled(request.id)
+
+            if request.pid in retired:
+                stat["skipped_retired"] += 1
+                continue
+
+            pids.append(request.pid)
+            self._record_sent(request.id)
+
+        if not pids:
+            return []
+
+        started = time.monotonic()
         got = self.obd_reader.read(pids)
+        finished = time.monotonic()
+        report = getattr(self.obd_reader, "last_report", None)
+
+        if report is None:
+            #
+            # A reader that does not account for its wire (the test
+            # fakes; any minimal reader) is taken to have made one
+            # answered exchange carrying everything it asked for.
+            #
+            report = ObdReadReport(exchanges=[ObdExchange(
+                tuple(pids), started, finished, True, tuple(got),
+            )])
+
+        self._account_obd(report, by_pid)
+        self._retired_pids |= set(report.retired)
+
+        #
+        # Retirement is reported once, as the state change it is, with
+        # the strike count - not as another fault. The faults that
+        # caused it were each reported as they happened.
+        #
+        for pid in report.retired_now:
+            request = by_pid.get(pid)
+
+            if request is not None and self.on_error is not None:
+                self.on_error(
+                    request.id, Retired(pid, report.strikes.get(pid, 0))
+                )
+
         out: List[DecodedResponse] = []
         #
         # PIDs whose bytes came back under correlation ambiguity (the
@@ -575,19 +892,6 @@ class MappingExecutor:
         # reader; a reader without it never flags.
         #
         ambiguous = set(getattr(self.obd_reader, "ambiguous_pids", ()) or ())
-
-        #
-        # A PID the reader dropped is not an exception - the session
-        # retires PIDs the ECU ignores - so it would otherwise leave no
-        # trace at all. Count it: "asked 400 times, answered 0" is
-        # exactly what identifies a channel the car does not really have.
-        #
-        for pid, request in by_pid.items():
-            if pid not in got:
-                self._record_fault(
-                    request.id, "no_response",
-                    "the ECU did not return this PID",
-                )
 
         for pid, data in got.items():
             request = by_pid.get(pid)
@@ -612,13 +916,64 @@ class MappingExecutor:
                 self._record_ambiguous(request.id)
 
             completed = time.time()
-            self._record_ok(request.id, completed)
+            self._record_ok(request.id, completed, finished)
+            self._record_signals(request.id, readings)
             self._record_quality(readings)
             out.append(DecodedResponse(
                 request.id, response, _usable(readings), readings, completed,
             ))
 
         return out
+
+    def _account_obd(
+        self, report: ObdReadReport, by_pid: Dict[int, RequestDef]
+    ) -> None:
+        """
+        Turn the reader's exchange report into stage counters.
+
+        The wire counts each frame once. Each logical request in a batch
+        is attributed the frame - so a six-PID batch is one exchange on
+        the wire and one exchange on each of six requests. A failed
+        exchange is a fault on every request it carried, with the
+        exception's OWN kind; an answered exchange missing a PID is a
+        `no_response` on that PID alone - the batch was answered, the
+        ECU just did not include it.
+        """
+        for exchange in report.exchanges:
+            self._wire["exchanges"] += 1
+            self._wire["tx_frames"] += 1
+            self._wire["obd_batches"] += 1
+            self._wire["obd_batched_pids"] += len(exchange.pids)
+
+            if exchange.answered:
+                self._wire["rx_frames"] += 1
+
+            latency = exchange.finished - exchange.started
+            returned = set(exchange.returned)
+
+            for pid in exchange.pids:
+                request = by_pid.get(pid)
+
+                if request is None:
+                    continue
+
+                stat = self._stat(request.id)
+                stat["exchanges"] += 1
+                stat["tx_frames"] += 1
+
+                if exchange.answered:
+                    self._record_rx(stat)
+                    self._record_latency(request.id, latency)
+
+                if exchange.error is not None:
+                    self._note(request.id, exchange.error)
+                elif pid in returned:
+                    stat["positive_response"] += 1
+                else:
+                    self._record_fault(
+                        request.id, "no_response",
+                        "the ECU answered the batch without this PID",
+                    )
 
     def _run_generic(self, requests: Sequence[RequestDef]) -> List[DecodedResponse]:
         if not requests:
@@ -643,11 +998,16 @@ class MappingExecutor:
             # worth handling if a whole ECU's worth of a staggered class
             # rested at once.
             #
+            stat = self._record_scheduled(request.id)
+
             if self._rest_left(request.id) > 0:
+                stat["skipped_resting"] += 1
                 continue
 
             bound = self.bind(request)
             self._record_sent(request.id)
+            in_setup = False
+            started = finished = 0.0
 
             #
             # Setup frames (e.g. the 2C clear+define of a dynamic DID) go
@@ -662,12 +1022,25 @@ class MappingExecutor:
             #
             try:
                 if request.setup and self._armed.get(bound.dst) != request.setup:
+                    #
+                    # Counted apart from the poll: an F303 read is two
+                    # setup frames plus one poll on the wire, and a
+                    # request that only ever fails in its define is a
+                    # different problem from one whose poll times out.
+                    #
+                    in_setup = True
+
                     for frame in request.setup:
+                        stat["setup_tx_frames"] += 1
+                        self._wire["setup_tx_frames"] += 1
                         self.transport.request(
                             bytes(frame), dst=bound.dst, timeout=bound.timeout
                         )
+                        stat["setup_rx_frames"] += 1
+                        self._wire["setup_rx_frames"] += 1
 
                     self._armed[bound.dst] = request.setup
+                    in_setup = False
 
                 #
                 # The transport is told what the answer must look like -
@@ -679,11 +1052,35 @@ class MappingExecutor:
                 # them as decode faults, and could not catch the F303
                 # case at all, where it does not.
                 #
+                stat["exchanges"] += 1
+                stat["tx_frames"] += 1
+                self._wire["exchanges"] += 1
+                self._wire["tx_frames"] += 1
+                started = time.monotonic()
                 response = self.transport.request(
                     bound.payload, dst=bound.dst, timeout=bound.timeout,
                     expect=bound.expectation(),
                 )
+                finished = time.monotonic()
             except Exception as exc:
+                #
+                # The wire side of the fault, before policy: a NACK or a
+                # negative response IS a received frame (and has a
+                # latency); a timeout is not, though the responsePending
+                # frames that preceded it were.
+                #
+                if in_setup:
+                    stat["setup_faults"] += 1
+                elif _answered(exc):
+                    self._record_rx(stat)
+                    self._wire["rx_frames"] += 1
+                    self._record_latency(request.id, time.monotonic() - started)
+                else:
+                    pending = fault_detail(exc).get("pending") or 0
+
+                    if pending:
+                        self._record_rx(stat, pending)
+                        self._wire["rx_frames"] += pending
                 #
                 # A fault anywhere in a dynamic-identifier sequence means
                 # the ECU's definition can no longer be trusted to be
@@ -757,6 +1154,10 @@ class MappingExecutor:
             self._transport_faults = 0
             self._request_recovered(request.id)
             self.last_responses[request.id] = bytes(response)
+            stat["positive_response"] += 1
+            self._record_rx(stat)
+            self._wire["rx_frames"] += 1
+            self._record_latency(request.id, finished - started)
 
             try:
                 readings = read_response(request, bytes(response))
@@ -779,7 +1180,8 @@ class MappingExecutor:
                 self._record_ambiguous(request.id)
 
             completed = time.time()
-            self._record_ok(request.id, completed)
+            self._record_ok(request.id, completed, finished)
+            self._record_signals(request.id, readings)
             self._record_quality(readings)
             out.append(DecodedResponse(
                 request.id, bytes(response), _usable(readings), readings,
