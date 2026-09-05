@@ -39,7 +39,9 @@ from .request import (
     DecodedResponse,
     DiagnosticRequest,
     DiagnosticTransport,
+    ObdExchange,
     ObdPidReader,
+    ObdReadReport,
     build_request,
 )
 from .safety import (
@@ -61,7 +63,9 @@ __all__ = [
     "ResponseMismatch",
     "RoutingNack",
     "TransportError",
+    "ObdExchange",
     "ObdPidReader",
+    "ObdReadReport",
     "ObservationalTransport",
     "ResponseExpectation",
     "UnsafePayload",
