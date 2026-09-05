@@ -17,6 +17,7 @@ except ImportError:                     # pragma: no cover
     def runtime_checkable(cls):         # type: ignore
         return cls
 
+from ..errors import NegativeResponse as _NegativeResponse
 from ..mapping.errors import MappingError
 from ..mapping.model import RequestDef
 from .correlate import ResponseExpectation, declared_response
@@ -79,22 +80,10 @@ class UnresolvedTargetError(MappingError):
     """A request names a dynamic target nobody has resolved yet."""
 
 
-class NegativeResponse(Exception):
-    """
-    The ECU answered, and said no: a UDS/KWP `7F <service> <NRC>`.
-
-    A transport raises a subclass of this (rather than a bare error with
-    the code buried in the message) so the code is DATA to whoever
-    catches it - the fault recorder groups on it, and an identity probe
-    reports "NRC 0x31 to 22 F3 03" instead of "failed".
-    """
-
-    def __init__(self, service: int, nrc: int, message: Optional[str] = None):
-        self.service = service
-        self.nrc = nrc
-        super().__init__(
-            message or f"negative response to 0x{service:02X}: NRC 0x{nrc:02X}"
-        )
+# The negative-response type lives in the shared taxonomy (bmwdiag.errors)
+# so mapping-level failures and the application's transport exceptions can
+# inherit from one hierarchy; it stays importable from here.
+NegativeResponse = _NegativeResponse
 
 
 @dataclass(frozen=True)

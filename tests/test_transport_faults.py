@@ -26,16 +26,20 @@ from bmwdiag.mapping.execute import (
 )
 from bmwdiag.mapping.loader import load_text
 from bmwdiag.mapping.registry import AllCapabilities, MappingRegistry
+from bmwdiag.protocol import DiagnosticError, RoutingNack
 
 
-# Stand-ins for the transport's exceptions. bmwdiag never imports live.py, so
-# the classifier matches structurally - these mimic the shapes it must handle.
-class HsfzError(Exception):
+# Stand-ins for the transport's exceptions. bmwdiag never imports live.py;
+# the classifier reads the taxonomy (bmwdiag.errors) the transport raises
+# into, so the stand-ins inherit from it exactly as live.py's do. The name
+# is irrelevant to the classifier - see Classification below.
+class HsfzError(DiagnosticError):
     pass
 
 
-class HsfzNack(HsfzError):
-    pass
+class HsfzNack(HsfzError, RoutingNack):
+    def __init__(self, message):
+        RoutingNack.__init__(self, target=0x18, message=message)
 
 
 TWO_REQUESTS = """

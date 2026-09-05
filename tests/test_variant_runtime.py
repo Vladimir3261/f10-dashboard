@@ -211,6 +211,13 @@ class Probing(unittest.TestCase):
         #: the refusal is recorded with the frame it refused and the code
         self.assertIn("NRC 0x31", resolution.probes[0].detail)
         self.assertIn("setup 2c 01 f3 03 45 17", resolution.probes[0].detail)
+        #: ... and the code as a number, from the exception's fields,
+        #: not from the prose
+        self.assertEqual(resolution.probes[0].fault["nrc"], 0x31)
+        self.assertEqual(resolution.probes[0].fault["nrc_name"], "requestOutOfRange")
+        self.assertEqual(resolution.probes[0].fault["service"], 0x2C)
+        self.assertEqual(resolution.probes[0].as_dict()["fault"]["nrc"], 0x31)
+        self.assertEqual(resolution.probes[1].fault, {})
         self.assertEqual(resolution.describe(),
                          "compatible: n47.d72.dyn.4BC3 answered")
 
@@ -266,10 +273,12 @@ class Probing(unittest.TestCase):
         class Unrouted:
             def request(self, payload, *, dst, timeout=None, expect=None):
                 import live
-                raise live.HsfzNack("gateway will not route to 0x12")
+                raise live.HsfzNack(0x12)
 
-        for ecu, reason in ((Silent(), "transport_timeout"),
-                            (Unrouted(), "transport_nack")):
+        for ecu, reason, fault in (
+            (Silent(), "transport_timeout", {}),
+            (Unrouted(), "transport_nack", {"target": 0x12}),
+        ):
             with self.subTest(reason=reason):
                 identity = probe(ecu, DYNAMIC)
                 [resolution] = identity.profiles.values()
@@ -278,6 +287,25 @@ class Probing(unittest.TestCase):
                 self.assertEqual(
                     {p.reason for p in resolution.probes}, {reason}
                 )
+                #: a bare stdlib timeout has no structured detail; the
+                #: NACK names the ECU the gateway would not route to
+                self.assertEqual(resolution.probes[0].fault, fault)
+
+    def test_the_live_negative_response_lands_in_the_probe_as_fields(self):
+        import live
+
+        class Refuses:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise live.HsfzNegativeResponse(0x22, 0x31, raw=bytes.fromhex("7F2231"))
+
+        identity = probe(Refuses(), DYNAMIC)
+        [resolution] = identity.profiles.values()
+
+        self.assertEqual(resolution.probes[0].reason, "negative_response")
+        self.assertEqual(resolution.probes[0].fault, {
+            "service": 0x22, "nrc": 0x31, "nrc_name": "requestOutOfRange",
+            "raw": "7f 22 31",
+        })
 
     def test_a_gate_refusal_is_a_mapping_bug_not_an_ecu_refusal(self):
         """

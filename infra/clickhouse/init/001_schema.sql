@@ -149,6 +149,14 @@ CREATE TABLE IF NOT EXISTS telemetry.channel_errors
                                               --   (request_id may be hsfz:0xNN)
                                               -- | pending_timeout (0x78 then silence)
     message      String,
+    -- The structured part of the fault as JSON text (issue #11):
+    -- {"service":34,"nrc":49,"nrc_name":"requestOutOfRange","raw":"7f 22 31"}
+    -- for a negative response, {"target":24} for a routing NACK,
+    -- {"pending":2,"elapsed_ms":5000} for a timeout. '' when the fault
+    -- carried none (pre-#11 rows, faults outside the taxonomy). Query
+    -- with JSONExtractInt(detail, 'nrc') etc.; the kind stays the
+    -- grouping key.
+    detail       String DEFAULT '',
     mapping_ver  LowCardinality(String) DEFAULT '',
     ingested_at  DateTime64(3, 'UTC') DEFAULT now64(3)
 )

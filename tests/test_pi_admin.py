@@ -997,6 +997,22 @@ class DiagnosticsProxy(AdminCase):
     def test_it_needs_credentials(self):
         self.assert_status(401, self.get, "/api/diagnostics", headers={})
 
+    def test_the_car_link_tab_renders_the_nrc_from_the_fields(self):
+        """
+        The per-request row reads `last_detail` - the structured fault
+        (issue #11) - and never parses the message text for "NRC".
+        The page is JavaScript, so this pins the source, not behaviour:
+        the helper exists, is used on the row, and is null-safe.
+        """
+        page = self.get("/").read().decode()
+
+        self.assertIn("function faultText(detail)", page)
+        self.assertIn("faultText(q.last_detail)", page)
+        self.assertIn('if (!detail || typeof detail !== "object") return "";', page)
+        self.assertIn("detail.nrc_name", page)
+        self.assertNotIn('last_error.match(/NRC', page)
+        self.assertNotIn('last_error.indexOf("NRC")', page)
+
 
 class DeploymentFiles(unittest.TestCase):
     ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")

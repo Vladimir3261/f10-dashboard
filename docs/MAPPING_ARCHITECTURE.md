@@ -154,9 +154,13 @@ declared prefix and length makes the profile **`compatible`**; further
 nominations are not sent. If every nomination fails the profile is
 **`unsupported`**, and each failure is recorded with its reason
 (`negative_response` with the NRC and the frame it refused,
-`transport_timeout`, `transport_nack`, `wrong_prefix`,
-`short_response`). A profile no loaded file nominates a probe for is
-**`unknown`** - never a silent `False`. `probe:` is explicit because
+`transport_timeout`, `pending_timeout`, `transport_nack`,
+`wrong_prefix`, `short_response`) and, since issue #11, with the
+fault's structured fields (`ProbeResult.fault`: the NRC as a number,
+the refused service, the NACKed target - read from the exception's
+type, never from its message; see `docs/POLLING_AND_SAFETY.md`,
+"Faults are types, not text"). A profile no loaded file nominates a
+probe for is **`unknown`** - never a silent `False`. `probe:` is explicit because
 "the first request in the file" made a reorder change what was sent to
 the car.
 

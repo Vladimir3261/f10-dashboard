@@ -100,7 +100,14 @@ def ch_insert(table: str, rows: List[Dict[str, Any]]) -> None:
 
     body = "\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
     query = f"INSERT INTO {CH_DB}.{table} FORMAT JSONEachRow"
-    url = f"{CH_URL}/?query={urllib.parse.quote(query)}"
+    #
+    # The ingest may send a field the table does not (yet) have - the
+    # sync agent can run ahead of a lake migration, or behind one. That
+    # only works because ClickHouse skips unknown JSON fields; pin the
+    # setting rather than rely on the server default staying 1.
+    #
+    url = (f"{CH_URL}/?query={urllib.parse.quote(query)}"
+           "&input_format_skip_unknown_fields=1")
 
     request = urllib.request.Request(
         url, data=body.encode("utf-8"), method="POST"
@@ -229,6 +236,11 @@ def build_channel_errors(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
             "request_id": r.get("request_id") or "",
             "kind": r.get("kind") or "other",
             "message": (r.get("message") or "")[:500],
+            #: JSON text: the structured fields of the fault (NRC, service,
+            #: target, elapsed_ms, pending). '' before issue #11 and for
+            #: faults outside the taxonomy. Passed through verbatim -
+            #: normalising it here would mean decoding it here.
+            "detail": (r.get("detail") or "")[:500],
             "mapping_ver": r.get("mapping_ver") or meta.get("mapping_ver", ""),
         })
 
