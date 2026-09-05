@@ -115,6 +115,21 @@ PAIRINGS: Dict[Tuple[str, str], Pairing] = {
         "Warm-up lag between two slow thermal masses. The quantity of "
         "interest is minutes wide.",
     ),
+    ("n47d_boost_act", "n47d_charge_air_temp"): Pairing(
+        15.0,
+        "Context only, never subtracted: the health models label a STEADY "
+        "boost residual with the charge-air temperature it was measured "
+        "at. Both live on the same ~12 s round-robin, so a strict window "
+        "would match almost nothing. Measured on the lake's clock-synced "
+        "sessions (2026-09-05, 610 consecutive reads): at steady state "
+        "(RPM range under 50 at both ends) charge-air temp moves 0.1 °C "
+        "median, 0.7 °C p90 across a whole rotation, so 15 s costs under "
+        "a degree of context on a channel binned in whole degrees.",
+    ),
+    ("n47d_rail_act", "n47d_charge_air_temp"): Pairing(
+        15.0,
+        "Same context use and the same measurement as the boost pairing.",
+    ),
     ("n47d_soot_meas", "n47d_soot_model"): Pairing(
         15.0,
         "Two ECU model outputs on the same slow round-robin. Neither "
