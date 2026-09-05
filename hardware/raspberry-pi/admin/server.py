@@ -1661,6 +1661,26 @@ function escape_(s) {
     {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+/* The structured part of a request's last fault (`last_detail` from
+   /api/diagnostics), rendered from its FIELDS: "NRC 0x31
+   requestOutOfRange" from `nrc`/`nrc_name`, "to 0x18" from a NACK's
+   `target`, "after 3x 0x78" from a timeout's `pending`. The message
+   text beside it is prose and is never parsed. Null-safe: a session
+   recorded before the detail existed, or a fault without fields,
+   renders nothing here. */
+function faultText(detail) {
+  if (!detail || typeof detail !== "object") return "";
+  const hex = n => "0x" + Number(n).toString(16).toUpperCase().padStart(2, "0");
+  if (detail.nrc != null) {
+    let text = `NRC ${hex(detail.nrc)} ${detail.nrc_name || "unknown"}`;
+    if (detail.service != null) text += ` (to ${hex(detail.service)})`;
+    return text;
+  }
+  if (detail.target != null) return `no route to ${hex(detail.target)}`;
+  if (detail.pending) return `after ${detail.pending}x 0x78`;
+  return "";
+}
+
 /* Destructive buttons arm on first tap and fire on the second. A phone
    in a car pocket taps things; a reboot mid-drive costs the recording. */
 function arm(btn, label, fire) {
@@ -1948,7 +1968,7 @@ function renderCar(d) {
           <td>${q.period_s == null ? "—" : q.period_s + "s"}</td>
           <td>${q.sent}</td><td>${q.ok}</td><td>${q.failed}</td>
           <td class="${cls}">${rate}</td>
-          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${q.late ? `<span class="tick no">${q.late} late</span> ` : ""}${q.ambiguous ? `<span class="tick no">${q.ambiguous} stale</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
+          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${q.late ? `<span class="tick no">${q.late} late</span> ` : ""}${q.ambiguous ? `<span class="tick no">${q.ambiguous} stale</span> ` : ""}${faultText(q.last_detail) ? `<span class="tick no">${escape_(faultText(q.last_detail))}</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
       }).join("")
     + `</tbody>`;
 

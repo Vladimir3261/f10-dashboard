@@ -51,6 +51,7 @@ from typing import (
 from bmwdiag.identity import new_ulid
 from bmwdiag.vehicle import load_profile
 from bmwdiag.mapping import (
+    fault_detail,
     fault_kind,
     MappingError,
     MappingExecutor,
@@ -64,7 +65,16 @@ from bmwdiag.mapping.modes import DEFAULT_MODE_CONFIG, ModeTable, load_modes
 from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
 from bmwdiag.protocol import (
-    NegativeResponse, ObservationalTransport, assert_observational,
+    DiagnosticError,
+    LinkError,
+    NegativeResponse,
+    ObservationalTransport,
+    PendingTimeout,
+    RequestTimeout,
+    ResponseMismatch,
+    RoutingNack,
+    assert_observational,
+    nrc_name,
 )
 from bmwdiag.protocol.correlate import (
     FOREIGN,
@@ -352,36 +362,92 @@ def numeric_only(
 # ------------------------------------------------------------------- HSFZ
 
 
-class HsfzError(Exception):
-    pass
+class HsfzError(DiagnosticError):
+    """
+    Base of every HSFZ-level failure. A bare HsfzError is one the client
+    could not classify further (a discovery step that found nothing,
+    for instance); the taxonomy's default - link scope, nothing answered
+    - applies, which is the conservative reading. Everything the poll
+    loop can act on differently is a subclass below, each inheriting
+    the category from `bmwdiag.errors` so the executor decides by
+    `isinstance` and never by this module's names or messages.
+    """
 
 
-class HsfzNack(HsfzError):
-    """Gateway refused to route to that address - nobody home."""
+class HsfzLinkError(HsfzError, LinkError):
+    """
+    The TCP session to the gateway is unusable: closed by the gateway,
+    reset, never connected, or carrying frames that cannot be HSFZ. Also
+    a `ConnectionError`, so the reconnect handlers see it as one.
+    """
+
+    def __init__(self, message: str, reason: str):
+        LinkError.__init__(self, message, reason=reason)
+
+
+class HsfzNack(HsfzError, RoutingNack):
+    """
+    Gateway refused to route to that address - nobody home. The gateway
+    answered, so the link is fine; the request is the only casualty.
+    """
+
+    def __init__(
+        self,
+        target: Optional[int] = None,
+        message: Optional[str] = None,
+        control: Optional[int] = None,
+    ):
+        RoutingNack.__init__(self, target, message, control)
+
+
+class HsfzTimeout(HsfzError, RequestTimeout):
+    """
+    This request got no (final) answer within its deadline. The ECU may
+    be slow, asleep or ignoring this identifier; the link is not known
+    to be dead. `pending` says how many responsePending holds preceded
+    the silence.
+    """
+
+    def __init__(
+        self,
+        message: str = "HSFZ read timeout",
+        elapsed: Optional[float] = None,
+        pending: int = 0,
+        expected: Optional[str] = None,
+    ):
+        RequestTimeout.__init__(self, message, elapsed, pending, expected)
+
+
+class HsfzPendingTimeout(HsfzTimeout, PendingTimeout):
+    """
+    The ECU kept asking for more time (NRC 0x78) and the absolute
+    deadline ran out. A request timeout like any other to the executor
+    (one exchange that did not complete, skipped); distinguished by
+    type - `PendingTimeout` gives it the `pending_timeout` kind and
+    marks it answered, since a 0x78 is the ECU replying - because "it
+    said wait and never delivered" and "it never said anything" are
+    different symptoms.
+    """
 
 
 class HsfzNegativeResponse(HsfzError, NegativeResponse):
     """
     The ECU answered `7F <service> <NRC>`. Both an HsfzError (every
-    existing handler keeps working) and a NegativeResponse (the code is
-    data, not prose in a message).
+    existing handler keeps working) and a NegativeResponse (the service,
+    the code and the raw bytes are fields, not prose in a message).
     """
 
-    def __init__(self, service: int, nrc: int):
-        NegativeResponse.__init__(self, service, nrc)
+    def __init__(self, service: int, nrc: int, raw: Optional[bytes] = None):
+        NegativeResponse.__init__(self, service, nrc, raw=raw)
 
 
-class HsfzPendingTimeout(HsfzError, TimeoutError):
+class HsfzUnexpectedReply(HsfzError, ResponseMismatch):
     """
-    The ECU kept asking for more time (NRC 0x78) and the absolute
-    deadline ran out. A TimeoutError, so the executor treats it as one
-    exchange that did not complete - and an HsfzError, so every existing
-    handler keeps working. Recorded under its own fault kind: the ECU
-    that answered 0x78 and then nothing is not the ECU that answered
-    nothing, and the lake should be able to tell them apart.
+    An answer arrived from the right ECU but did not have the shape the
+    request called for. The car answered; the mismatch is between what
+    was asked and what came back - a decode-side fault, never a reason
+    to touch the link.
     """
-
-    kind = "pending_timeout"
 
 
 #: After a request to an ECU times out, the line is listened to for
@@ -567,16 +633,20 @@ class HsfzClient:
         """
         try:
             return self.request(data, timeout, dst)
-        except socket.timeout:
+        except (RequestTimeout,) + TIMEOUTS:
             raise
-        except (ConnectionResetError, BrokenPipeError, HsfzError) as exc:
-            if isinstance(exc, HsfzError) and not isinstance(exc, ConnectionError):
-                if "closed" not in str(exc):
-                    raise
-
+        except LinkError:
+            #
+            # The session is gone (the gateway closed it, or reset it):
+            # reconnect and try once more. Decided by category - a
+            # NACK, a negative response or any other HsfzError is not a
+            # dead link and propagates untouched.
+            #
             self.reconnect()
 
             return self.request(data, timeout, dst)
+        except HsfzError:
+            raise
         except OSError:
             self.reconnect()
 
@@ -604,7 +674,7 @@ class HsfzClient:
         chunk = self.sock.recv(8192)
 
         if not chunk:
-            raise HsfzError("gateway closed the connection")
+            raise HsfzLinkError("gateway closed the connection", "closed")
 
         self.buf.extend(chunk)
 
@@ -616,7 +686,7 @@ class HsfzClient:
         length, control = struct.unpack(">IH", self.buf[:6])
 
         if length > 0x00100000:
-            raise HsfzError(f"absurd HSFZ length {length}")
+            raise HsfzLinkError(f"absurd HSFZ length {length}", "framing")
 
         if len(self.buf) < 6 + length:
             return None
@@ -654,7 +724,7 @@ class HsfzClient:
                 chunk = self.sock.recv(8192)
 
                 if not chunk:
-                    raise HsfzError("gateway closed the connection")
+                    raise HsfzLinkError("gateway closed the connection", "closed")
 
                 self.buf.extend(chunk)
         except (BlockingIOError, OSError):
@@ -944,7 +1014,7 @@ class HsfzClient:
         self._gate(data)
 
         if self.sock is None:
-            raise HsfzError("not connected")
+            raise HsfzLinkError("not connected", "not_connected")
 
         target = self.dst if dst is None else dst
         want_src = target if expect_src is None else expect_src
@@ -975,16 +1045,25 @@ class HsfzClient:
                 control, payload = self._read_frame(deadline)
             except TIMEOUTS:
                 self._timed_out(want_src, expectation, pending)
+                elapsed = self.clock() - started
 
                 if pending:
                     raise HsfzPendingTimeout(
                         f"no final answer within "
-                        f"{self.clock() - started:.1f}s: the ECU sent "
+                        f"{elapsed:.1f}s: the ECU sent "
                         f"responsePending {pending}x to 0x{data[0]:02X} "
-                        f"(expected {expectation.describe()})"
+                        f"(expected {expectation.describe()})",
+                        elapsed=elapsed,
+                        pending=pending,
+                        expected=expectation.describe(),
                     )
 
-                raise
+                raise HsfzTimeout(
+                    f"no answer from 0x{want_src:02X} within {elapsed:.1f}s "
+                    f"(expected {expectation.describe()})",
+                    elapsed=elapsed,
+                    expected=expectation.describe(),
+                )
 
             if control == HSFZ_ALIVE_REQ:
                 self._send(HSFZ_ALIVE_RESP, struct.pack(">H", self.src))
@@ -995,7 +1074,7 @@ class HsfzClient:
                 # The gateway could not route to that address. Definitive,
                 # and far cheaper than waiting out the timeout.
                 #
-                raise HsfzNack(f"gateway will not route to 0x{target:02X}")
+                raise HsfzNack(target, control=control)
 
             if control == HSFZ_DIAG_ACK:
                 #
@@ -1046,7 +1125,7 @@ class HsfzClient:
 
             if outcome == NEGATIVE:
                 self._record("rx", want_src, body, "negative")
-                raise HsfzNegativeResponse(body[1], nrc)
+                raise HsfzNegativeResponse(body[1], nrc, raw=body)
 
             if ambiguous and want_src in self._outstanding:
                 #
@@ -1094,7 +1173,7 @@ class HsfzClient:
         self._gate(bytes(data))
 
         if self.sock is None:
-            raise HsfzError("not connected")
+            raise HsfzLinkError("not connected", "not_connected")
 
         self._send(HSFZ_DIAG_REQ, bytes([self.src, dst]) + data)
 
@@ -1243,7 +1322,7 @@ class ObdSession:
         resp = self.client.request(bytes([0x01] + pids), timeout)
 
         if not resp or resp[0] != 0x41:
-            raise HsfzError(f"unexpected reply {resp.hex(' ')}")
+            raise HsfzUnexpectedReply(f"unexpected reply {resp.hex(' ')}")
 
         out: Dict[int, bytes] = {}
         i = 1
@@ -1275,7 +1354,7 @@ class ObdSession:
                     got = self._mode01(batch)
 
                     if not all(p in got for p in batch):
-                        raise HsfzError("incomplete multi-PID response")
+                        raise HsfzUnexpectedReply("incomplete multi-PID response")
 
                     result.update(got)
 
@@ -1463,7 +1542,8 @@ CREATE TABLE IF NOT EXISTS errors (
     ts         REAL NOT NULL,
     request_id TEXT NOT NULL,
     kind       TEXT NOT NULL,
-    message    TEXT
+    message    TEXT,
+    detail     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS samples_run_param_ts ON samples(run_id, param_id, ts);
@@ -1632,12 +1712,33 @@ class Recorder:
 
         return snapshot
 
-    def error(self, request_id: str, kind: str, message: str) -> None:
-        """Record one per-request fault. Dropped silently if the queue is
-        full - a fault storm must never stall the poll loop."""
+    def error(
+        self,
+        request_id: str,
+        kind: str,
+        message: str,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Record one per-request fault. Dropped silently if the queue is
+        full - a fault storm must never stall the poll loop.
+
+        `kind` is the stable category (`fault_kind`); `detail` is its
+        structured content (`fault_detail`: service, nrc, target, ...),
+        stored as JSON so the NRC of a negative response is a number in
+        the database and in the lake, not a substring of the message.
+        """
+        encoded: Optional[str] = None
+
+        if detail:
+            try:
+                encoded = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+            except (TypeError, ValueError):
+                encoded = None
+
         try:
             self.q.put_nowait(
-                ("error", (time.time(), request_id, kind, message[:500]))
+                ("error", (time.time(), request_id, kind, message[:500], encoded))
             )
         except queue.Full:
             pass
@@ -1734,6 +1835,15 @@ class Recorder:
 
         if "boot_id" not in cols("runs"):
             self.db.execute("ALTER TABLE runs ADD COLUMN boot_id TEXT")
+
+        #
+        # The structured half of a fault (JSON: the NRC and service of a
+        # negative response, the target of a NACK, ...), added 2026-09-05.
+        # NULL for every fault recorded before it - the message text is
+        # all those ever had, and it is not re-parsed into anything.
+        #
+        if "detail" not in cols("errors"):
+            self.db.execute("ALTER TABLE errors ADD COLUMN detail TEXT")
 
         #
         # Deliberately NOT back-filled. A ULID minted now would claim a
@@ -1924,11 +2034,11 @@ class Recorder:
                 self.db.commit()
 
             elif kind == "error" and self.run_id is not None:
-                ts, request_id, err_kind, message = payload
+                ts, request_id, err_kind, message, detail = payload
                 self.db.execute(
-                    "INSERT INTO errors(run_id, ts, request_id, kind, message) "
-                    "VALUES (?,?,?,?,?)",
-                    (self.run_id, ts, request_id, err_kind, message),
+                    "INSERT INTO errors(run_id, ts, request_id, kind, message, detail) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (self.run_id, ts, request_id, err_kind, message, detail),
                 )
                 self.db.commit()
 
@@ -2262,6 +2372,13 @@ class Diagnostics:
                     None if not st.get("last_error_at")
                     else round(now - st["last_error_at"], 1)
                 ),
+                #: The structured fields of that last fault: for a
+                #: negative response `service`, `nrc` and `nrc_name`;
+                #: for a NACK the `target`; for a timeout the `pending`
+                #: count. What the message says, as data - so the Car
+                #: link tab can render "NRC 0x31 requestOutOfRange"
+                #: without parsing prose.
+                "last_detail": st.get("last_detail"),
             })
 
         values = state.get("values") or {}
@@ -2826,7 +2943,9 @@ def poll_loop(
             #
             def note_fault(request_id: str, exc: Exception) -> None:
                 if rec is not None:
-                    rec.error(request_id, fault_kind(exc), str(exc))
+                    rec.error(
+                        request_id, fault_kind(exc), str(exc), fault_detail(exc)
+                    )
 
             executor = MappingExecutor(
                 profile,

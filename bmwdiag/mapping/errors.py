@@ -8,6 +8,8 @@ somewhere deep in the poll loop.
 
 from typing import Optional
 
+from ..errors import DecodeFailure, ResponseMismatch
+
 
 class MappingError(Exception):
     """Base class for every mapping failure."""
@@ -87,11 +89,16 @@ class UnknownDerivedInputError(MappingError):
     """A derived signal names an input that no mapping provides."""
 
 
-class DecodeError(MappingError):
-    """A response could not be decoded."""
+class DecodeError(MappingError, DecodeFailure):
+    """
+    A response could not be decoded. Also a `DecodeFailure` in the shared
+    taxonomy (bmwdiag.errors): the car answered, the mapping could not
+    read it - a request-scoped fault of kind "decode", never a reason to
+    touch the link.
+    """
 
 
-class ResponseMismatchError(DecodeError):
+class ResponseMismatchError(DecodeError, ResponseMismatch):
     """A response is too short or does not carry the expected prefix."""
 
 
