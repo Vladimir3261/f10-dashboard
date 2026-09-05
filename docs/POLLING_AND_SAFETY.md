@@ -504,3 +504,104 @@ quiet window — so **1.6 s per rest cycle instead of 1.2 s**, before the
 loop time against ~2.0 % before this change, i.e. about two extra
 `motion` samples lost per EGS attempt. Accepted: the alternative was a
 silent one-period shift on every channel of that ECU.
+
+---
+
+## Faults are types, not text (2026-09-05, issue #11)
+
+Every failure between "we sent a request" and "we have a decoded value"
+is now a class in `bmwdiag/errors.py`, and the policy code - the
+executor's skip / count / reconnect decision, `tools/validate_candidate.py`'s
+"a negative response is data", the probe's reason, the Car link tab's
+NRC - reads the class with `isinstance`. Before this, a gateway NACK
+was recognised by its **class name** (`_is_request_fault` and
+`fault_kind` tested `type(exc).__name__.endswith("Nack")`), a timeout
+only by the stdlib `TimeoutError`, the validation tool found NRCs by
+grepping `"NRC"` out of the message, and a bare `HsfzError` carried
+everything else as prose. (Issue #10 had already made
+`NegativeResponse` a type with `service` / `nrc` fields; this
+generalises that to every category.) It worked; none of it could be
+tested for what it decided, and a renamed class or reworded message
+silently changed policy.
+
+`bmwdiag/errors.py` imports nothing (a test pins that), so both
+`bmwdiag.protocol` and `bmwdiag.mapping.errors` inherit from it without
+a cycle, and `live.py`'s HSFZ exceptions inherit from it too -
+`HsfzNack` is a `RoutingNack`, `HsfzNegativeResponse` is a
+`NegativeResponse` - which is how HSFZ stays out of the engine: the
+executor never learns what a gateway is, only that *something before
+the ECU* answered.
+
+Each class carries three facts, and they are the whole policy:
+
+| class (live.py subclass)                | `kind`               | `scope`   | `answered` | executor does                       |
+|-----------------------------------------|----------------------|-----------|------------|-------------------------------------|
+| `LinkError` (`HsfzLinkError`)           | `transport_link`     | link      | no         | re-raise -> reconnect               |
+| `RoutingNack` (`HsfzNack`)              | `transport_nack`     | request   | **yes**    | skip; not budgeted                  |
+| `RequestTimeout` (`HsfzTimeout`)        | `transport_timeout`  | request   | no         | skip; **budgeted**                  |
+| `PendingTimeout` (`HsfzPendingTimeout`) | `pending_timeout`    | request   | **yes**    | skip; not budgeted (see below)      |
+| `NegativeResponse` (`HsfzNegativeResponse`) | `negative_response` | request | **yes**  | skip; not budgeted; NRC kept        |
+| `DecodeFailure` (`DecodeError`)         | `decode`             | request   | yes        | skip; not budgeted                  |
+| `ResponseMismatch` (`HsfzUnexpectedReply`, `ResponseMismatchError`) | `decode` | request | yes | skip; not budgeted          |
+| `NoResponse` (executor-internal)        | `no_response`        | request   | no         | never raised: an OBD PID the reader dropped, reported via `on_error` |
+| `DiagnosticError` (bare `HsfzError`)    | `other`              | link      | no         | re-raise (conservative, as before)  |
+| bare `ConnectionError` / `TimeoutError` | by stdlib type       |           |            | as the row above it                 |
+
+`kind` is the string in `telemetry.channel_errors.kind` and
+`errors.kind` locally; **none were renamed** (renaming splits a
+dataset), and the new `pending_timeout` from the correlation work is
+now a class rather than a flag. Finer distinctions travel in
+**`detail()`**: a JSON-safe dict - `{"service": 34, "nrc": 49,
+"nrc_name": "requestOutOfRange", "raw": "7f 22 31"}` for a negative
+response, `{"target": 24, "control": 3}` for a NACK, `{"pending": 2,
+"elapsed_ms": 5000, "expected": "62 f3 03"}` for a timeout. It is
+recorded beside the message everywhere the message went:
+`errors.detail` in SQLite (added by `_migrate` on open, so old files
+gain the column), shipped by the sync agent (an old file without the
+column ships `''`), and `telemetry.channel_errors.detail` in the lake
+- **`infra/clickhouse/migrations/2026-09-05_channel_errors_detail.sql`
+is for the owner to run**; until then ingest drops the column silently
+(`input_format_skip_unknown_fields=1`) and nothing else is affected.
+`JSONExtractInt(detail, 'nrc')` is how an analysis groups refusals by
+code without touching the message.
+
+### The one policy change
+
+`TRANSPORT_FAULT_BUDGET` (six consecutive un-answered faults conclude
+the link is dead and force a reconnect) counted **every** timeout,
+including one that followed a 0x78 responsePending. It no longer does:
+`PendingTimeout.answered` is true, because a 0x78 *is* the ECU
+replying, and an ECU that keeps saying "wait" is evidence the link is
+alive - the same reasoning that already kept NACKs and negative
+responses out of the budget. A plain timeout (silence) still counts,
+and a pending timeout in the mix does not reset the count, so a dying
+link is still caught (`tests/test_error_taxonomy.py`
+`PendingTimeoutsAndTheBudget`). The rest/back-off per request is
+unchanged: a request that keeps ending in a pending timeout is stood
+down like any other repeated fault.
+
+This is a deliberate deviation from the #33 review note that
+"`TRANSPORT_FAULT_BUDGET` still counts timeouts (incl. pending)"; it
+is stated here and in the PR rather than done quietly. It has not been
+exercised on the car - nothing about this issue has; every number in
+this section is from the scripted socket.
+
+### Where the fields show up
+
+- **Car link tab**: a request's last fault renders from
+  `last_detail` - `NRC 0x31 requestOutOfRange (to 0x22)`, `no route to
+  0x18`, `after 3x 0x78` - next to the message, which is no longer
+  parsed. A session recorded before the field existed shows the message
+  alone.
+- **Profile probe** (`bmwdiag/variant.py`): each `ProbeResult` carries
+  a `fault` dict beside its prose `detail`, so "the ECU refused
+  `2C 01 F3 03 45 17` with NRC 0x31" is `fault["nrc"] == 0x31,
+  fault["service"] == 0x2C` in `/api/diagnostics`, not a substring.
+- **Validation artifacts** (`tools/validate_candidate.py`): a frame's
+  `nrc` is now the **integer** the ECU sent, with `nrc_hex`, `nrc_name`
+  and `service` beside it (and `raw` when the transport kept the
+  frame); `summary.md` renders `NRC 0x31 requestOutOfRange (to 0x22)`.
+  Artifacts written before 2026-09-05 have `nrc` as prose or `null`;
+  they are **not rewritten**, and the renderer passes a string through
+  unchanged.
+

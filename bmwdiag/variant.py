@@ -35,10 +35,10 @@ nominated a probe for is `unknown`, not `False`. Nothing here opens a
 socket; the application passes in a request callable.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from .mapping.execute import fault_kind
+from .mapping.execute import fault_detail, fault_kind
 from .mapping.model import Capability, MappingFile, RequestDef
 from .mapping.registry import CapabilitySet
 
@@ -88,11 +88,18 @@ class ProbeResult:
     #: Stable, groupable: "answered" | "wrong_prefix" | "short_response"
     #: | "unsafe_payload" (our gate refused to send it: a mapping bug,
     #: not the ECU) | a `fault_kind` ("negative_response",
-    #: "transport_timeout", "transport_nack", "transport_link", "other").
+    #: "transport_timeout", "pending_timeout", "transport_nack",
+    #: "transport_link", "other").
     reason: str
     #: Human detail: the NRC and the frame it refused, the bytes that
     #: came back, the exception text.
     detail: str = ""
+    #: The structured part of a fault (`fault_detail`): the NRC as a
+    #: number with its name and the refused service, the NACKed target,
+    #: the timeout's elapsed time. Empty when the probe did not fault or
+    #: the fault carried none. What "NRC 0x31 to 22 F3 03" is read from
+    #: - never the `detail` prose.
+    fault: Dict[str, Any] = field(default_factory=dict)
 
     def describe(self) -> str:
         text = f"{self.request_id}: {self.reason}"
@@ -103,6 +110,7 @@ class ProbeResult:
         return {
             "request": self.request_id, "answered": self.answered,
             "reason": self.reason, "detail": self.detail,
+            "fault": dict(self.fault),
         }
 
 
@@ -416,6 +424,7 @@ class ProfileProbe:
                     return ProbeResult(
                         req.id, False, _probe_reason(exc),
                         f"setup {frame.hex(' ')}: {exc}",
+                        fault=fault_detail(exc),
                     )
 
             payload = build_payload(req)
@@ -434,7 +443,10 @@ class ProfileProbe:
                 ),
             )
         except Exception as exc:
-            return ProbeResult(req.id, False, _probe_reason(exc), str(exc))
+            return ProbeResult(
+                req.id, False, _probe_reason(exc), str(exc),
+                fault=fault_detail(exc),
+            )
 
         prefix = bytes(req.response.prefix)
 
