@@ -77,6 +77,7 @@ _spec.loader.exec_module(live)
 from bmwdiag.mapping import MappingRegistry, load_file          # noqa: E402
 from bmwdiag.mapping.decoder import decode_response, match_prefix  # noqa: E402
 from bmwdiag.mapping.registry import AllCapabilities            # noqa: E402
+from bmwdiag.protocol.correlate import declared_response       # noqa: E402
 from bmwdiag.protocol.request import build_payload             # noqa: E402
 
 
@@ -500,7 +501,9 @@ def _run_one(client, engine, request, decode_ok: bool) -> Dict:
         for frame in request.setup:
             transport.request(bytes(frame), dst=dst, timeout=2.0)
 
-        response = transport.request(poll, dst=dst, timeout=2.0)
+        response = transport.request(
+            poll, dst=dst, timeout=2.0, expect=_expectation(request, poll)
+        )
     except UnsafePayload as exc:
         result["aborted"] = f"read-only gate: {exc}"
         result["frames"] = log
@@ -659,6 +662,27 @@ def cmd_run(args) -> int:
     return 0
 
 
+def _expectation(request, poll: bytes):
+    """
+    What the poll's answer must look like, for the transport to
+    correlate on: the mapping's declared prefix when it has one, the
+    protocol's echo rule otherwise - the same rule the executor and the
+    profile probe apply. Without it the transport derives the structural
+    echo, which is wrong for a family that does not echo (the KWP local
+    identifier read answers `6C 10 ..` to `2C 10 04 06`): the genuine
+    answer would be discarded as an orphan and the tool would report
+    "no answer" for a channel the car answered. Setup frames keep the
+    structural rule; the 2C clear/define echo exactly.
+    """
+    spec = request.response
+
+    return declared_response(
+        poll, bytes(spec.prefix),
+        max(spec.min_length, spec.total_length or 0),
+        label=request.id,
+    )
+
+
 def _poll_value(transport, request, dst) -> Dict:
     """One setup+poll+decode round, lean - for the sweep loop."""
     #
@@ -669,7 +693,10 @@ def _poll_value(transport, request, dst) -> Dict:
     for frame in request.setup:
         transport.request(bytes(frame), dst=dst, timeout=2.0)
 
-    response = transport.request(build_payload(request), dst=dst, timeout=2.0)
+    poll = build_payload(request)
+    response = transport.request(
+        poll, dst=dst, timeout=2.0, expect=_expectation(request, poll)
+    )
 
     try:
         match_prefix(request, response)

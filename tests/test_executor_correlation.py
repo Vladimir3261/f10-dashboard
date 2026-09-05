@@ -266,6 +266,17 @@ class InTheDiagnosticsView(unittest.TestCase):
         self.assertEqual(plain["ok"], 1)
         self.assertEqual(report["totals"]["late"], 1)
 
+    def test_ambiguous_appears_per_request_and_in_the_totals(self):
+        diag, profile, executor = self.build()
+        executor.transport.last_answer_ambiguous = True
+        executor.execute_detailed([profile.request("plain")])
+
+        report = diag.report()
+        plain = next(r for r in report["requests"] if r["id"] == "plain")
+        self.assertEqual(plain["ambiguous"], 1)
+        self.assertEqual(plain["ok"], 1)                 # the exchange worked
+        self.assertEqual(report["totals"]["ambiguous"], 1)
+
     def test_transport_section_is_the_clients_link_stats(self):
         class Client:
             def link_stats(self):
@@ -280,6 +291,76 @@ class InTheDiagnosticsView(unittest.TestCase):
     def test_transport_section_is_none_without_a_client(self):
         diag, profile, executor = self.build()
         self.assertIsNone(diag.report()["transport"])
+
+
+class AmbiguousAnswerTest(unittest.TestCase):
+    """
+    The transport can return an answer it could not tell from the
+    previous, timed-out request's (the no-setup re-poll residual). The
+    executor records it - the exchange worked - but marks every reading
+    `stale`, so nothing downstream treats a possibly one-period-old
+    value as fresh, and counts it per request.
+    """
+
+    def test_generic_answer_under_ambiguity_is_stale_not_ok(self):
+        ex, profile, transport = build()
+        transport.last_answer_ambiguous = True
+        results = ex.execute_detailed([profile.request("plain")])
+
+        self.assertEqual(len(results), 1)
+        reading = results[0].readings["gear"]
+        self.assertEqual(reading.value, 0)             # bit-exact, kept
+        self.assertEqual(reading.quality, "stale")
+        self.assertFalse(reading.usable)
+        self.assertEqual(results[0].values, {})        # not for display
+        self.assertEqual(ex.stats()["plain"]["ambiguous"], 1)
+        self.assertEqual(ex.stats()["plain"]["ok"], 1)
+        self.assertEqual(ex.stats()["plain"]["failed"], 0)
+
+    def test_flag_is_per_answer(self):
+        ex, profile, transport = build()
+        transport.last_answer_ambiguous = False
+        results = ex.execute_detailed([profile.request("plain")])
+
+        self.assertEqual(results[0].readings["gear"].quality, "ok")
+        self.assertEqual(ex.stats()["plain"]["ambiguous"], 0)
+
+    def test_transport_without_the_notion_never_flags(self):
+        ex, profile, transport = build()
+        self.assertFalse(hasattr(transport, "last_answer_ambiguous"))
+        results = ex.execute_detailed([profile.request("plain")])
+        self.assertEqual(results[0].readings["gear"].quality, "ok")
+
+    def test_obd_batch_pids_under_ambiguity_are_stale(self):
+        from bmwdiag.mapping import MappingRegistry, load_file
+        from tests.test_mapping_requests import FakeObdReader
+
+        registry = MappingRegistry([load_file(support.OBD_MAPPING)])
+        profile = registry.resolve(
+            AllCapabilities(), config={}, targets={"discovered_engine": 0x12},
+        )
+        reader = FakeObdReader({0x0C: b"\x0c\x3c", 0x0D: b"\x32"})
+        reader.ambiguous_pids = {0x0C}                 # only the rpm batch
+        ex = MappingExecutor(profile, obd_reader=reader)
+
+        readings = ex.execute_readings([
+            profile.request("obd.mode01.0C"), profile.request("obd.mode01.0D"),
+        ])
+
+        self.assertEqual(readings["rpm"].quality, "stale")
+        self.assertEqual(readings["rpm"].value, 783.0)
+        self.assertEqual(readings["speed"].quality, "ok")
+        self.assertEqual(ex.stats()["obd.mode01.0C"]["ambiguous"], 1)
+        self.assertEqual(ex.stats()["obd.mode01.0D"]["ambiguous"], 0)
+
+    def test_observational_wrapper_passes_the_flag_through(self):
+        from bmwdiag.protocol.safety import ObservationalTransport
+
+        transport = RecordingTransport()
+        wrapped = ObservationalTransport(transport)
+        self.assertFalse(wrapped.last_answer_ambiguous)
+        transport.last_answer_ambiguous = True
+        self.assertTrue(wrapped.last_answer_ambiguous)
 
 
 class OrphanWiringTest(unittest.TestCase):

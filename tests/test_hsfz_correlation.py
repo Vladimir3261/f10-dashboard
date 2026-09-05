@@ -20,7 +20,7 @@ import unittest
 from typing import Any, List, Optional, Tuple
 
 import live
-from bmwdiag.mapping.execute import fault_kind
+from bmwdiag.mapping.execute import _is_request_fault, fault_kind
 from bmwdiag.protocol.correlate import (
     FOREIGN,
     MATCH,
@@ -410,6 +410,138 @@ class LateResponseTest(unittest.TestCase):
         self.assertEqual(stats["settle_caught"], 0)
 
 
+class AmbiguousAnswerTest(unittest.TestCase):
+    """
+    The no-setup re-poll residual: the same identifier polled again
+    after its own timeout, with the late answer landing only once the
+    fresh request is on the wire. Content cannot tell the two apart;
+    the client returns the answer but FLAGS it, and attributes the
+    second answer when it comes, instead of shifting by one for the
+    rest of the drive.
+    """
+
+    def _timed_out_then_repoll(self):
+        client, sock, clock = make_client()
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+
+        # A's stale answer lands after the settle window, during B's wait.
+        sock.on_send = lambda body: [
+            (0.3, diag(EGS, bytes.fromhex("62 DA 2E 03 AA"))),
+            (0.05, diag(EGS, bytes.fromhex("62 DA 2E 04 BB"))),
+        ]
+        got = client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+        sock.on_send = None
+
+        return client, sock, clock, got
+
+    def test_first_match_after_an_ambiguous_tick_is_flagged(self):
+        client, _sock, _clock, got = self._timed_out_then_repoll()
+
+        # Returned - a valid answer, possibly one period old - but flagged.
+        self.assertEqual(got, bytes.fromhex("62 DA 2E 03 AA"))
+        self.assertTrue(client.last_answer_ambiguous)
+        stats = client.link_stats()
+        self.assertEqual(stats["ambiguous_resends"], 1)
+        self.assertEqual(stats["ambiguous_answers"], 1)
+        # The record stays, marked answered, so BB can be attributed.
+        self.assertEqual(len(stats["outstanding"]), 1)
+        self.assertTrue(stats["outstanding"][0]["answered"])
+
+    def test_second_answer_is_attributed_and_the_next_poll_is_clean(self):
+        client, sock, clock, _got = self._timed_out_then_repoll()
+
+        # C: nothing arrives for it; BB is already queued and is caught
+        # by C's settle window as the late answer to the ambiguous B.
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+
+        self.assertFalse(client.last_answer_ambiguous)
+        stats = client.link_stats()
+        self.assertEqual(stats["settle_caught"], 1)
+        self.assertEqual(stats["late_response"], 1)
+        # C is not flagged again: only a genuine timeout makes the next
+        # answer ambiguous, never a record kept for attribution.
+        self.assertEqual(stats["ambiguous_resends"], 1)
+        self.assertEqual(stats["ambiguous_answers"], 1)
+        label, kind, message = client.orphans[-1]
+        self.assertEqual(kind, "late_response")
+        self.assertIn("62 da 2e 04 bb", message)
+        self.assertIn("answered ambiguously", message)
+
+    def test_unflagged_answer_resets_the_flag(self):
+        client, sock, clock, _got = self._timed_out_then_repoll()
+        self.assertTrue(client.last_answer_ambiguous)
+
+        sock.on_send = lambda body: [(0.02, diag(DDE, bytes.fromhex("41 0C 12 34")))]
+        client.request(bytes.fromhex("01 0C"), timeout=0.4, dst=DDE)
+
+        self.assertFalse(client.last_answer_ambiguous)
+
+    def test_an_answer_that_content_can_settle_is_not_flagged(self):
+        client, sock, clock = make_client()
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 12 34"), timeout=0.4)
+
+        sock.on_send = lambda body: [(0.1, diag(DDE, bytes.fromhex("62 56 78 BB")))]
+        client.request(bytes.fromhex("22 56 78"), timeout=0.4)
+
+        self.assertFalse(client.last_answer_ambiguous)
+        self.assertEqual(client.link_stats()["ambiguous_answers"], 0)
+
+    def test_outstanding_record_expires_after_the_pending_bound(self):
+        # No request may outlive pending_max_total, so a record older
+        # than that cannot be answered any more - and must not keep
+        # flagging every re-poll of a silent identifier as ambiguous.
+        client, sock, clock = make_client(pending_max_total=5.0)
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+
+        clock.advance(6.0)
+        sock.on_send = lambda body: [(0.1, diag(EGS, bytes.fromhex("62 DA 2E 04 BB")))]
+        got = client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+
+        self.assertEqual(got, bytes.fromhex("62 DA 2E 04 BB"))
+        self.assertFalse(client.last_answer_ambiguous)
+        stats = client.link_stats()
+        self.assertEqual(stats["outstanding_expired"], 1)
+        self.assertEqual(stats["ambiguous_resends"], 0)
+        self.assertEqual(stats["outstanding"], [])
+
+    def test_no_settle_is_paid_by_the_other_ecu(self):
+        client, sock, clock = make_client()
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+
+        before = clock.now
+        sock.on_send = lambda body: [(0.02, diag(DDE, bytes.fromhex("41 0C 12 34")))]
+        client.request(bytes.fromhex("01 0C"), timeout=0.4, dst=DDE)
+
+        self.assertAlmostEqual(clock.now - before, 0.02, places=3)
+
+    def test_settle_cost_of_repolling_a_silent_identifier(self):
+        # The numbers docs/POLLING_AND_SAFETY.md quotes (synthetic):
+        # three EGS attempts at 0.4 s cost 0.40, 0.60, 0.60 s - the
+        # second and third pay one 0.2 s quiet window each.
+        client, sock, clock = make_client()
+        elapsed = []
+
+        for _ in range(3):
+            before = clock.now
+            with self.assertRaises(TimeoutError):
+                client.request(bytes.fromhex("22 DA 2E"), timeout=0.4, dst=EGS)
+            elapsed.append(round(clock.now - before, 2))
+
+        self.assertEqual(elapsed, [0.40, 0.60, 0.60])
+        stats = client.link_stats()
+        self.assertEqual(stats["settle_runs"], 2)
+        self.assertEqual(stats["ambiguous_resends"], 2)
+
+
 class F303SequenceTest(unittest.TestCase):
     """
     Issue #12 scenario 2: read A of F303 times out; B redefines F303
@@ -634,11 +766,66 @@ class ResponsePendingTest(unittest.TestCase):
         self.assertEqual(len(stats["outstanding"]), 1)
         self.assertEqual(stats["outstanding"][0]["pending"], 3)
 
-    def test_pending_timeout_is_a_transport_timeout_to_the_executor(self):
+    def test_pending_timeout_is_a_request_fault_with_its_own_kind(self):
         exc = live.HsfzPendingTimeout("x")
         self.assertIsInstance(exc, TimeoutError)
         self.assertIsInstance(exc, live.HsfzError)
-        self.assertEqual(fault_kind(exc), "transport_timeout")
+        #: One exchange that did not complete - skipped, not a reconnect.
+        self.assertTrue(_is_request_fault(exc))
+        #: But not the same diagnosis as silence: the ECU answered 0x78
+        #: and then nothing. The lake gets its own kind for that.
+        self.assertEqual(fault_kind(exc), "pending_timeout")
+        self.assertEqual(fault_kind(TimeoutError("silence")), "transport_timeout")
+
+    def test_late_pending_keeps_the_request_outstanding(self):
+        # A late `7F 22 78` is not the late ANSWER - it is a promise of
+        # one. Closing the record on it would leave the answer it
+        # announces with nothing to be attributed to.
+        client, sock, clock = make_client()
+        e = declared_response(bytes.fromhex("22 F3 03"), b"", label="dyn")
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 F3 03"), timeout=0.4, expect=e)
+
+        sock.inbox.append((0.0, diag(DDE, bytes.fromhex("7F 22 78"))))
+        sock.inbox.append((0.1, diag(DDE, bytes.fromhex("62 F3 03 01 02"))))
+        sock.on_send = lambda body: [(0.1, diag(DDE, bytes.fromhex("6C 03 F3 03")))]
+        got = client.request(bytes.fromhex("2C 03 F3 03"), timeout=0.4)
+
+        self.assertEqual(got, bytes.fromhex("6C 03 F3 03"))
+        stats = client.link_stats()
+        self.assertEqual(stats["pending_seen"], 1)
+        self.assertEqual(stats["late_response"], 1)
+        self.assertEqual(stats["unexpected_response"], 0)
+        self.assertEqual(stats["outstanding"], [])
+        self.assertEqual([o[:2] for o in client.orphans], [("dyn", "late_response")])
+
+    def test_late_pending_restarts_the_expiry_clock(self):
+        client, sock, clock = make_client(pending_max_total=5.0)
+
+        with self.assertRaises(TimeoutError):
+            client.request(bytes.fromhex("22 F3 03"), timeout=0.4)
+
+        clock.advance(4.0)
+        sock.inbox.append((0.0, diag(DDE, bytes.fromhex("7F 22 78"))))
+        sock.on_send = lambda body: [(0.1, diag(DDE, bytes.fromhex("6C 03 F3 03")))]
+        client.request(bytes.fromhex("2C 03 F3 03"), timeout=0.4)
+
+        outstanding = client.link_stats()["outstanding"]
+        self.assertEqual(len(outstanding), 1)
+        self.assertEqual(outstanding[0]["pending"], 1)
+
+        # 4.0 s + 0.1 s + ... since the send, but the ECU just said it is
+        # still working: the record lives on past the original deadline.
+        clock.advance(2.0)
+        sock.inbox.append((0.0, diag(DDE, bytes.fromhex("62 F3 03 01 02"))))
+        client.request(bytes.fromhex("2C 03 F3 03"), timeout=0.4)
+
+        # The promised answer, arriving after a NEWER request was already
+        # answered, is still the late answer - not "matches nothing asked".
+        self.assertEqual(client.link_stats()["late_response"], 1)
+        self.assertEqual(client.link_stats()["unexpected_response"], 0)
+        self.assertEqual(client.link_stats()["outstanding_expired"], 0)
 
     def test_answer_arriving_late_after_pending_exhaustion_is_attributed(self):
         client, sock, clock = make_client(pending_max_total=5.0)

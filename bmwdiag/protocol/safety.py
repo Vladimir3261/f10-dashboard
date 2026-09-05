@@ -137,3 +137,12 @@ class ObservationalTransport:
         return self.inner.request(
             payload, dst=dst, timeout=timeout, expect=expect
         )
+
+    @property
+    def last_answer_ambiguous(self) -> bool:
+        """
+        Pass-through of the inner transport's correlation verdict on the
+        answer it last returned (see `HsfzClient.last_answer_ambiguous`).
+        A transport without the notion never flags.
+        """
+        return bool(getattr(self.inner, "last_answer_ambiguous", False))

@@ -397,33 +397,110 @@ bounds cover that:
   `PENDING_EXTENSION` (2 s) but never past `PENDING_MAX_TOTAL` (5 s,
   ISO 14229's P2\*server) from the send. Past that the request fails as
   `HsfzPendingTimeout` — a `TimeoutError`, so to the executor it is one
-  exchange that did not complete (`transport_timeout`), and the answer
-  that eventually arrives is a `late_response` like any other.
+  exchange that did not complete, skipped rather than reconnected — but
+  recorded under its own kind, **`pending_timeout`**, so the lake can
+  tell "the ECU kept saying wait and then went silent" from "the ECU
+  said nothing" (`transport_timeout`). The answer that eventually
+  arrives is a `late_response` like any other. A `7F xx 78` that
+  arrives *late* — after its request timed out — is not that answer
+  either: it is a promise of one, so the outstanding record is kept and
+  its clock restarted, and the answer it announces is attributed when
+  it comes.
 
 An outstanding request is forgotten when its late answer shows up, when
-the ECU answers a later request (it answers in order, so it has moved
-past the old one), or on reconnect (a new TCP session carries nothing
-from the old one).
+the ECU answers a later request that could be told apart from it (it
+answers in order, so it has moved past the old one — unless it had
+promised the old answer with a `78`, in which case the record stays: a
+long job can run beside short ones), when it is older than
+`PENDING_MAX_TOTAL` (no request outlives that, so nothing arriving
+later can be its answer; counted as `outstanding_expired`), or on
+reconnect (a new TCP session carries nothing from the old one).
 
-**The residual, stated honestly:** a late answer that arrives after the
-settle window *and* after the ECU has answered two further requests is
-assumed impossible on an in-order ECU. If this DDE reorders — nothing
-observed suggests it, and nothing proves it does not — the
-`ambiguous_resends` counter and the per-request `late` counts are where
-it would first show.
+**The residuals, stated honestly.** Two cases remain that content
+cannot settle and the bounds only narrow:
+
+1. *Requests with a setup sequence* (the F303 reads): a late answer
+   that arrives after the settle window *and* after the ECU has
+   answered the two re-arm exchanges is assumed impossible on an
+   in-order ECU. If this DDE reorders — nothing observed suggests it,
+   and nothing proves it does not — `unexpected_response` and the
+   per-request `late` counts are where it would first show.
+2. *Requests with no setup* (EGS `22 DA2E`, OBD batches, static DIDs),
+   re-polled after their own timeout: if the late answer lands after
+   the 0.2 s quiet window and *during the next identical request's
+   wait*, it is byte-for-byte what that request expects and **is
+   returned as its answer** — a valid reading, possibly one period
+   old. Nothing in the bytes can tell. What the code does about it:
+   the transport **flags** that answer (`HsfzClient.last_answer_ambiguous`,
+   counted as `ambiguous_answers`), the executor records the readings
+   decoded from it with quality **`stale`** instead of `ok` — the
+   number is kept bit-exact in SQLite and the lake, the display and
+   the derived channels drop it, and the request's `ambiguous` count
+   in `/api/diagnostics` ticks — and the answer that then arrives for
+   the flagged request is attributed as a `late_response` ("answered
+   ambiguously … ago") rather than returned to the request after it —
+   the request after a flagged answer pays one more 0.2 s quiet window
+   for that, and is itself never flagged by the kept record. So the
+   one-period shift the residual used to cause is bounded to
+   one flagged sample; it does not propagate. What is *not* fixed: the
+   flag is a suspicion, not a proof — when the late answer never
+   comes (the ECU answered once, late, and that was it) the flagged
+   sample was in fact fresh, and it is dropped for nothing. That is
+   the conservative side to be wrong on, and rare: it needs a timeout
+   followed by an answer arriving in the 0.2–0.6 s after the settle
+   window closed. A real fix would need a sequence number the
+   protocol does not have.
 
 ### What to look at after a drive
 
 `/api/diagnostics` → `transport`: `timeouts`, `pending_seen`,
 `pending_exhausted`, `late_response`, `unexpected_response`,
-`settle_runs`, `settle_caught`, `ambiguous_resends`, what is
-`outstanding`, the bounds in force, and the last 48 frames on the wire
-with a note on each orphan. The Car link tab shows the tally on the
-session card and a `late` mark on any request that has one. In the
-lake, `telemetry.channel_errors` gains the two new `kind` values (the
-column is a string; no migration).
+`settle_runs`, `settle_caught`, `ambiguous_resends`,
+`ambiguous_answers`, `outstanding_expired`, what is `outstanding`, the
+bounds in force, and the last 48 frames on the wire with a note on each
+orphan. The Car link tab shows the tally on the session card and a
+`late` / `ambiguous` mark on any request that has one. In the lake,
+`telemetry.channel_errors` gains the three new `kind` values
+(`late_response`, `unexpected_response`, `pending_timeout`; the column
+is a string; no migration) and `samples.quality` gains its first
+`stale` rows (the label was in the enum from Stage 1, never written
+until now).
 
-The counters that should stay at zero on a healthy drive are
-`unexpected_response` and `ambiguous_resends`. `late_response` will
-track `timeouts` closely on a sleeping EGS — that is the expected
-pairing, not a fault.
+What the counters mean, so nobody hunts for a fault that is not one:
+
+- `unexpected_response` should stay at zero. A frame from an ECU that
+  matches nothing asked of it is either reordering or a request this
+  code did not send.
+- `ambiguous_resends` is **not** a zero counter. It ticks every time
+  an identifier is re-polled while its previous answer is still
+  unaccounted for — the settle window closed without it — which is
+  what every retry of a *silent* identifier looks like: three EGS
+  attempts at key-on with the gearbox asleep are `settle_runs = 2,
+  ambiguous_resends = 2` (synthetic, `tests/test_hsfz_correlation.py`
+  `test_settle_cost_of_repolling_a_silent_identifier`). It measures
+  exposure to residual 2, not damage. The damage counter is
+  `ambiguous_answers`: an answer actually returned under that
+  exposure, with its readings flagged `stale`.
+- `late_response` tracks `timeouts` on a **slow** ECU — one that
+  answers, late. A *sleeping* ECU never answers, so on an EGS that is
+  asleep `late_response` stays at zero while `timeouts` climbs, and
+  that pairing is equally expected.
+- `outstanding_expired` counts timed-out requests found, at the next
+  contact with that ECU, to be older than `PENDING_MAX_TOTAL` with
+  their answer never seen. On a sleeping EGS that is one per attempt
+  that follows a rest — and that attempt pays no settle window, since
+  nothing can still be coming.
+
+### What the settle window costs (synthetic, from the code)
+
+Settle is keyed per ECU, so a DDE request after an EGS timeout pays
+nothing (scripted: 0.02 s, the fake ECU's answer delay, and
+`test_no_settle_is_paid_by_the_other_ecu` pins it). But the poll loop
+is sequential: while the EGS settles nothing else is polled. With
+`timeout: 0.4` on the `egs` class, the three attempts of a rest cycle
+cost 0.40 / 0.60 / 0.60 s — the second and third each pay one 0.2 s
+quiet window — so **1.6 s per rest cycle instead of 1.2 s**, before the
+5 → 10 → 20 → 40 → 60 s rest. At the 60 s ceiling that is ~2.6 % of
+loop time against ~2.0 % before this change, i.e. about two extra
+`motion` samples lost per EGS attempt. Accepted: the alternative was a
+silent one-period shift on every channel of that ECU.
