@@ -540,7 +540,7 @@ class TheAcquisitionTimeSurvives(unittest.TestCase):
         profile = MappingRegistry([mapping]).resolve(AllCapabilities())
 
         class Slow:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 clock.sleep(0.02)
 
                 return bytes([0x62, payload[1], payload[2], 7])

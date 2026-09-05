@@ -28,7 +28,7 @@ transport wraps itself in `ObservationalTransport` (or calls
 same policy with no new decisions to make.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 __all__ = [
     "OBSERVATIONAL_SERVICES",
@@ -130,7 +130,19 @@ class ObservationalTransport:
         self.inner = inner
 
     def request(self, payload: bytes, *, dst: int,
-                timeout: Optional[float] = None) -> bytes:
+                timeout: Optional[float] = None,
+                expect: Optional[Any] = None) -> bytes:
         assert_observational(bytes(payload))
 
-        return self.inner.request(payload, dst=dst, timeout=timeout)
+        return self.inner.request(
+            payload, dst=dst, timeout=timeout, expect=expect
+        )
+
+    @property
+    def last_answer_ambiguous(self) -> bool:
+        """
+        Pass-through of the inner transport's correlation verdict on the
+        answer it last returned (see `HsfzClient.last_answer_ambiguous`).
+        A transport without the notion never flags.
+        """
+        return bool(getattr(self.inner, "last_answer_ambiguous", False))

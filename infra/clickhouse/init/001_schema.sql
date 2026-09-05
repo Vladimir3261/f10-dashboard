@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS telemetry.channel_errors
     kind         LowCardinality(String),      -- transport_nack | transport_timeout
                                               -- | transport_link | no_response
                                               -- | negative_response | decode | other
+                                              -- | late_response | unexpected_response
+                                              --   (request_id may be hsfz:0xNN)
+                                              -- | pending_timeout (0x78 then silence)
     message      String,
     mapping_ver  LowCardinality(String) DEFAULT '',
     ingested_at  DateTime64(3, 'UTC') DEFAULT now64(3)
