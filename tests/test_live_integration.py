@@ -29,7 +29,8 @@ class FakeHsfzClient:
         self.multi = multi
         self.requests = []
 
-    def request(self, payload, timeout=None, dst=None, expect_src=None):
+    def request(self, payload, timeout=None, dst=None, expect_src=None,
+                expect=None):
         self.requests.append(bytes(payload))
 
         if payload[0] != 0x01:
@@ -140,6 +141,25 @@ class TestObdSession(LiveWiringCase):
 
         self.assertEqual(got, {0x0C: b"\x0c\x3c", 0x0B: b"\x9e"})
         self.assertFalse(session.multi_ok)
+
+    def test_ambiguous_answer_marks_the_batch_it_carried(self):
+        # The client flags an answer it could not tell from the previous
+        # request's; the session remembers which PIDs came from it, so
+        # the executor can mark exactly those readings `stale`.
+        _, _, client, session, _, _ = self.build()
+
+        client.last_answer_ambiguous = True
+        session.read([0x0C, 0x0B])
+        self.assertEqual(session.ambiguous_pids, {0x0C, 0x0B})
+
+        client.last_answer_ambiguous = False
+        session.read([0x0C, 0x0B])
+        self.assertEqual(session.ambiguous_pids, set())      # rebuilt per read
+
+    def test_client_without_the_flag_never_marks(self):
+        _, _, _, session, _, _ = self.build()
+        session.read([0x0C])
+        self.assertEqual(session.ambiguous_pids, set())
 
 
 class TestPollCycle(LiveWiringCase):

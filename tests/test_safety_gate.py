@@ -159,7 +159,7 @@ class RecordingTransport:
     def __init__(self):
         self.sent = []
 
-    def request(self, payload, *, dst, timeout=None):
+    def request(self, payload, *, dst, timeout=None, expect=None):
         self.sent.append(bytes(payload))
 
         return b"\x62\xf3\x03\x00\x00"

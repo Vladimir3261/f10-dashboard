@@ -164,6 +164,17 @@ Four rules hold this together:
 violates the declared range too and "the ECU declared it unavailable" is
 the more informative of the two facts.
 
+**`stale`** (in the enum since day one, first written 2026-09-05 with
+issue #12) is the one label that is not the decoder's: the bytes decoded
+fine, but the *transport* could not tell whether they answer this
+request or the previous, timed-out one with the same content — the
+answer may be one poll period old. The executor downgrades every `ok`
+reading from such an answer to `stale` (a reading already flagged for
+another reason keeps its own label), so the value is kept bit-exact
+and dropped from display and derived channels like any other flagged
+reading. It is a suspicion, not a proof: see "The residuals, stated
+honestly" in `POLLING_AND_SAFETY.md`.
+
 ### The labels are a schema contract
 
 `QUALITIES` in `bmwdiag/mapping/decoder.py` must equal the lake's

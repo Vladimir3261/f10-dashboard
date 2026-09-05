@@ -364,8 +364,21 @@ def read_errors(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         ).fetchone():
             return []
 
+        #
+        # `detail` (issue #11: the structured part of a fault - NRC,
+        # service, target, elapsed - as JSON text) exists only on
+        # databases recorded after it was added. Older files ship it
+        # empty rather than failing the query.
+        #
+        has_detail = any(
+            row[1] == "detail"
+            for row in con.execute("PRAGMA table_info(errors)").fetchall()
+        )
+        detail_col = "e.detail" if has_detail else "''"
+
         rows = con.execute(
-            "SELECT e.rowid, r.vin, e.run_id, e.ts, e.request_id, e.kind, e.message "
+            "SELECT e.rowid, r.vin, e.run_id, e.ts, e.request_id, e.kind, "
+            f"e.message, {detail_col} "
             "FROM errors e JOIN runs r ON r.id = e.run_id "
             "WHERE e.rowid > ? ORDER BY e.rowid LIMIT ?",
             (after_rowid, limit),
@@ -377,8 +390,9 @@ def read_errors(db_path: str, after_rowid: int, limit: int) -> List[Dict]:
         {"_rowid": rid, "vehicle_id": vin,
          "session_id": global_session_id(db_path, run_id),
          "ts": ts, "request_id": request_id, "kind": kind,
-         "message": (message or "")[:500]}
-        for rid, vin, run_id, ts, request_id, kind, message in rows
+         "message": (message or "")[:500],
+         "detail": (detail or "")[:500]}
+        for rid, vin, run_id, ts, request_id, kind, message, detail in rows
     ]
 
 

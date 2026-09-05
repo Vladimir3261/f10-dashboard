@@ -28,7 +28,7 @@ from .decoder import (
 )
 from .derive import apply_derived, compute_derived
 from .errors import MappingError
-from .execute import fault_kind, MappingExecutor
+from .execute import fault_detail, fault_kind, MappingExecutor
 from .loader import load_file, load_text, load_tree
 from .model import (
     Decode,
@@ -51,6 +51,7 @@ from .polling import PollingPlan, resolve_classes
 from .registry import AllCapabilities, CapabilitySet, MappingRegistry, ResolvedProfile
 
 __all__ = [
+    "fault_detail",
     "fault_kind",
     "AllCapabilities",
     "CapabilitySet",

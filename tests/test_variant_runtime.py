@@ -66,7 +66,7 @@ class FakeDde:
         #: source ids the ECU refuses to define - NRC 0x31 to the setup
         self.refuse = {r.lower() for r in refuse}
 
-    def request(self, payload, *, dst, timeout=None):
+    def request(self, payload, *, dst, timeout=None, expect=None):
         h = bytes(payload).hex()
         self.sent.append(h)
 
@@ -93,7 +93,7 @@ def probe(ecu, *mappings, dst=0x12):
     nominations = profile_nominations(registry.mappings)
 
     return EcuIdentity(ProfileProbe(
-        lambda p, dst, timeout=None: ecu.request(p, dst=dst)
+        lambda p, dst, timeout=None, expect=None: ecu.request(p, dst=dst, expect=expect)
     ).resolve(nominations, dst))
 
 
@@ -211,12 +211,19 @@ class Probing(unittest.TestCase):
         #: the refusal is recorded with the frame it refused and the code
         self.assertIn("NRC 0x31", resolution.probes[0].detail)
         self.assertIn("setup 2c 01 f3 03 45 17", resolution.probes[0].detail)
+        #: ... and the code as a number, from the exception's fields,
+        #: not from the prose
+        self.assertEqual(resolution.probes[0].fault["nrc"], 0x31)
+        self.assertEqual(resolution.probes[0].fault["nrc_name"], "requestOutOfRange")
+        self.assertEqual(resolution.probes[0].fault["service"], 0x2C)
+        self.assertEqual(resolution.probes[0].as_dict()["fault"]["nrc"], 0x31)
+        self.assertEqual(resolution.probes[1].fault, {})
         self.assertEqual(resolution.describe(),
                          "compatible: n47.d72.dyn.4BC3 answered")
 
     def test_every_probe_refused_is_unsupported_with_each_reason(self):
         class Refuses:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise NegativeResponse(payload[0], 0x31)
 
         identity = probe(Refuses(), DYNAMIC)
@@ -244,7 +251,7 @@ class Probing(unittest.TestCase):
         for expected, reply in cases.items():
             with self.subTest(expected=expected):
                 class OddEcu:
-                    def request(self, payload, *, dst, timeout=None):
+                    def request(self, payload, *, dst, timeout=None, expect=None):
                         if bytes(payload).hex() == "22f303":
                             return reply()
                         return hexb("6c 03 f3 03")
@@ -260,16 +267,18 @@ class Probing(unittest.TestCase):
 
     def test_a_timeout_and_a_nack_are_named_as_such(self):
         class Silent:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise TimeoutError("HSFZ read timeout")
 
         class Unrouted:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 import live
-                raise live.HsfzNack("gateway will not route to 0x12")
+                raise live.HsfzNack(0x12)
 
-        for ecu, reason in ((Silent(), "transport_timeout"),
-                            (Unrouted(), "transport_nack")):
+        for ecu, reason, fault in (
+            (Silent(), "transport_timeout", {}),
+            (Unrouted(), "transport_nack", {"target": 0x12}),
+        ):
             with self.subTest(reason=reason):
                 identity = probe(ecu, DYNAMIC)
                 [resolution] = identity.profiles.values()
@@ -278,6 +287,25 @@ class Probing(unittest.TestCase):
                 self.assertEqual(
                     {p.reason for p in resolution.probes}, {reason}
                 )
+                #: a bare stdlib timeout has no structured detail; the
+                #: NACK names the ECU the gateway would not route to
+                self.assertEqual(resolution.probes[0].fault, fault)
+
+    def test_the_live_negative_response_lands_in_the_probe_as_fields(self):
+        import live
+
+        class Refuses:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise live.HsfzNegativeResponse(0x22, 0x31, raw=bytes.fromhex("7F2231"))
+
+        identity = probe(Refuses(), DYNAMIC)
+        [resolution] = identity.profiles.values()
+
+        self.assertEqual(resolution.probes[0].reason, "negative_response")
+        self.assertEqual(resolution.probes[0].fault, {
+            "service": 0x22, "nrc": 0x31, "nrc_name": "requestOutOfRange",
+            "raw": "7f 22 31",
+        })
 
     def test_a_gate_refusal_is_a_mapping_bug_not_an_ecu_refusal(self):
         """
@@ -288,7 +316,7 @@ class Probing(unittest.TestCase):
         from bmwdiag.protocol import UnsafePayload
 
         class Gate:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise UnsafePayload("service 0x2E is not observational")
 
         identity = probe(Gate(), DYNAMIC)
@@ -314,7 +342,7 @@ class Probing(unittest.TestCase):
         registry = MappingRegistry([load_text(text, "dynamic")])
         fake = FakeDde()
         identity = EcuIdentity(ProfileProbe(
-            lambda p, dst, timeout=None: fake.request(p, dst=dst)
+            lambda p, dst, timeout=None, expect=None: fake.request(p, dst=dst, expect=expect)
         ).resolve(profile_nominations(registry.mappings), 0x12))
 
         self.assertEqual(fake.sent, [])
@@ -411,7 +439,7 @@ class Identity(unittest.TestCase):
         registry = MappingRegistry([load_text(text, "dynamic")])
         fake = FakeDde()
         compatible = EcuIdentity(ProfileProbe(
-            lambda p, dst, timeout=None: fake.request(p, dst=dst)
+            lambda p, dst, timeout=None, expect=None: fake.request(p, dst=dst, expect=expect)
         ).resolve(profile_nominations(registry.mappings), 0x12))
 
         dormant = registry.resolve(compatible, targets={"discovered_engine": 0x12})
@@ -463,7 +491,7 @@ class Resolution(unittest.TestCase):
     def test_the_report_carries_the_reason_not_just_false(self):
         registry = MappingRegistry([load_file(DYNAMIC)])
         silent = type("Silent", (), {
-            "request": lambda self, p, *, dst, timeout=None:
+            "request": lambda self, p, *, dst, timeout=None, expect=None:
                 (_ for _ in ()).throw(TimeoutError("HSFZ read timeout")),
         })()
         identity = probe(silent, DYNAMIC)

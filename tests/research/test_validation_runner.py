@@ -7,7 +7,9 @@ frame passes through), the VIN redaction that keeps tracked artifacts
 clean, and the frame log against a fake transport.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import unittest
 
@@ -61,7 +63,7 @@ class ReadOnlyGate(unittest.TestCase):
         class Spy:
             sent = []
 
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 self.sent.append(payload)
                 return b""
 
@@ -74,10 +76,10 @@ class ReadOnlyGate(unittest.TestCase):
         self.assertEqual(spy.sent, [])
 
     def test_gate_transport_records_a_negative_response_as_data(self):
-        """An NRC is captured in the frame log, not raised."""
+        """An NRC is captured in the frame log as a number, not raised."""
         class Nrc:
-            def request(self, payload, *, dst, timeout=None):
-                raise vc.live.HsfzError("negative response to 0x22: NRC 0x31")
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise vc.live.HsfzNegativeResponse(0x22, 0x31, raw=hexb("7F 22 31"))
 
         log = []
         gated = vc.GatedTransport(Nrc(), log)
@@ -85,7 +87,182 @@ class ReadOnlyGate(unittest.TestCase):
 
         self.assertEqual(out, b"")
         self.assertEqual(len(log), 1)
-        self.assertIn("NRC 0x31", log[0]["nrc"])
+        self.assertEqual(log[0]["nrc"], 0x31)
+        self.assertEqual(log[0]["nrc_hex"], "0x31")
+        self.assertEqual(log[0]["nrc_name"], "requestOutOfRange")
+        self.assertEqual(log[0]["service"], 0x22)
+        self.assertEqual(log[0]["raw"], "7f 22 31")
+        self.assertEqual(vc.nrc_text(log[0]), "NRC 0x31 requestOutOfRange (to 0x22)")
+
+    def test_gate_transport_catches_the_negative_response_by_type(self):
+        """Any NegativeResponse counts; any other fault still aborts."""
+        from bmwdiag.protocol import NegativeResponse
+
+        class Generic:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise NegativeResponse(0x22, 0x12)         # not an HsfzError
+
+        log = []
+        self.assertEqual(vc.GatedTransport(Generic(), log).request(
+            hexb("22 45 17"), dst=0x12), b"")
+        self.assertEqual(log[0]["nrc"], 0x12)
+        self.assertEqual(log[0]["nrc_name"], "subFunctionNotSupported")
+
+        class Prose:
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                # The words are there; the type is not. Not a negative
+                # response - the tool must not parse messages.
+                raise vc.live.HsfzError("negative response to 0x22: NRC 0x31")
+
+        with self.assertRaises(vc.live.HsfzError):
+            vc.GatedTransport(Prose(), []).request(hexb("22 45 17"), dst=0x12)
+
+    def test_old_artifacts_render_without_rewriting(self):
+        """A pre-2026-09-05 frame carries the NRC as prose or null."""
+        self.assertEqual(vc.nrc_text({"nrc": None}), "")
+        self.assertEqual(vc.nrc_text({}), "")
+        self.assertEqual(
+            vc.nrc_text({"nrc": "negative response to 0x22: NRC 0x31"}),
+            "negative response to 0x22: NRC 0x31",
+        )
+        self.assertEqual(vc.nrc_text({"nrc": 0x7F}), "NRC 0x7F serviceNotSupportedInActiveSession")
+        self.assertEqual(vc.nrc_text({"nrc": 0x99}), "NRC 0x99 unknown")
+
+    def test_run_one_records_the_nrc_numerically(self):
+        request = self._d72_request("n47.d72.dyn.4517")
+
+        class Client:
+            def request(self, payload, timeout, dst, expect=None):
+                if payload[0] == 0x22:
+                    raise vc.live.HsfzNegativeResponse(0x22, 0x31, raw=hexb("7F 22 31"))
+                return bytes([0x6C]) + bytes(payload[1:4])
+
+        class Engine:
+            addr = 0x12
+
+            def label(self):
+                return "0x12 (DDE)"
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = vc._run_one(Client(), Engine(), request, decode_ok=True)
+
+        self.assertEqual(result["outcome"], "negative_response")
+        self.assertEqual(result["nrc"], 0x31)
+        self.assertEqual(result["nrc_name"], "requestOutOfRange")
+        self.assertEqual(result["service"], 0x22)
+        self.assertEqual(result["raw"], "7f 22 31")
+
+    def _d72_request(self, request_id):
+        mapping = vc.load_file(os.path.join(
+            support.ROOT, "mappings", "candidates", "bmw", "dde", "n47",
+            "d72n47a0_dynamic.yaml"))
+        for request in mapping.requests:
+            if request.id == request_id:
+                return request
+        self.fail(request_id)
+
+
+_KWP = os.path.join(support.ROOT, "mappings", "candidates", "bmw", "dde",
+                    "n47", "dde7_kwp_local_id.yaml")
+_D72 = os.path.join(support.ROOT, "mappings", "candidates", "bmw", "dde",
+                    "n47", "d72n47a0_dynamic.yaml")
+
+
+class Correlation(unittest.TestCase):
+    """
+    The tool polls MAPPED requests, so it must hand the transport the
+    mapping's declared response shape - not leave the transport to
+    derive the structural echo. The KWP local-identifier read is the
+    case that breaks otherwise: `2C 10 04 06` is answered by `6C 10 ..`
+    (no identifier echo), which the structural rule would discard as
+    an orphan and the tool would report as "no answer".
+    """
+
+    class Spy:
+        def __init__(self, answer=b""):
+            self.calls = []
+            self.answer = answer
+
+        def request(self, payload, *, dst, timeout=None, expect=None):
+            self.calls.append((bytes(payload), dst, expect))
+            return self.answer
+
+    def _request(self, path, request_id):
+        mapping = vc.load_file(path)
+        for request in mapping.requests:
+            if request.id == request_id:
+                return request
+        self.fail(f"{request_id} not in {path}")
+
+    def test_poll_value_passes_the_declared_expectation(self):
+        request = self._request(_KWP, "n47.dde7.local.0406")
+        spy = self.Spy(answer=hexb("6C 10 00 2A"))
+        gated = vc.GatedTransport(spy, [])
+
+        values = vc._poll_value(gated, request, 0x12)
+
+        self.assertEqual(values, {"dde7_soot": 0.42})
+        self.assertEqual(len(spy.calls), 1)
+        payload, dst, expect = spy.calls[0]
+        self.assertEqual(payload, hexb("2C 10 04 06"))
+        self.assertEqual(dst, 0x12)
+        self.assertIsNotNone(expect)
+        self.assertEqual(expect.origin, "declared")
+        self.assertEqual(expect.label, "n47.dde7.local.0406")
+        # The declared shape accepts the non-echoing answer ...
+        self.assertTrue(expect.matches_positive(hexb("6C 10 00 2A")))
+        # ... which the structural rule would have thrown away.
+        structural = vc.declared_response(hexb("2C 10 04 06"), b"", 0)
+        self.assertFalse(structural.matches_positive(hexb("6C 10 00 2A")))
+
+    def test_run_one_passes_the_declared_expectation_after_setup(self):
+        """Setup frames stay structural (they echo); the poll is declared."""
+        request = self._request(_D72, "n47.d72.dyn.4517")
+        self.assertTrue(request.setup, "the d72 dynamic read has a setup")
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, payload, timeout, dst, expect=None):
+                self.calls.append((bytes(payload), dst, expect))
+                return hexb("62 F3 03 39 08")
+
+        class Engine:
+            addr = 0x12
+
+            def label(self):
+                return "0x12 (DDE)"
+
+        client = Client()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = vc._run_one(client, Engine(), request, decode_ok=True)
+
+        self.assertEqual(result["outcome"], "decoded")
+        polls = [c for c in client.calls if c[0] == hexb("22 F3 03")]
+        self.assertEqual(len(polls), 1)
+        _payload, _dst, expect = polls[0]
+        self.assertEqual(expect.origin, "declared")
+        self.assertEqual(expect.label, "n47.d72.dyn.4517")
+        setups = [c for c in client.calls if c[0] != hexb("22 F3 03")]
+        self.assertEqual(len(setups), len(request.setup))
+        for _payload, _dst, expect in setups:
+            self.assertIsNone(expect)
+
+
+class IdentProbe(unittest.TestCase):
+    def test_a_refused_ident_read_is_reported_with_its_nrc(self):
+        class Client:
+            def request(self, payload, timeout=None, dst=None, expect=None):
+                if payload[0] == 0x22:
+                    raise vc.live.HsfzNegativeResponse(0x22, 0x31)
+                raise TimeoutError("nothing")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = vc.read_ident(Client(), 0x12)
+
+        self.assertEqual(out["hw_f191"], "(NRC 0x31 requestOutOfRange (to 0x22))")
+        self.assertEqual(out["ecu_name_0900"], "(no answer)")
 
 
 class Redaction(unittest.TestCase):

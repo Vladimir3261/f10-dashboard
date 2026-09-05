@@ -61,7 +61,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -77,6 +77,8 @@ _spec.loader.exec_module(live)
 from bmwdiag.mapping import MappingRegistry, load_file          # noqa: E402
 from bmwdiag.mapping.decoder import decode_response, match_prefix  # noqa: E402
 from bmwdiag.mapping.registry import AllCapabilities            # noqa: E402
+from bmwdiag.protocol import NegativeResponse, nrc_name        # noqa: E402
+from bmwdiag.protocol.correlate import declared_response       # noqa: E402
 from bmwdiag.protocol.request import build_payload             # noqa: E402
 
 
@@ -116,34 +118,75 @@ class GatedTransport:
         self.log = log
 
     def request(self, payload: bytes, *, dst: int,
-                timeout: Optional[float] = None) -> bytes:
+                timeout: Optional[float] = None,
+                expect: Optional[Any] = None) -> bytes:
         assert_read_only(bytes(payload))
 
         started = time.monotonic()
-        nrc = None
+        negative: Dict[str, Any] = {"nrc": None}
         response = b""
 
         try:
-            response = self.inner.request(payload, dst=dst, timeout=timeout)
-        except live.HsfzError as exc:
+            response = self.inner.request(
+                payload, dst=dst, timeout=timeout, expect=expect
+            )
+        except NegativeResponse as exc:
             #
-            # A negative response is data. live.HsfzClient raises on an
-            # NRC; capture it rather than letting it abort the run.
+            # A negative response is data. The transport raises on an
+            # NRC; capture it - as the number the ECU sent, with the
+            # specification's name beside it - rather than letting it
+            # abort the run. Caught by type: the message is prose.
             #
-            if "NRC" in str(exc):
-                nrc = str(exc)
-            else:
-                raise
+            negative = nrc_fields(exc)
 
         self.log.append({
             "dst": f"0x{dst:02X}",
             "tx": bytes(payload).hex(" "),
             "rx": response.hex(" ") if response else None,
-            "nrc": nrc,
+            **negative,
             "ms": round((time.monotonic() - started) * 1000, 1),
         })
 
         return response
+
+
+def nrc_fields(exc: NegativeResponse) -> Dict[str, Any]:
+    """
+    A negative response as artifact fields. `nrc` is the code as an
+    integer (artifacts written before 2026-09-05 have it null or absent
+    - they never recorded one), `nrc_hex`/`nrc_name` are for reading,
+    `service` is the refused service and `raw` the frame when the
+    transport kept it. Old artifacts are not rewritten.
+    """
+    out: Dict[str, Any] = {
+        "nrc": exc.nrc,
+        "nrc_hex": f"0x{exc.nrc:02X}",
+        "nrc_name": exc.nrc_name,
+        "service": exc.service,
+    }
+
+    if exc.raw is not None:
+        out["raw"] = bytes(exc.raw).hex(" ")
+
+    return out
+
+
+def nrc_text(record: Dict[str, Any]) -> str:
+    """`NRC 0x31 requestOutOfRange (to 0x22)` from the fields above."""
+    nrc = record.get("nrc")
+
+    if nrc is None:
+        return ""
+
+    if isinstance(nrc, str):                # a pre-2026-09-05 artifact
+        return nrc
+
+    text = f"NRC 0x{int(nrc):02X} {record.get('nrc_name') or nrc_name(int(nrc))}"
+
+    if record.get("service") is not None:
+        text += f" (to 0x{int(record['service']):02X})"
+
+    return text
 
 
 # ----------------------------------------------------------- discovery
@@ -202,8 +245,8 @@ def read_ident(client: live.HsfzClient, addr: int) -> Dict[str, str]:
 
         try:
             resp = client.request(payload, timeout=1.0, dst=addr)
-        except live.HsfzError as exc:
-            out[key] = f"(NRC/{exc})" if "NRC" in str(exc) else "(no answer)"
+        except NegativeResponse as exc:
+            out[key] = f"({nrc_text(nrc_fields(exc))})"
             continue
         except Exception:
             out[key] = "(no answer)"
@@ -354,8 +397,8 @@ class RunArtifacts:
             lines.append(f"- **ECU:** {record.get('ecu_addr', '?')}")
             lines.append(f"- **Outcome:** `{outcome}`")
 
-            if record.get("nrc"):
-                lines.append(f"- **Negative response:** {record['nrc']} "
+            if record.get("nrc") is not None:
+                lines.append(f"- **Negative response:** {nrc_text(record)} "
                              "(recorded as evidence — the ECU rejects this "
                              "identifier on this variant)")
 
@@ -366,7 +409,7 @@ class RunArtifacts:
             for i, frame in enumerate(record.get("frames", [])):
                 lines.append(
                     f"| {i} | tx→{frame['dst']} | `{frame['tx']}` | "
-                    f"{frame.get('nrc') or '-'} | {frame.get('ms', '-')} |"
+                    f"{nrc_text(frame) or '-'} | {frame.get('ms', '-')} |"
                 )
                 if frame.get("rx"):
                     lines.append(f"| {i} | rx | `{frame['rx']}` | - | - |")
@@ -497,7 +540,9 @@ def _run_one(client, engine, request, decode_ok: bool) -> Dict:
         for frame in request.setup:
             transport.request(bytes(frame), dst=dst, timeout=2.0)
 
-        response = transport.request(poll, dst=dst, timeout=2.0)
+        response = transport.request(
+            poll, dst=dst, timeout=2.0, expect=_expectation(request, poll)
+        )
     except UnsafePayload as exc:
         result["aborted"] = f"read-only gate: {exc}"
         result["frames"] = log
@@ -507,10 +552,14 @@ def _run_one(client, engine, request, decode_ok: bool) -> Dict:
     result["frames"] = log
     last = log[-1] if log else {}
 
-    if last.get("nrc"):
+    if last.get("nrc") is not None:
         result["outcome"] = "negative_response"
-        result["nrc"] = last["nrc"]
-        print(f"    [=] NEGATIVE: {last['nrc']}")
+
+        for key in ("nrc", "nrc_hex", "nrc_name", "service", "raw"):
+            if key in last:
+                result[key] = last[key]
+
+        print(f"    [=] NEGATIVE: {nrc_text(last)}")
         print("        (recorded - this is evidence the ECU rejects this "
               "on this variant)")
         return result
@@ -656,6 +705,27 @@ def cmd_run(args) -> int:
     return 0
 
 
+def _expectation(request, poll: bytes):
+    """
+    What the poll's answer must look like, for the transport to
+    correlate on: the mapping's declared prefix when it has one, the
+    protocol's echo rule otherwise - the same rule the executor and the
+    profile probe apply. Without it the transport derives the structural
+    echo, which is wrong for a family that does not echo (the KWP local
+    identifier read answers `6C 10 ..` to `2C 10 04 06`): the genuine
+    answer would be discarded as an orphan and the tool would report
+    "no answer" for a channel the car answered. Setup frames keep the
+    structural rule; the 2C clear/define echo exactly.
+    """
+    spec = request.response
+
+    return declared_response(
+        poll, bytes(spec.prefix),
+        max(spec.min_length, spec.total_length or 0),
+        label=request.id,
+    )
+
+
 def _poll_value(transport, request, dst) -> Dict:
     """One setup+poll+decode round, lean - for the sweep loop."""
     #
@@ -666,7 +736,10 @@ def _poll_value(transport, request, dst) -> Dict:
     for frame in request.setup:
         transport.request(bytes(frame), dst=dst, timeout=2.0)
 
-    response = transport.request(build_payload(request), dst=dst, timeout=2.0)
+    poll = build_payload(request)
+    response = transport.request(
+        poll, dst=dst, timeout=2.0, expect=_expectation(request, poll)
+    )
 
     try:
         match_prefix(request, response)

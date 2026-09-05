@@ -22,18 +22,18 @@ Adding a protocol means adding a branch here, not touching the decoder.
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..errors import DiagnosticError, classify_exception
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
-    NegativeResponse,
     build_request,
 )
-from .decoder import read_response
+from .decoder import OK, STALE, Reading, read_response
 from .errors import DecodeError, MappingError
 from .model import RequestDef
 from .registry import ResolvedProfile
 
-__all__ = ["MappingExecutor", "obd_logical_response"]
+__all__ = ["MappingExecutor", "fault_detail", "fault_kind", "obd_logical_response"]
 
 
 def obd_logical_response(request: RequestDef, data: bytes) -> bytes:
@@ -85,7 +85,7 @@ REQUEST_REST_SECONDS = 5.0
 REQUEST_REST_MAX_SECONDS = 60.0
 
 
-class NoResponse(Exception):
+class NoResponse(DiagnosticError):
     """
     A PID the OBD reader asked for and did not get back.
 
@@ -96,8 +96,12 @@ class NoResponse(Exception):
     place and reported in another.
     """
 
+    kind = "no_response"
+    scope = "request"
+    answered = False
 
-def fault_kind(exc: Exception) -> str:
+
+def fault_kind(exc: BaseException) -> str:
     """
     A stable, structured name for what went wrong.
 
@@ -105,61 +109,81 @@ def fault_kind(exc: Exception) -> str:
     exception messages - a message is prose that changes; a kind is data you
     can group by. Used to attribute errors per request in the lake, which is
     what makes "this channel fails 8% of the time" answerable at all.
+
+    The names are the taxonomy's (bmwdiag.errors): `transport_link`,
+    `transport_nack`, `transport_timeout`, `negative_response`, `decode`,
+    `no_response`, `other`. They are already in `telemetry.channel_errors`
+    and are not renamed; finer distinctions travel in `fault_detail()`.
+    A mapping error that is not a decode failure (a loader problem
+    surfacing at poll time) is still reported as `decode`: it is our data,
+    not the car, and that is what the kind has always meant.
     """
-    if isinstance(exc, (DecodeError, MappingError)):
+    if isinstance(exc, DiagnosticError):
+        return exc.kind
+
+    if isinstance(exc, MappingError):
         return "decode"
 
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
-        return "transport_link"
-
-    if isinstance(exc, TimeoutError):
-        return "transport_timeout"
-
-    if isinstance(exc, NoResponse):
-        return "no_response"
-
-    if isinstance(exc, NegativeResponse):
-        #: The ECU answered and refused. Until 2026-09-05 this was "other",
-        #: which hid the one fault kind that says "the ECU is there, it
-        #: just does not do this" behind the same label as a bug.
-        return "negative_response"
-
-    if exc.__class__.__name__.endswith("Nack"):
-        return "transport_nack"
-
-    return "other"
+    return classify_exception(exc)[0]
 
 
-def _is_request_fault(exc: Exception) -> bool:
+def fault_detail(exc: BaseException) -> Dict[str, Any]:
+    """
+    The structured part of a fault: the NRC and service of a negative
+    response, the target of a routing NACK, the elapsed time and pending
+    count of a timeout. Empty for exceptions outside the taxonomy. Always
+    JSON-safe, so it can be stored next to the kind and shipped as-is.
+    """
+    if isinstance(exc, DiagnosticError):
+        return dict(exc.detail())
+
+    return {}
+
+
+def _is_request_fault(exc: BaseException) -> bool:
     """
     Did ONE exchange fail, or has the link died?
 
     Skipping a request is only safe while the link is still good; otherwise
     every later request fails identically and the reconnect never happens.
 
-    Classified structurally rather than by importing the transport's own
-    exceptions: `bmwdiag` deliberately knows nothing about HSFZ, imports
-    nothing outside the standard library and opens no sockets, so it cannot
-    reference `HsfzNack` by type. Anything unrecognised counts as a link
+    Decided by the exception's category, never by its name or text: the
+    transport raises into the taxonomy (`LinkError`, `RoutingNack`,
+    `RequestTimeout`, `NegativeResponse`), and `bmwdiag` - which knows
+    nothing about HSFZ, imports nothing outside the standard library and
+    opens no sockets - reads the category. A bare socket exception is
+    classified by its stdlib type. Anything unrecognised counts as a link
     fault, which is the conservative direction - a needless reconnect costs
     a few seconds, whereas mistaking a dead link for a slow ECU means polling
     a closed socket forever.
     """
-    if isinstance(exc, (ConnectionError, BrokenPipeError)):
-        return False                    # socket gone: let it reconnect
+    return classify_exception(exc)[1] == "request"
 
-    if isinstance(exc, TimeoutError):
-        return True                     # this ECU did not answer in time
 
-    if isinstance(exc, NegativeResponse):
-        # The ECU itself answered `7F`: the link carried the request there
-        # and the reply back. It refused this one service or identifier,
-        # which says nothing about the next request. Skip and record it.
-        return True
+def _answered(exc: BaseException) -> bool:
+    """
+    Did the far side demonstrably reply? A routing NACK is the gateway
+    answering to refuse one target; a negative response is the ECU
+    answering to refuse one request. Both are positive evidence the link
+    is alive, so neither may count towards concluding it is dead - only
+    silence can do that.
+    """
+    return classify_exception(exc)[2]
 
-    # A negative acknowledgement: the gateway is alive and refused to route
-    # to one target (e.g. "gateway will not route to 0x18" for the EGS).
-    return exc.__class__.__name__.endswith("Nack")
+
+def _mark_stale(readings: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Downgrade every `ok` reading to `stale`: the bytes decoded fine, but
+    the transport could not tell whether they answer THIS request or the
+    previous, timed-out one with the same content - they may be one
+    period old. A reading already flagged for another reason keeps its
+    own label; `stale` is not usable, so the display and the derived
+    channels drop it and the lake keeps the number with the label.
+    """
+    return {
+        key: Reading(reading.value, STALE) if reading.quality == OK else reading
+        for key, reading in readings.items()
+    }
 
 
 def _usable(readings: Dict[str, Any]) -> Dict[str, Any]:
@@ -261,7 +285,37 @@ class MappingExecutor:
             "sent": 0, "ok": 0, "failed": 0,
             "kinds": {}, "last_ok": None, "last_error": None,
             "last_error_at": None,
+            #: The structured fields of the last fault (`fault_detail`):
+            #: for a negative response the service and NRC, for a NACK
+            #: the target. What the message says in prose, as data.
+            "last_detail": None,
+            #: Answers that arrived after this request had already been
+            #: given up on, and were discarded by the transport. NOT a
+            #: failure - the timeout was already counted as one - and
+            #: not an `ok`: the value never reached the decoder. A
+            #: channel with many of these has a timeout that is too
+            #: short for the ECU, which is a different fix from one
+            #: that never answers at all.
+            "late": 0,
+            #: Answers accepted but marked `stale` because the transport
+            #: could not tell them from the previous, timed-out request
+            #: of the same content (an ambiguous re-poll). Counted as
+            #: `ok` at the request level - the exchange worked - with
+            #: the readings themselves carrying the flag.
+            "ambiguous": 0,
         })
+
+    def note_late_response(self, request_id: str, message: str = "") -> None:
+        """
+        A transport discarded a late answer attributed to `request_id`.
+
+        The transport cannot see request ids; the application bridges
+        its orphan report to this. Only counted against requests this
+        executor knows - a late answer to an ad-hoc probe is the
+        transport's business, not a channel's.
+        """
+        if request_id in self._stats:
+            self._stats[request_id]["late"] += 1
 
     def _rest_fields(self, request_id: str) -> Dict[str, Any]:
         """
@@ -343,13 +397,16 @@ class MappingExecutor:
     def _record_sent(self, request_id: str) -> None:
         self._stat(request_id)["sent"] += 1
 
+    def _record_ambiguous(self, request_id: str) -> None:
+        self._stat(request_id)["ambiguous"] += 1
+
     def _record_ok(self, request_id: str, when: float) -> None:
         stat = self._stat(request_id)
         stat["ok"] += 1
         stat["last_ok"] = when
 
     def _record_fault(self, request_id: str, kind: str, message: str,
-                      exc: Optional[Exception] = None) -> None:
+                      exc: Optional[BaseException] = None) -> None:
         """
         Count a fault AND report it. Both, always.
 
@@ -365,6 +422,7 @@ class MappingExecutor:
         stat["kinds"][kind] = stat["kinds"].get(kind, 0) + 1
         stat["last_error"] = f"{kind}: {message}"
         stat["last_error_at"] = time.time()
+        stat["last_detail"] = fault_detail(exc) if exc is not None else None
 
         if self.on_error is not None:
             #: A PID the reader simply dropped has no exception of its
@@ -510,6 +568,13 @@ class MappingExecutor:
 
         got = self.obd_reader.read(pids)
         out: List[DecodedResponse] = []
+        #
+        # PIDs whose bytes came back under correlation ambiguity (the
+        # reader's transport re-polled the same batch after a timeout
+        # and could not tell the two answers apart). Optional on the
+        # reader; a reader without it never flags.
+        #
+        ambiguous = set(getattr(self.obd_reader, "ambiguous_pids", ()) or ())
 
         #
         # A PID the reader dropped is not an exception - the session
@@ -541,6 +606,10 @@ class MappingExecutor:
             except Exception as exc:            # defensive: never kill the loop
                 self._note(request.id, exc)
                 continue
+
+            if pid in ambiguous:
+                readings = _mark_stale(readings)
+                self._record_ambiguous(request.id)
 
             completed = time.time()
             self._record_ok(request.id, completed)
@@ -600,10 +669,35 @@ class MappingExecutor:
 
                     self._armed[bound.dst] = request.setup
 
+                #
+                # The transport is told what the answer must look like -
+                # service id, echoed identifier, minimum length - and
+                # returns nothing that does not fit. Without this a late
+                # answer to the PREVIOUS request with the same service
+                # was handed back as this one's; the decoder caught the
+                # cases where the identifier differed and mislabelled
+                # them as decode faults, and could not catch the F303
+                # case at all, where it does not.
+                #
                 response = self.transport.request(
-                    bound.payload, dst=bound.dst, timeout=bound.timeout
+                    bound.payload, dst=bound.dst, timeout=bound.timeout,
+                    expect=bound.expectation(),
                 )
             except Exception as exc:
+                #
+                # A fault anywhere in a dynamic-identifier sequence means
+                # the ECU's definition can no longer be trusted to be
+                # this request's: the define may never have been
+                # processed, or a late answer to it may still be in
+                # flight. Disarm, so the next read of that identifier
+                # re-sends its clear and define - two exchanges the ECU
+                # answers in order, which then sit between the old poll
+                # and the new one. See bmwdiag/protocol/correlate.py for
+                # the three layers this is one of.
+                #
+                if request.setup:
+                    self._armed.pop(bound.dst, None)
+
                 if not _is_request_fault(exc):
                     #
                     # The socket itself is gone (closed, reset, never
@@ -631,7 +725,7 @@ class MappingExecutor:
                 # positive evidence the link is alive, so neither may count
                 # towards concluding it is dead - only silence can do that.
                 #
-                if fault_kind(exc) not in ("transport_nack", "negative_response"):
+                if not _answered(exc):
                     self._transport_faults += 1
 
                 faults = self._request_faults.get(request.id, 0) + 1
@@ -672,6 +766,17 @@ class MappingExecutor:
             except Exception as exc:            # defensive: never kill the loop
                 self._note(request.id, exc)
                 continue
+
+            #
+            # The transport says whether the answer it just returned
+            # could equally be the previous request's (same content,
+            # re-polled after a timeout, nothing arrived in the quiet
+            # window to break the tie). A valid answer, possibly one
+            # period old: recorded, but as `stale`, never as `ok`.
+            #
+            if getattr(self.transport, "last_answer_ambiguous", False):
+                readings = _mark_stale(readings)
+                self._record_ambiguous(request.id)
 
             completed = time.time()
             self._record_ok(request.id, completed)

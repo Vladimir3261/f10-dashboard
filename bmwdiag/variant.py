@@ -35,10 +35,10 @@ nominated a probe for is `unknown`, not `False`. Nothing here opens a
 socket; the application passes in a request callable.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from .mapping.execute import fault_kind
+from .mapping.execute import fault_detail, fault_kind
 from .mapping.model import Capability, MappingFile, RequestDef
 from .mapping.registry import CapabilitySet
 
@@ -88,11 +88,18 @@ class ProbeResult:
     #: Stable, groupable: "answered" | "wrong_prefix" | "short_response"
     #: | "unsafe_payload" (our gate refused to send it: a mapping bug,
     #: not the ECU) | a `fault_kind` ("negative_response",
-    #: "transport_timeout", "transport_nack", "transport_link", "other").
+    #: "transport_timeout", "pending_timeout", "transport_nack",
+    #: "transport_link", "other").
     reason: str
     #: Human detail: the NRC and the frame it refused, the bytes that
     #: came back, the exception text.
     detail: str = ""
+    #: The structured part of a fault (`fault_detail`): the NRC as a
+    #: number with its name and the refused service, the NACKed target,
+    #: the timeout's elapsed time. Empty when the probe did not fault or
+    #: the fault carried none. What "NRC 0x31 to 22 F3 03" is read from
+    #: - never the `detail` prose.
+    fault: Dict[str, Any] = field(default_factory=dict)
 
     def describe(self) -> str:
         text = f"{self.request_id}: {self.reason}"
@@ -103,6 +110,7 @@ class ProbeResult:
         return {
             "request": self.request_id, "answered": self.answered,
             "reason": self.reason, "detail": self.detail,
+            "fault": dict(self.fault),
         }
 
 
@@ -390,14 +398,21 @@ class ProfileProbe:
         request: Callable[..., bytes],
         timeout: Optional[float] = None,
     ):
-        #: `request(payload, dst=..., timeout=...) -> bytes`, or raises.
+        #: `request(payload, dst=..., timeout=..., expect=...) -> bytes`,
+        #: or raises. `expect` is the ResponseExpectation the poll's
+        #: answer must satisfy (None for a setup frame: the protocol's
+        #: echo rule applies), so a transport that correlates by content
+        #: accepts a non-echoing answer the mapping declares.
         self._request = request
         self.timeout = timeout
 
-    def _exchange(self, payload: bytes, dst: int) -> bytes:
-        return bytes(self._request(payload, dst=dst, timeout=self.timeout))
+    def _exchange(self, payload: bytes, dst: int, expect=None) -> bytes:
+        return bytes(self._request(
+            payload, dst=dst, timeout=self.timeout, expect=expect
+        ))
 
     def probe_one(self, req: RequestDef, dst: int) -> ProbeResult:
+        from .protocol.correlate import declared_response
         from .protocol.request import build_payload
 
         try:
@@ -409,12 +424,29 @@ class ProfileProbe:
                     return ProbeResult(
                         req.id, False, _probe_reason(exc),
                         f"setup {frame.hex(' ')}: {exc}",
+                        fault=fault_detail(exc),
                     )
 
             payload = build_payload(req)
-            response = self._exchange(payload, dst)
+            #
+            # The declared shape goes to the transport too: a mapping
+            # whose protocol does not echo the identifier (prefix
+            # `6C 10`) would otherwise have its genuine answer rejected
+            # by the structural echo rule and the probe would report a
+            # timeout instead of an answer.
+            #
+            response = self._exchange(
+                payload, dst,
+                expect=declared_response(
+                    payload, bytes(req.response.prefix),
+                    req.response.min_length, label=req.id,
+                ),
+            )
         except Exception as exc:
-            return ProbeResult(req.id, False, _probe_reason(exc), str(exc))
+            return ProbeResult(
+                req.id, False, _probe_reason(exc), str(exc),
+                fault=fault_detail(exc),
+            )
 
         prefix = bytes(req.response.prefix)
 

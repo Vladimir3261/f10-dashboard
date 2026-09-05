@@ -21,6 +21,7 @@ import unittest
 from tests import support  # noqa: F401
 
 import live
+from bmwdiag.protocol import RoutingNack
 from bmwdiag.mapping import (
     MappingExecutor, fault_kind, load_file, load_text,
 )
@@ -217,12 +218,14 @@ class PerRequestHealth(unittest.TestCase):
         self.assertIn("no_response", stats["obd.mode01.0B"]["kinds"])
 
     def test_faults_are_counted_by_kind_and_keep_the_last_message(self):
-        class Nack(Exception):
+        #: A routing NACK is a NACK by inheritance (bmwdiag.errors), not
+        #: by name: the executor no longer reads class names.
+        class Nack(RoutingNack):
             pass
 
         class Refusing:
-            def request(self, payload, *, dst, timeout=None):
-                raise Nack("gateway will not route to 0x18")
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise Nack(0x18)
 
         mapping = load_text(
             "schema_version: 1\n"
@@ -698,12 +701,14 @@ class RestingIsVisible(unittest.TestCase):
         from bmwdiag.mapping import load_text, MappingRegistry
         from bmwdiag.mapping.registry import AllCapabilities
 
-        class Nack(Exception):
+        #: A routing NACK is a NACK by inheritance (bmwdiag.errors), not
+        #: by name: the executor no longer reads class names.
+        class Nack(RoutingNack):
             pass
 
         class Refusing:
-            def request(self, payload, *, dst, timeout=None):
-                raise Nack("gateway will not route to 0x18")
+            def request(self, payload, *, dst, timeout=None, expect=None):
+                raise Nack(0x18)
 
         mapping = load_text(
             "schema_version: 1\n"
