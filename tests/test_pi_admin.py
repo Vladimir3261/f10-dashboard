@@ -1013,6 +1013,24 @@ class DiagnosticsProxy(AdminCase):
         self.assertNotIn('last_error.match(/NRC', page)
         self.assertNotIn('last_error.indexOf("NRC")', page)
 
+    def test_the_pipeline_detail_says_nothing_rather_than_zeros(self):
+        """
+        Issue #16 review: against a live.py without `stages` the detail
+        row rendered zeros - "scheduled 0 -> submitted 0" - for a
+        request that was being polled fine. Source pins, as above: the
+        renderer bails out on a missing `stages`, shows `decode_failed`
+        inside the positive count it is a subset of (not beside it as a
+        disjoint outcome), and the wire row carries the setup faults.
+        """
+        page = self.get("/").read().decode()
+
+        self.assertIn("if (!q.stages) return", page)
+        self.assertIn("reports no stage counters", page)
+        self.assertIn("decode failed)", page)
+        self.assertNotIn('["decode failed", st.decode_failed]', page)
+        self.assertIn("t.wire.setup_faults", page)
+        self.assertNotIn("rebuilt every poll", page)
+
 
 class DeploymentFiles(unittest.TestCase):
     ADMIN = os.path.join(support.ROOT, "hardware", "raspberry-pi", "admin")

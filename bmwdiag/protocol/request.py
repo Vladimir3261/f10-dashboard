@@ -92,6 +92,14 @@ class ObdExchange:
     keeps its kind (`transport_timeout`, `negative_response`, ...)
     instead of collapsing into "no response". `started`/`finished` are
     monotonic; the latency is the difference.
+
+    `answered` is liveness, not a frame count: a pending timeout is
+    answered (the ECU said wait, so the link is alive) although no
+    answer ever arrived. When `error` is set the executor derives what
+    the exchange received from the error itself - a pending timeout is
+    its `pending` frames and no latency sample, an NRC is one timed
+    frame, a NACK one untimed gateway frame, a plain timeout nothing -
+    and reads `answered` only when there is no error.
     """
 
     pids: Tuple[int, ...]
