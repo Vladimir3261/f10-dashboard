@@ -21,7 +21,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-dde7-kwp
-  version: 1
+  version: 2
   production: false
   description: >
     CANDIDATE - E-series DDE7 KWP-style local-identifier read, from the
@@ -51,9 +51,11 @@ ecu:
   target: discovered_engine
   match:
     capability:
-      # Unknown capability kind - resolves to nothing until a
-      # variant-aware provider confirms a KWP-family DDE7.
-      sgbd_variant: dde7-kwp-family
+      # Compatibility with the KWP local-identifier read style, proven
+      # only by the nominated read answering with the `6C 10` prefix.
+      # Nothing about which DDE7 SGBD revision the ECU is.
+      diagnostic_profile: dde7-kwp-local-id
+    probe: [n47.dde7.local.0406]
 
 defaults:
   request:

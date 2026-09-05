@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-dynamic
-  version: 4
+  version: 5
   production: false
   description: >
     F-series N47 dynamic (0xF303) measurements from the d72n47a0
@@ -69,14 +69,22 @@ verification:
 ecu:
   family: engine
   target: discovered_engine
+  # The SGBD table these rows were derived from. Provenance, not a claim
+  # about the ECU: the runtime reports it beside `exact_sgbd: unknown`.
+  sgbd: d72n47a0
   match:
     capability:
-      # A deliberately unknown capability kind: the OBD capability
-      # provider refuses kinds it does not understand, so even with
-      # production: true this file would resolve to zero requests until
-      # a variant-aware capability provider exists and confirms the
-      # DDE variant on the car. Address is never evidence.
-      sgbd_variant: d72n47a0
+      # Behavioural compatibility, proven at connect by replaying one of
+      # the nominated reads below and checking the reply's shape. This is
+      # all activating the file needs. It is NOT proof the ECU is exactly
+      # d72n47a0 - the F303 sequence is d72-family behaviour, and the
+      # ident DIDs that would pin the revision return NRC 0x31 on this
+      # car - so no `exact_sgbd:` is required here. Address is never
+      # evidence.
+      diagnostic_profile: fseries-f303-d72-compatible
+    # The pcap-verified exchange first; engine temperature as the
+    # alternate, so one refused source id does not condemn the profile.
+    probe: [n47.d72.dyn.4517, n47.d72.dyn.4BC3]
 
 defaults:
   request:

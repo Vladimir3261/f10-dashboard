@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ..protocol.request import (
     DecodedResponse,
     DiagnosticRequest,
+    NegativeResponse,
     build_request,
 )
 from .decoder import read_response
@@ -116,6 +117,12 @@ def fault_kind(exc: Exception) -> str:
 
     if isinstance(exc, NoResponse):
         return "no_response"
+
+    if isinstance(exc, NegativeResponse):
+        #: The ECU answered and refused. Until 2026-09-05 this was "other",
+        #: which hid the one fault kind that says "the ECU is there, it
+        #: just does not do this" behind the same label as a bug.
+        return "negative_response"
 
     if exc.__class__.__name__.endswith("Nack"):
         return "transport_nack"

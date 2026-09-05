@@ -18,7 +18,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-gearbox
-  version: 2
+  version: 3
   production: false
   description: >
     DDE-received gearbox values (oil temp, turbine speed, converter
@@ -54,9 +54,13 @@ verification:
 ecu:
   family: engine
   target: discovered_engine
+  sgbd: d72n47a0                # the table the rows came from - provenance
   match:
     capability:
-      sgbd_variant: d72n47a0
+      # Compatibility, proven by a nominated read answering in shape; not
+      # a claim about the exact SGBD revision (see d72n47a0_dynamic.yaml).
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.46F0, n47.d72.dyn.46ED]
 
 defaults:
   request:

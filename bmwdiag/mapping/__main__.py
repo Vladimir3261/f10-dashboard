@@ -158,6 +158,7 @@ def cmd_show(args) -> int:
             "hardware": mapping.ecu.hardware,
             "software": mapping.ecu.software,
             "match": [c.as_dict() for c in mapping.ecu.match],
+            "probe": list(mapping.ecu.probe),
         },
         "requests": [],
         "derived": [],

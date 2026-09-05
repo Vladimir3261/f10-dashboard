@@ -15,37 +15,37 @@
     },
     {
       "id": "candidate-f10-static-58xx",
-      "version": 2,
+      "version": 3,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/f10_static_58xx.yaml"
     },
     {
       "id": "candidate-n47-d72-dpf-egr",
-      "version": 2,
+      "version": 3,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml"
     },
     {
       "id": "candidate-n47-d72-dynamic",
-      "version": 4,
+      "version": 5,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_dynamic.yaml"
     },
     {
       "id": "candidate-n47-d72-flow",
-      "version": 3,
+      "version": 4,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"
     },
     {
       "id": "candidate-n47-d72-gearbox",
-      "version": 2,
+      "version": 3,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/d72n47a0_gearbox.yaml"
     },
     {
       "id": "candidate-n47-dde7-kwp",
-      "version": 1,
+      "version": 2,
       "production": false,
       "path": "mappings/candidates/bmw/dde/n47/dde7_kwp_local_id.yaml"
     },

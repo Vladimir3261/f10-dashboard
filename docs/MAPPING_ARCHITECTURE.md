@@ -131,26 +131,65 @@ A reconnect builds a fresh executor, which re-arms from scratch. This is
 what lets many proprietary measurements multiplex safely over a single
 dynamic identifier.
 
-### Variant capability
+### Compatibility and identity (two claims, kept apart)
 
-A mapping that reads a proprietary measurement declares which SGBD
-variant it applies to, and the ECU must *earn* that match by answering:
+A mapping that reads a proprietary measurement declares the *family of
+reads* it needs the ECU to speak, and nominates the requests that prove
+it:
 
 ```yaml
 ecu:
+  sgbd: d72n47a0                # the table the rows came from - provenance
   match:
     capability:
-      sgbd_variant: d72n47a0
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.4517, n47.d72.dyn.4BC3]
 ```
 
-`bmwdiag/variant.py` answers "is this ECU that variant" the same way the
-OBD layer answers "does it support this PID" - by probe, never by
-address or an ident string. `VariantProbe` replays a variant's own
-dynamic read on connect and confirms the variant only if the ECU answers
-in the expected shape; `CombinedCapabilitySet` then lets one ECU satisfy
-both `obd_mode01_pid` and `sgbd_variant` questions from two independent
-providers. On a base (OBD-only) load there are no variant-gated mappings
-and the probe never runs.
+`bmwdiag/variant.py` answers that question the way the OBD layer
+answers "does it support this PID" - by probe, never by address or an
+ident string. On connect `ProfileProbe` sends the nominated reads in
+order (setup frames, then the poll) and the first reply carrying the
+declared prefix and length makes the profile **`compatible`**; further
+nominations are not sent. If every nomination fails the profile is
+**`unsupported`**, and each failure is recorded with its reason
+(`negative_response` with the NRC and the frame it refused,
+`transport_timeout`, `transport_nack`, `wrong_prefix`,
+`short_response`). A profile no loaded file nominates a probe for is
+**`unknown`** - never a silent `False`. `probe:` is explicit because
+"the first request in the file" made a reorder change what was sent to
+the car.
+
+That is all activating a mapping needs, and it is all a probe can prove.
+**Which SGBD revision the ECU is** is a different claim: two SGBDs of one
+family accept the same `2C 01 F3 03` define and can still disagree on
+what source `0x4517` means. It is the `exact_sgbd` capability, and it is
+satisfied only by identity *evidence* (`IdentityFact`s - an ident DID
+that answers, a reference tool's ident page), resolving to
+**`confirmed`** when the evidence agrees on one name, **`ambiguous`**
+when it disagrees with itself, **`unsupported`** for a name the evidence
+rules out, and **`unknown`** with none. On F10-520d-dev it is `unknown`:
+F191/F194/F197/F18A all return NRC 0x31, and the runtime reads no ident.
+The four verified d72 files therefore require only the profile. A file
+that genuinely needs the revision pinned adds `exact_sgbd: d72n47a0`
+and stays dormant until evidence arrives; the `sgbd:` line beside it is
+provenance, shown next to `exact_sgbd: unknown` in the diagnostics view,
+and never satisfies anything.
+
+Before 2026-09-05 (issue #10) one capability, `sgbd_variant`, carried
+both claims and one answered read "confirmed" it - the runtime claimed
+an identity it had never seen. The spelling is retired: the loader
+refuses it by name and says which of the two to write.
+
+`EcuIdentity` holds both answers and is one provider behind
+`CombinedCapabilitySet`, so one ECU satisfies `obd_mode01_pid`,
+`diagnostic_profile` and `exact_sgbd` questions from independent
+providers. Every provider can `explain()` a requirement it does not
+meet; resolution puts that sentence into the dropped record, so
+`/api/diagnostics` says *"unsupported: n47.d72.dyn.4517:
+negative_response (setup 2c 01 f3 03 45 17 01 02: NRC 0x31)"* rather
+than "does not satisfy". On a base (OBD-only) load there are no
+profile-gated mappings and the probe never runs.
 
 Response matching is unchanged: the expected prefix is per-request
 data, which is also how a protocol whose replies do not echo the

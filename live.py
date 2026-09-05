@@ -60,7 +60,9 @@ from bmwdiag.mapping.model import PollingClassDef
 from bmwdiag.mapping.modes import DEFAULT_MODE_CONFIG, ModeTable, load_modes
 from bmwdiag.mapping.polling import resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
-from bmwdiag.protocol import ObservationalTransport, assert_observational
+from bmwdiag.protocol import (
+    NegativeResponse, ObservationalTransport, assert_observational,
+)
 from bmwdiag.obd import (
     OBD_SUPPORT_PIDS,
     ObdCapabilitySet,
@@ -68,10 +70,11 @@ from bmwdiag.obd import (
 )
 from bmwdiag.obd.capability import ENGINE_PID
 from bmwdiag.variant import (
+    COMPATIBLE,
     CombinedCapabilitySet,
-    VariantCapabilitySet,
-    VariantProbe,
-    variant_probes,
+    EcuIdentity,
+    ProfileProbe,
+    profile_nominations,
 )
 
 
@@ -347,6 +350,17 @@ class HsfzNack(HsfzError):
     """Gateway refused to route to that address - nobody home."""
 
 
+class HsfzNegativeResponse(HsfzError, NegativeResponse):
+    """
+    The ECU answered `7F <service> <NRC>`. Both an HsfzError (every
+    existing handler keeps working) and a NegativeResponse (the code is
+    data, not prose in a message).
+    """
+
+    def __init__(self, service: int, nrc: int):
+        NegativeResponse.__init__(self, service, nrc)
+
+
 class HsfzClient:
     """Minimal HSFZ client: 4-byte length, 2-byte control, payload."""
 
@@ -566,9 +580,7 @@ class HsfzClient:
                     deadline = time.monotonic() + 2.0
                     continue
 
-                raise HsfzError(
-                    f"negative response to 0x{body[1]:02X}: NRC 0x{nrc:02X}"
-                )
+                raise HsfzNegativeResponse(body[1], nrc)
 
             return body
 
@@ -1791,7 +1803,16 @@ class Diagnostics:
                 ),
                 "gateway": state.get("gateway"),
                 "other_ecus": state.get("other_ecus") or [],
-                "variants": sorted(state.get("variants") or ()),
+                #: Compatibility and identity, separately: which profiles
+                #: the ECU answered (and how each probe went) beside what
+                #: is actually known about which SGBD it is - which, with
+                #: no identity evidence, is "unknown", and the view says
+                #: exactly that rather than promoting a probe to an ident.
+                "identity": (
+                    state["identity"].as_dict()
+                    if state.get("identity") is not None
+                    else EcuIdentity().as_dict()
+                ),
                 "supported_pids": state.get("supported_pids"),
                 "mapping_set": profile.mapping_set(
                     state.get("extra_versions") or ()
@@ -2190,31 +2211,39 @@ def poll_loop(
             #
 
             #
-            # Confirm any proprietary SGBD variants by PROBE, never by
-            # assumption: replay each variant-gated mapping's own dynamic
-            # read and keep the variants the ECU actually answers. On a
-            # base (OBD-only) load this is a no-op; with --extra-mappings
-            # it is what lets the F-series dynamic channels activate on a
-            # d72-family DDE and stay dormant on anything else.
+            # Establish what the ECU can DO by probe, never by assumption:
+            # replay the reads each profile-gated mapping nominates and
+            # keep the profiles the ECU actually answers, with the reason
+            # for every one it does not. On a base (OBD-only) load this is
+            # a no-op; with --extra-mappings it is what lets the F-series
+            # dynamic channels activate on an ECU that accepts the F303
+            # sequence and stay dormant on anything else.
             #
-            probes = variant_probes(registry.mappings)
-            variants = set()
+            # What the ECU IS is a separate question with a separate
+            # answer. No identity evidence is read here - the ident DIDs
+            # this DDE refuses are documented in
+            # research/reports/n47-oncar-results.md - so `exact_sgbd`
+            # stays `unknown`, and the diagnostics view says so next to
+            # the profiles it did prove.
+            #
+            nominations = profile_nominations(registry.mappings)
+            identity = EcuIdentity()
 
-            if probes:
-                confirmed = VariantProbe(
+            if nominations:
+                identity = EcuIdentity(ProfileProbe(
                     lambda p, dst, timeout=None: client.request(p, timeout, dst),
                     timeout=1.0,
-                ).confirm(probes, engine.addr)
+                ).resolve(nominations, engine.addr))
 
-                variants = confirmed
+                for resolution in identity.profiles.values():
+                    print(
+                        f"[{'+' if resolution.outcome == COMPATIBLE else '-'}] "
+                        f"profile {resolution.profile}: {resolution.describe()}"
+                    )
 
-                if confirmed:
-                    print(f"[+] confirmed SGBD variant(s): "
-                          f"{', '.join(sorted(confirmed))}")
+                print(f"[ ] exact SGBD: {identity.identity.describe()}")
 
-            capabilities = CombinedCapabilitySet(
-                engine.capabilities(), VariantCapabilitySet(variants)
-            )
+            capabilities = CombinedCapabilitySet(engine.capabilities(), identity)
 
             #
             # Resolve the mapping registry against this particular ECU.
@@ -2290,7 +2319,7 @@ def poll_loop(
                 profile=profile, executor=executor, plan=plan,
                 ecu=engine.label(), ecu_addr=engine.addr, gateway=ip,
                 other_ecus=[e.label() for e in ecus if e.addr != engine.addr],
-                variants=variants,
+                identity=identity,
                 supported_pids=len(engine.supported or ()),
                 extra_versions=[modes.table.fingerprint()],
                 mode=modes.current, connected_at=time.time(),

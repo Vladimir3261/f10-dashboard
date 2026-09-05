@@ -1376,6 +1376,8 @@ PAGE = r"""<!doctype html>
   .drop:last-child { border-bottom:0; }
   .drop b { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
   .drop span { display:block; color:var(--muted); font-size:12px; }
+  .drop span.tick { display:inline-block; font-size:11px; padding:2px 7px;
+                    border-radius:99px; margin-left:6px; white-space:nowrap; }
   .dropwhy { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
              color:var(--muted); margin:14px 0 4px; font-weight:600; }
   .dropwhy:first-child { margin-top:0; }
@@ -1479,6 +1481,22 @@ PAGE = r"""<!doctype html>
     <div class="card">
       <h2>Loaded from disk</h2>
       <div id="carloaded"></div>
+    </div>
+
+    <!-- Two claims, never merged: what the ECU answered (a profile,
+         proven by its own nominated read) and what it IS (an SGBD,
+         proven only by identity evidence - which this car's DDE does
+         not give, so it reads "unknown"). -->
+    <div class="card" id="cardidentity">
+      <h2>What the ECU proved</h2>
+      <p class="hint" style="margin-top:0">
+        A profile is <b>compatible</b> when one of the reads a mapping
+        nominates answers in the declared shape. That activates the
+        mapping; it does not say which SGBD revision the ECU is — that
+        is the separate <b>exact SGBD</b> line, and “unknown” there is
+        the honest answer until an ident read succeeds.
+      </p>
+      <div id="caridentity"></div>
     </div>
 
     <div class="card" id="cardactive">
@@ -1597,6 +1615,45 @@ function busy(btn, label) {
 function unbusy(btn) {
   if (btn.dataset.was) btn.textContent = btn.dataset.was;
   btn.disabled = false;
+}
+
+function compatibleProfiles(identity) {
+  return ((identity && identity.profiles) || [])
+    .filter(p => p.outcome === "compatible").map(p => p.profile);
+}
+
+/* One row per profile the loaded mappings require, with every probe
+   that was sent and how it went - a refusal reads "negative_response
+   (NRC 0x31 ...)", not "false". Then the identity line, kept apart. */
+function identityHtml(identity) {
+  const tick = o => o === "compatible" || o === "confirmed" ? "yes"
+    : o === "unknown" || o === "ambiguous" ? "live" : "no";
+  const profiles = (identity && identity.profiles) || [];
+  const exact = (identity && identity.exact_sgbd) || {outcome: "unknown"};
+
+  const rows = profiles.map(p => `
+    <div class="drop"><b>${escape_(p.profile)}</b>
+      <span class="tick ${tick(p.outcome)}">${escape_(p.outcome)}</span>
+      ${(p.probes || []).map(q => `<span>${q.answered ? "✓" : "✗"}
+        ${escape_(q.request)} — ${escape_(q.reason)}${q.detail
+          ? " (" + escape_(q.detail) + ")" : ""}</span>`).join("")}
+      ${p.note ? `<span>${escape_(p.note)}</span>` : ""}
+      ${p.derived_from && p.derived_from.length
+        ? `<span>rows derived from the ${escape_(p.derived_from.join(", "))}
+           table — provenance, not identity</span>` : ""}
+    </div>`);
+
+  if (rows.length === 0)
+    rows.push('<div class="drop"><span>no loaded mapping requires a '
+      + 'profile — nothing was probed</span></div>');
+
+  rows.push(`
+    <div class="drop"><b>exact SGBD</b>
+      <span class="tick ${tick(exact.outcome)}">${escape_(exact.outcome)}</span>
+      <span>${escape_(exact.summary || "")}</span>
+    </div>`);
+
+  return rows.join("");
 }
 
 function escape_(s) {
@@ -1793,10 +1850,12 @@ function renderCar(d) {
     $("carchannels").innerHTML = "";
     //: "Active on this ECU" has no meaning without one.
     $("cardactive").style.display = "none";
+    $("cardidentity").style.display = "none";
     return;
   }
 
   $("cardactive").style.display = "";
+  $("cardidentity").style.display = "";
 
   const s = d.session || {}, t = d.totals || {};
 
@@ -1811,7 +1870,9 @@ function renderCar(d) {
     + `</div>`
     + `<div class="recmeta" style="margin-top:12px">`
     + [`ECU <b>${escape_(s.ecu || "?")}</b> at <b>${escape_(s.ecu_addr || "?")}</b>`,
-       `variants <b>${escape_((s.variants || []).join(", ") || "none")}</b>`,
+       `compatible <b>${escape_(compatibleProfiles(s.identity).join(", ") || "none")}</b>`,
+       `exact SGBD <b>${escape_((s.identity && s.identity.exact_sgbd
+          && s.identity.exact_sgbd.outcome) || "unknown")}</b>`,
        `${s.supported_pids || 0} PIDs advertised`,
        `mode <b>${escape_(s.mode || "?")}</b>`,
        s.other_ecus && s.other_ecus.length
@@ -1822,6 +1883,8 @@ function renderCar(d) {
        session, which is what a recorded drive is compared on. */
     + `<div class="hint" style="word-break:break-all">`
     + `mapping set: ${escape_(s.mapping_set || "")}</div>`;
+
+  $("caridentity").innerHTML = identityHtml(s.identity);
 
   $("carmappings").innerHTML = (d.mappings || []).map(m => `
     <div class="sess">
