@@ -221,7 +221,7 @@ class PerRequestHealth(unittest.TestCase):
             pass
 
         class Refusing:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise Nack("gateway will not route to 0x18")
 
         mapping = load_text(
@@ -702,7 +702,7 @@ class RestingIsVisible(unittest.TestCase):
             pass
 
         class Refusing:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise Nack("gateway will not route to 0x18")
 
         mapping = load_text(

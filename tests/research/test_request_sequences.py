@@ -33,7 +33,7 @@ class RecordingTransport:
         self.table = table
         self.sent = []
 
-    def request(self, payload, *, dst, timeout=None):
+    def request(self, payload, *, dst, timeout=None, expect=None):
         self.sent.append((dst, bytes(payload)))
         return self.table.get(bytes(payload), b"\x6c\x03\xf3\x03")
 

@@ -164,7 +164,7 @@ class TheWiring(unittest.TestCase):
     def test_a_transport_fault_reaches_the_database(self):
         """This is the hop that was missing, and it is the whole point."""
         class Refusing:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise HsfzNack("gateway will not route to 0x18")
 
         profile = self._profile()
@@ -194,7 +194,7 @@ class TheWiring(unittest.TestCase):
         whole reason for a `kind` column is to GROUP BY it later.
         """
         class Silent:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 raise TimeoutError("no answer in 0.4s")
 
         profile = self._profile()
@@ -224,7 +224,7 @@ class TheWiring(unittest.TestCase):
         class Refusing:
             calls = 0
 
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 self.calls += 1
                 raise live.HsfzNegativeResponse(0x22, 0x31)
 
@@ -258,7 +258,7 @@ class TheWiring(unittest.TestCase):
         100%-healthy drive left this untested.
         """
         class Answering:
-            def request(self, payload, *, dst, timeout=None):
+            def request(self, payload, *, dst, timeout=None, expect=None):
                 return b"\x62\xda\x2e\x00\x03"
 
         profile = self._profile()
