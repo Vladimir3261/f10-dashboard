@@ -73,7 +73,7 @@ FIELDS_MAPPING = ("id", "version", "description", "production")
 FIELDS_ECU = (
     "family", "target", "sgbd", "variant", "hardware", "software", "match",
 )
-FIELDS_MATCH = ("capability",)
+FIELDS_MATCH = ("capability", "probe")
 FIELDS_TARGET = ("address", "name")
 FIELDS_SOURCE = ("type", "file", "sgbd", "job", "result", "notes")
 FIELDS_VERIFICATION = ("status", "method", "vehicle", "notes")
@@ -117,7 +117,18 @@ RETIRED_FIELDS = {
     "response": {"length": "data_length"},
     "display": {"lo": "min", "hi": "max"},
     "polling_class": {"hz": "seconds", "every": "seconds", "cycles": "seconds"},
+    #: `sgbd_variant` conflated two claims - "the ECU answers this family
+    #: of reads" and "the ECU is exactly this SGBD" - and one probe can
+    #: only ever prove the first. Retired 2026-09-05 (issue #10).
+    "capability": {"sgbd_variant": "diagnostic_profile"},
 }
+
+#: The capability kind a probe can prove (behavioural compatibility) and
+#: the one it never can (exact SGBD identity). Mirrored in
+#: bmwdiag/variant.py, which answers them; declared here because the
+#: loader checks a `probe:` nomination against the first.
+PROFILE_CAPABILITY = "diagnostic_profile"
+SGBD_CAPABILITY = "exact_sgbd"
 
 
 # ------------------------------------------------------------ primitives
@@ -415,11 +426,81 @@ def _display(raw: Any, source: str, path: str) -> Display:
 
 
 def _capabilities(raw: Any, source: str, path: str) -> Tuple[Capability, ...]:
+    """
+    Capability kinds are deliberately open - an unknown kind fails closed
+    at resolution, when no provider claims it - so this is not `_only`.
+    A retired kind is still refused by name, for the same reason a
+    retired field is: it would otherwise resolve to nothing in silence.
+    """
     data = _as_dict(raw, source, path)
     out: List[Capability] = []
 
     for kind, value in data.items():
-        out.append(Capability(kind=str(kind), value=value))
+        kind = str(kind)
+        replacement = RETIRED_FIELDS["capability"].get(kind)
+
+        if replacement is not None:
+            raise InvalidFieldError(
+                f"'{kind}' was retired; write '{replacement}' (behavioural "
+                f"compatibility, proven by a nominated probe) or "
+                f"'{SGBD_CAPABILITY}' (exact identity, proven by identity "
+                f"evidence) instead",
+                source, f"{path}.{kind}",
+            )
+
+        if kind in (PROFILE_CAPABILITY, SGBD_CAPABILITY):
+            value = _as_str(value, source, f"{path}.{kind}")
+
+            if not value.strip():
+                raise InvalidFieldError(
+                    f"{kind} must name something", source, f"{path}.{kind}"
+                )
+
+        out.append(Capability(kind=kind, value=value))
+
+    return tuple(out)
+
+
+def _probe_nominations(
+    raw: Any, match: Tuple[Capability, ...], source: str, path: str
+) -> Tuple[str, ...]:
+    """
+    `ecu.match.probe`: which of this file's requests prove its profile.
+
+    Only meaningful next to a `diagnostic_profile` requirement - a probe
+    with nothing to prove is a mistake worth stopping on. Whether the
+    ids exist is checked once the requests are parsed.
+    """
+    if raw is None:
+        return ()
+
+    if isinstance(raw, str):
+        raw = [raw]
+
+    if not isinstance(raw, list) or not raw:
+        raise InvalidFieldError(
+            "expected a request id or a non-empty list of them", source, path
+        )
+
+    if not any(c.kind == PROFILE_CAPABILITY for c in match):
+        raise InvalidFieldError(
+            f"probe nominates requests but the match requires no "
+            f"{PROFILE_CAPABILITY} for them to prove",
+            source, path,
+        )
+
+    out: List[str] = []
+
+    for index, item in enumerate(raw):
+        request_id = _as_str(item, source, f"{path}[{index}]")
+
+        if request_id in out:
+            raise InvalidFieldError(
+                f"request {request_id!r} is nominated twice",
+                source, f"{path}[{index}]",
+            )
+
+        out.append(request_id)
 
     return tuple(out)
 
@@ -1340,6 +1421,9 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
     _only(ecu_raw, FIELDS_ECU, source, "ecu")
     match_raw = _as_dict(ecu_raw.get("match"), source, "ecu.match")
     _only(match_raw, FIELDS_MATCH, source, "ecu.match")
+    match = _capabilities(
+        match_raw.get("capability"), source, "ecu.match.capability",
+    )
     ecu = EcuDef(
         family=_as_str(ecu_raw.get("family", "unknown"), source, "ecu.family"),
         target=_target(ecu_raw.get("target"), source, "ecu.target"),
@@ -1347,8 +1431,9 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
         variant=_as_opt_str(ecu_raw.get("variant"), source, "ecu.variant"),
         hardware=_as_opt_str(ecu_raw.get("hardware"), source, "ecu.hardware"),
         software=_as_opt_str(ecu_raw.get("software"), source, "ecu.software"),
-        match=_capabilities(
-            match_raw.get("capability"), source, "ecu.match.capability",
+        match=match,
+        probe=_probe_nominations(
+            match_raw.get("probe"), match, source, "ecu.match.probe",
         ),
     )
 
@@ -1387,6 +1472,14 @@ def load_text(text: str, source: str = "<string>") -> MappingFile:
             f"requests.{request_id}", provenance, verification, index,
             seen_signals,
         ))
+
+    for index, request_id in enumerate(ecu.probe):
+        if request_id not in seen_requests:
+            raise InvalidFieldError(
+                f"probe nominates {request_id!r}, which this file does not "
+                f"define",
+                source, f"ecu.match.probe[{index}]",
+            )
 
     derived_raw = _as_dict(document.get("derived"), source, "derived")
     derived: List[DerivedDef] = []

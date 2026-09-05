@@ -56,10 +56,21 @@ in the driveway rather than on the motorway. A disconnect clears the
 session picture but keeps this, because the mapping set is a property of
 how the process was started, not of the link.
 
-**This session** — needs the link. The ECU that answered and at what address, the SGBD
-variants confirmed *by probe*, how many PIDs it advertises, and the full
-`id@version` fingerprint of every versioned file that shaped the run,
-mode table included. That string is what two drives are compared on.
+**This session** — needs the link. The ECU that answered and at what
+address, which diagnostic profiles it proved *compatible* by probe, how
+many PIDs it advertises, and the full `id@version` fingerprint of every
+versioned file that shaped the run, mode table included. That string is
+what two drives are compared on.
+
+**What the ECU proved** — compatibility and identity, kept apart. Each
+profile the loaded mappings require, with every nominated probe that was
+sent and how it went (`answered`, `negative_response (NRC 0x31 …)`,
+`transport_timeout`, `wrong_prefix`, `short_response`), and the SGBD
+tables the rows were derived from — provenance, not identity. Then the
+**exact SGBD** line, which is `unknown` on this car: its DDE refuses the
+ident DIDs, and a read the ECU accepts proves it speaks the family, not
+which revision it is. A mapping activates on compatibility; nothing here
+claims more than the evidence shows.
 
 **Mappings loaded** — each file with its version, request count, source
 type and verification status, and an `--extra` badge for the ones loaded

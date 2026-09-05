@@ -25,6 +25,7 @@ __all__ = [
     "ObdPidReader",
     "DiagnosticRequest",
     "DecodedResponse",
+    "NegativeResponse",
     "build_request",
     "build_payload",
 ]
@@ -62,6 +63,24 @@ class ObdPidReader(Protocol):
 
 class UnresolvedTargetError(MappingError):
     """A request names a dynamic target nobody has resolved yet."""
+
+
+class NegativeResponse(Exception):
+    """
+    The ECU answered, and said no: a UDS/KWP `7F <service> <NRC>`.
+
+    A transport raises a subclass of this (rather than a bare error with
+    the code buried in the message) so the code is DATA to whoever
+    catches it - the fault recorder groups on it, and an identity probe
+    reports "NRC 0x31 to 22 F3 03" instead of "failed".
+    """
+
+    def __init__(self, service: int, nrc: int, message: Optional[str] = None):
+        self.service = service
+        self.nrc = nrc
+        super().__init__(
+            message or f"negative response to 0x{service:02X}: NRC 0x{nrc:02X}"
+        )
 
 
 @dataclass(frozen=True)

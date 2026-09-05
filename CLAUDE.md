@@ -29,10 +29,13 @@ cost. See `docs/DPF_SOOT.md`.
 ## Vehicle
 
 BMW F10 520d, engine family **N47**, engine ECU at diagnostic address
-`0x12` (observed, confirmed by capability — never assumed). DDE variant
-is **d72n47a0-family** (F-series UDS), confirmed *behaviourally* on-car
-(the F303 dynamic-read sequence is accepted); the exact SGBD revision is
-not yet pinned from an ident DID (F191/F194/F197/F18A return NRC 0x31).
+`0x12` (observed, confirmed by capability — never assumed). The DDE is
+**compatible with the d72-family F-series UDS reads** (diagnostic
+profile `fseries-f303-d72-compatible`, proven on-car: the F303
+dynamic-read sequence is accepted); the **exact SGBD revision is
+`unknown`** — no ident DID answers (F191/F194/F197/F18A return NRC
+0x31), and the runtime keeps the two claims apart (`diagnostic_profile`
+vs `exact_sgbd`; a probe can only ever prove the first).
 
 **No VIN in this repository.** The car is referenced by the stable label
 **`F10-520d-dev`**; the label→VIN table lives in `local/VEHICLES.md`
@@ -74,8 +77,11 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   `speculation`). Unknown stays `"unknown"`. Tier-D (untraceable) claims
   never produce anything executable. See `docs/MAPPING_RESEARCH.md`.
 - **Capability by probe, never by address.** The engine ECU is whichever
-  answers PID 0x0C; an SGBD variant is confirmed by replaying its own
-  read (`bmwdiag/variant.py`), not by an address or an ident string.
+  answers PID 0x0C; a diagnostic profile is proven by replaying a read
+  the mapping nominates (`bmwdiag/variant.py`), not by an address or an
+  ident string — and a probe proves *compatibility*, never *identity*:
+  `exact_sgbd` is satisfied only by identity evidence, and is `unknown`
+  on this car.
 - **Variants never merge.** d71 / d72 / d73 N47 are different diagnostic
   variants; the same identifier can mean different things or use a
   different request on each. A mapping resolves against the actual ECU.
@@ -116,7 +122,7 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   HTTP/SSE dashboard with historical run viewing.
 - The declarative mapping engine: model, dependency-free YAML parser,
   loader/validator, registry, decoder, derived channels, polling plan,
-  executor, OBD capability, variant capability.
+  executor, OBD capability, profile (compatibility) + identity capability.
 - The N47 research pipeline: pinned source manifest, importers,
   normalized records, gate, conflict detection, generated reports.
 - **~23 proprietary channels verified on the car**, in five files under
@@ -200,7 +206,7 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
 live.py                     transport, discovery, recorder, HTTP/SSE, dashboard
 bmwdiag/                    the mapping engine (stdlib only, opens no sockets)
   mapping/                  model, loader, decoder, derive, polling, execute, registry
-  protocol/ obd/ variant.py transport seam; OBD & SGBD-variant capability
+  protocol/ obd/ variant.py transport seam; OBD capability; profile/identity
 mappings/
   obd/engine.yaml           production: standard SAE Mode 01 (the only default load)
   candidates/bmw/dde/n47/   source-backed candidates; d72 dynamic+flow are verified

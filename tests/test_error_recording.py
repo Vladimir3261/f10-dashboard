@@ -21,7 +21,9 @@ from tests import support  # noqa: F401
 
 import live
 from bmwdiag.mapping import fault_kind
+from bmwdiag.mapping.execute import TRANSPORT_FAULT_BUDGET
 from bmwdiag.mapping.errors import DecodeError
+from bmwdiag.protocol import NegativeResponse
 
 sys.path.insert(0, os.path.join(support.ROOT, "infra"))
 from sync import agent as sync_agent          # noqa: E402
@@ -47,6 +49,10 @@ class Classification(unittest.TestCase):
             (ConnectionResetError("reset"), "transport_link"),
             (BrokenPipeError("pipe"), "transport_link"),
             (DecodeError("bad", "file", "path"), "decode"),
+            #: the ECU answered and refused - since 2026-09-05 its own
+            #: kind, not "other", because "it does not do this" and "a
+            #: bug" are different things to group by
+            (NegativeResponse(0x22, 0x31), "negative_response"),
             (ValueError("something else"), "other"),
         ]
 
@@ -205,6 +211,45 @@ class TheWiring(unittest.TestCase):
         self.rec.close()
 
         self.assertEqual(self._rows()[0][1], "transport_timeout")
+
+    def test_a_negative_response_is_recorded_skipped_and_not_fatal(self):
+        """
+        The ECU answering `7F 22 31` is the one fault that proves the link
+        works: the request got there and the refusal came back. PR #32's
+        first cut labelled it `negative_response` but left the executor
+        treating anything unrecognised as a dead link - so an NRC tore the
+        link down, split the run, and (re-raised before `_note`) recorded
+        nothing. Skip it, record it, and never let it spend link budget.
+        """
+        class Refusing:
+            calls = 0
+
+            def request(self, payload, *, dst, timeout=None):
+                self.calls += 1
+                raise live.HsfzNegativeResponse(0x22, 0x31)
+
+        profile = self._profile()
+        transport = Refusing()
+        executor = live.MappingExecutor(
+            profile,
+            transport=transport,
+            on_error=lambda rid, exc: self.rec.error(
+                rid, live.fault_kind(exc), str(exc)
+            ),
+        )
+
+        for _ in range(TRANSPORT_FAULT_BUDGET + 2):
+            executor.execute(profile.requests)        # must not raise
+
+        time.sleep(0.3)
+        self.rec.close()
+
+        rows = self._rows()
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "probe")
+        self.assertEqual(rows[0][1], "negative_response")
+        self.assertIn("NRC 0x31", rows[0][2])
+        self.assertEqual(executor._transport_faults, 0)
 
     def test_a_healthy_exchange_records_nothing(self):
         """
