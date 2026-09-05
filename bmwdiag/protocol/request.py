@@ -19,6 +19,7 @@ except ImportError:                     # pragma: no cover
 
 from ..mapping.errors import MappingError
 from ..mapping.model import RequestDef
+from .correlate import ResponseExpectation, declared_response
 
 __all__ = [
     "DiagnosticTransport",
@@ -33,7 +34,19 @@ __all__ = [
 
 @runtime_checkable
 class DiagnosticTransport(Protocol):
-    """Send one diagnostic payload to one ECU and return its response."""
+    """
+    Send one diagnostic payload to one ECU and return its response.
+
+    `expect` says what the answer must look like - service id, echoed
+    identifier, minimum length - as plain data the mapping layer built
+    from the request definition. A transport uses it to CORRELATE: a
+    frame that does not fit is not this request's answer and must not
+    be returned as one, however plausible it looks. None means "apply
+    the protocol's own echo rule" (bmwdiag.protocol.correlate), which
+    is what the setup frames of a dynamic read and every ad-hoc probe
+    get. Nothing here is HSFZ-specific: the expectation describes the
+    diagnostic payload, not the framing around it.
+    """
 
     def request(
         self,
@@ -41,6 +54,7 @@ class DiagnosticTransport(Protocol):
         *,
         dst: int,
         timeout: Optional[float] = None,
+        expect: Optional[ResponseExpectation] = None,
     ) -> bytes:
         ...                             # pragma: no cover
 
@@ -98,6 +112,19 @@ class DiagnosticRequest:
         return (
             f"{self.request_id} -> 0x{self.dst:02X} "
             f"[{self.payload.hex(' ')}]"
+        )
+
+    def expectation(self) -> ResponseExpectation:
+        """
+        What the transport must see before this request counts as
+        answered: the mapping's declared prefix when it has one (the
+        mapping knows when a protocol does not echo), the structural
+        echo rule otherwise - labelled with the request id so a late
+        answer can be attributed to the request that asked for it.
+        """
+        return declared_response(
+            self.payload, self.expect_prefix, self.min_length,
+            label=self.request_id,
         )
 
 

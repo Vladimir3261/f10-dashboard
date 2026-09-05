@@ -261,7 +261,27 @@ class MappingExecutor:
             "sent": 0, "ok": 0, "failed": 0,
             "kinds": {}, "last_ok": None, "last_error": None,
             "last_error_at": None,
+            #: Answers that arrived after this request had already been
+            #: given up on, and were discarded by the transport. NOT a
+            #: failure - the timeout was already counted as one - and
+            #: not an `ok`: the value never reached the decoder. A
+            #: channel with many of these has a timeout that is too
+            #: short for the ECU, which is a different fix from one
+            #: that never answers at all.
+            "late": 0,
         })
+
+    def note_late_response(self, request_id: str, message: str = "") -> None:
+        """
+        A transport discarded a late answer attributed to `request_id`.
+
+        The transport cannot see request ids; the application bridges
+        its orphan report to this. Only counted against requests this
+        executor knows - a late answer to an ad-hoc probe is the
+        transport's business, not a channel's.
+        """
+        if request_id in self._stats:
+            self._stats[request_id]["late"] += 1
 
     def _rest_fields(self, request_id: str) -> Dict[str, Any]:
         """
@@ -600,10 +620,35 @@ class MappingExecutor:
 
                     self._armed[bound.dst] = request.setup
 
+                #
+                # The transport is told what the answer must look like -
+                # service id, echoed identifier, minimum length - and
+                # returns nothing that does not fit. Without this a late
+                # answer to the PREVIOUS request with the same service
+                # was handed back as this one's; the decoder caught the
+                # cases where the identifier differed and mislabelled
+                # them as decode faults, and could not catch the F303
+                # case at all, where it does not.
+                #
                 response = self.transport.request(
-                    bound.payload, dst=bound.dst, timeout=bound.timeout
+                    bound.payload, dst=bound.dst, timeout=bound.timeout,
+                    expect=bound.expectation(),
                 )
             except Exception as exc:
+                #
+                # A fault anywhere in a dynamic-identifier sequence means
+                # the ECU's definition can no longer be trusted to be
+                # this request's: the define may never have been
+                # processed, or a late answer to it may still be in
+                # flight. Disarm, so the next read of that identifier
+                # re-sends its clear and define - two exchanges the ECU
+                # answers in order, which then sit between the old poll
+                # and the new one. See bmwdiag/protocol/correlate.py for
+                # the three layers this is one of.
+                #
+                if request.setup:
+                    self._armed.pop(bound.dst, None)
+
                 if not _is_request_fault(exc):
                     #
                     # The socket itself is gone (closed, reset, never

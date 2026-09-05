@@ -1017,9 +1017,25 @@ targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</sp
             <tr><td class="mono">negative_response</td><td>the ECU answered <code>7F</code> with an NRC — it is there, it just does not do this</td><td>record with the code, skip, carry on</td></tr>
             <tr><td class="mono">transport_link</td><td>the socket itself is gone</td><td>reconnect</td></tr>
             <tr><td class="mono">decode</td><td>bytes arrived but the mapping could not read them</td><td>record — this is a mapping bug</td></tr>
+            <tr><td class="mono">late_response</td><td>the answer to a request that had already timed out arrived — recorded under <em>that</em> request</td><td>discard, count on the request's <code>late</code>, carry on</td></tr>
+            <tr><td class="mono">unexpected_response</td><td>a frame matching nothing asked (under the pseudo-id <code>hsfz:0x12</code>)</td><td>discard, count, trace, carry on</td></tr>
           </tbody>
         </table>
       </div>
+
+      <p style="margin-top:20px">
+        The last two exist because a frame is only ever accepted as the answer
+        to a request when it <strong>fits the request</strong>: the right ECU,
+        the positive service id, the echoed identifier (<code>62 F3 03</code>
+        for <code>22 F3 03</code>, <code>6C 03 F3 03</code> for the clear), and
+        the declared minimum length — or a <code>7F</code> naming this
+        service. Anything else is an orphan and is never returned. Where
+        content cannot tell two answers apart (the same dynamic DID read
+        twice), the line is given a short quiet window after a timeout before
+        the next request goes out, a fault in a define-then-read sequence
+        re-arms the definition, and a run of <code>responsePending</code> can
+        never hold one request past an absolute deadline.
+      </p>
 
       <div class="aside" style="margin-top:20px">
         <b>This used to be one bug.</b> A single refusal from a sleeping

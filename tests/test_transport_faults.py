@@ -81,7 +81,7 @@ class ScriptedTransport:
         self.script = list(script)
         self.calls = 0
 
-    def request(self, payload, dst=None, timeout=None):
+    def request(self, payload, dst=None, timeout=None, expect=None):
         item = self.script[self.calls] if self.calls < len(self.script) else None
         self.calls += 1
 
@@ -240,7 +240,7 @@ class PerRequestTransport:
         self.behaviour = behaviour
         self.sent = []
 
-    def request(self, payload, dst=None, timeout=None):
+    def request(self, payload, dst=None, timeout=None, expect=None):
         did = (payload[1] << 8) | payload[2]
         self.sent.append(did)
         item = self.behaviour.get(did)

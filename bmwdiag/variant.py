@@ -390,14 +390,21 @@ class ProfileProbe:
         request: Callable[..., bytes],
         timeout: Optional[float] = None,
     ):
-        #: `request(payload, dst=..., timeout=...) -> bytes`, or raises.
+        #: `request(payload, dst=..., timeout=..., expect=...) -> bytes`,
+        #: or raises. `expect` is the ResponseExpectation the poll's
+        #: answer must satisfy (None for a setup frame: the protocol's
+        #: echo rule applies), so a transport that correlates by content
+        #: accepts a non-echoing answer the mapping declares.
         self._request = request
         self.timeout = timeout
 
-    def _exchange(self, payload: bytes, dst: int) -> bytes:
-        return bytes(self._request(payload, dst=dst, timeout=self.timeout))
+    def _exchange(self, payload: bytes, dst: int, expect=None) -> bytes:
+        return bytes(self._request(
+            payload, dst=dst, timeout=self.timeout, expect=expect
+        ))
 
     def probe_one(self, req: RequestDef, dst: int) -> ProbeResult:
+        from .protocol.correlate import declared_response
         from .protocol.request import build_payload
 
         try:
@@ -412,7 +419,20 @@ class ProfileProbe:
                     )
 
             payload = build_payload(req)
-            response = self._exchange(payload, dst)
+            #
+            # The declared shape goes to the transport too: a mapping
+            # whose protocol does not echo the identifier (prefix
+            # `6C 10`) would otherwise have its genuine answer rejected
+            # by the structural echo rule and the probe would report a
+            # timeout instead of an answer.
+            #
+            response = self._exchange(
+                payload, dst,
+                expect=declared_response(
+                    payload, bytes(req.response.prefix),
+                    req.response.min_length, label=req.id,
+                ),
+            )
         except Exception as exc:
             return ProbeResult(req.id, False, _probe_reason(exc), str(exc))
 

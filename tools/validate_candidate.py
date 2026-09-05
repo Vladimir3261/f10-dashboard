@@ -61,7 +61,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -116,7 +116,8 @@ class GatedTransport:
         self.log = log
 
     def request(self, payload: bytes, *, dst: int,
-                timeout: Optional[float] = None) -> bytes:
+                timeout: Optional[float] = None,
+                expect: Optional[Any] = None) -> bytes:
         assert_read_only(bytes(payload))
 
         started = time.monotonic()
@@ -124,7 +125,9 @@ class GatedTransport:
         response = b""
 
         try:
-            response = self.inner.request(payload, dst=dst, timeout=timeout)
+            response = self.inner.request(
+                payload, dst=dst, timeout=timeout, expect=expect
+            )
         except live.HsfzError as exc:
             #
             # A negative response is data. live.HsfzClient raises on an

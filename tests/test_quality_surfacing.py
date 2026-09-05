@@ -55,7 +55,7 @@ def flagging_profile():
 
 
 class Answering:
-    def request(self, payload, *, dst, timeout=None):
+    def request(self, payload, *, dst, timeout=None, expect=None):
         return bytes([0x62, 0xDA, 0x2E, 10, 255, 255])
 
 

@@ -22,7 +22,7 @@ class FakeTransport:
         self.responses = dict(responses)
         self.sent = []
 
-    def request(self, payload, *, dst, timeout=None):
+    def request(self, payload, *, dst, timeout=None, expect=None):
         self.sent.append((bytes(payload), dst, timeout))
         key = (bytes(payload), dst)
 
