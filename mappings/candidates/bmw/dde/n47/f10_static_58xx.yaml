@@ -36,7 +36,7 @@ schema_version: 1
 
 mapping:
   id: candidate-f10-static-58xx
-  version: 2
+  version: 3
   production: false
   description: >
     CANDIDATE - F10 static Mode-22 absolute oil pressure (0x586F, u16
@@ -68,7 +68,12 @@ ecu:
   target: discovered_engine
   match:
     capability:
-      sgbd_variant: f10-dme-58xx-namespace
+      # Compatibility with the static 58xx DID namespace, proven by the
+      # one nominated read answering two bytes. Says nothing about the
+      # SGBD - and this file's source is an N55 petrol DME, so on the
+      # target diesel DDE even a shape-correct answer is not a scale.
+      diagnostic_profile: f10-dme-58xx-namespace
+    probe: [f10.static.586F]
 
 defaults:
   request:

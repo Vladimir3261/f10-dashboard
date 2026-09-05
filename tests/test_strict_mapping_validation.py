@@ -288,6 +288,9 @@ class TestRetiredSpellings(unittest.TestCase):
             "response": loader.FIELDS_RESPONSE,
             "display": loader.FIELDS_DISPLAY,
             "polling_class": loader.FIELDS_POLLING_CLASS,
+            #: capability kinds are open, so the live set is the kinds a
+            #: provider in this repo actually answers
+            "capability": (loader.PROFILE_CAPABILITY, loader.SGBD_CAPABILITY),
         }
 
         for obj, table in RETIRED_FIELDS.items():

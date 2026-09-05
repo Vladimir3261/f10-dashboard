@@ -26,7 +26,7 @@ schema_version: 1
 
 mapping:
   id: candidate-n47-d72-flow
-  version: 3
+  version: 4
   production: false
   description: >
     F-series N47 air/fuel/pressure dynamic (0xF303) measurements from
@@ -64,9 +64,13 @@ verification:
 ecu:
   family: engine
   target: discovered_engine
+  sgbd: d72n47a0                # the table the rows came from - provenance
   match:
     capability:
-      sgbd_variant: d72n47a0
+      # Compatibility, proven by a nominated read answering in shape; not
+      # a claim about the exact SGBD revision (see d72n47a0_dynamic.yaml).
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.461B, n47.d72.dyn.4841]
 
 defaults:
   request:

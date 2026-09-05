@@ -22,6 +22,7 @@ from tests import support  # noqa: F401
 import live
 from bmwdiag.mapping import fault_kind
 from bmwdiag.mapping.errors import DecodeError
+from bmwdiag.protocol import NegativeResponse
 
 sys.path.insert(0, os.path.join(support.ROOT, "infra"))
 from sync import agent as sync_agent          # noqa: E402
@@ -47,6 +48,10 @@ class Classification(unittest.TestCase):
             (ConnectionResetError("reset"), "transport_link"),
             (BrokenPipeError("pipe"), "transport_link"),
             (DecodeError("bad", "file", "path"), "decode"),
+            #: the ECU answered and refused - since 2026-09-05 its own
+            #: kind, not "other", because "it does not do this" and "a
+            #: bug" are different things to group by
+            (NegativeResponse(0x22, 0x31), "negative_response"),
             (ValueError("something else"), "other"),
         ]
 

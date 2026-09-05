@@ -56,7 +56,7 @@ class WhyIsThisChannelMissing(unittest.TestCase):
         #: would grep for it. "=5" is not greppable.
         self.assertIn("0x05", dropped["obd.mode01.05"].detail)
 
-    def test_a_mapping_for_another_variant_names_the_variant(self):
+    def test_a_mapping_for_another_profile_names_the_profile(self):
         registry = MappingRegistry([
             load_file(support.OBD_MAPPING),
             load_file("mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"),
@@ -72,8 +72,41 @@ class WhyIsThisChannelMissing(unittest.TestCase):
 
         self.assertIn("candidate-n47-d72-flow", dropped)
         self.assertIn(
-            "d72n47a0", dropped["candidate-n47-d72-flow"].detail
+            "diagnostic_profile='fseries-f303-d72-compatible'",
+            dropped["candidate-n47-d72-flow"].detail,
         )
+
+    def test_a_probed_refusal_says_why_not_just_no(self):
+        """
+        With a provider that PROBED, the dropped record carries the
+        outcome and the reason the probe gave - "unsupported: ... NRC
+        0x31" - instead of the bare "does not satisfy".
+        """
+        from bmwdiag.variant import (
+            EcuIdentity, ProbeResult, ProfileResolution, CombinedCapabilitySet,
+        )
+
+        registry = MappingRegistry([
+            load_file(support.OBD_MAPPING),
+            load_file("mappings/candidates/bmw/dde/n47/d72n47a0_flow.yaml"),
+        ])
+        identity = EcuIdentity([ProfileResolution(
+            "fseries-f303-d72-compatible", "unsupported",
+            (ProbeResult("n47.d72.dyn.461B", False, "negative_response",
+                         "setup 2c 01 f3 03 46 1b 01 02: NRC 0x31"),),
+        )])
+        profile = registry.resolve(
+            CombinedCapabilitySet(ObdCapabilitySet({0x0C}), identity),
+            config={"tank": 70.0}, targets={"discovered_engine": 0x12},
+        )
+
+        detail = {
+            d.id: d for d in profile.report.by_reason("ecu_mismatch")
+        }["candidate-n47-d72-flow"].detail
+
+        self.assertIn("unsupported", detail)
+        self.assertIn("negative_response", detail)
+        self.assertIn("NRC 0x31", detail)
 
     def test_a_derived_channel_names_the_input_it_lost(self):
         registry = engine_registry()

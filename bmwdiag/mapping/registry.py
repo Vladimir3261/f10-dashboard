@@ -56,6 +56,19 @@ class CapabilitySet:
         """
         return tuple(c for c in capabilities if not self.satisfies(c))
 
+    def explain(self, capability: Capability) -> Optional[str]:
+        """
+        Why this requirement is not met, in one sentence - or None when
+        the provider has nothing more to say than "no".
+
+        A provider that PROBED for the answer knows more than a boolean:
+        the profile is unsupported because the ECU said NRC 0x31, or it
+        is unknown because nothing nominated a probe. Resolution puts
+        that sentence into the dropped record instead of a bare "does
+        not satisfy".
+        """
+        return None
+
 
 class AllCapabilities(CapabilitySet):
     """Accepts everything. Used by demo mode and by the mapping CLI."""
@@ -82,6 +95,14 @@ def _capability_text(capability: "Capability") -> str:
         return f"{capability.kind}=0x{value:02X}"
 
     return f"{capability.kind}={value!r}"
+
+
+def _unmet_text(caps: CapabilitySet, capability: "Capability") -> str:
+    """The requirement, plus the provider's reason when it has one."""
+    text = _capability_text(capability)
+    why = caps.explain(capability)
+
+    return f"{text} ({why})" if why else text
 
 
 @dataclass(frozen=True)
@@ -545,7 +566,7 @@ class MappingRegistry:
                 dropped.append(Dropped(
                     "mapping", mapping.id, "ecu_mismatch",
                     "this ECU does not satisfy "
-                    + ", ".join(_capability_text(c) for c in missing),
+                    + ", ".join(_unmet_text(caps, c) for c in missing),
                     mapping.id,
                 ))
                 continue

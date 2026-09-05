@@ -10,6 +10,7 @@ from .request import (
     DecodedResponse,
     DiagnosticRequest,
     DiagnosticTransport,
+    NegativeResponse,
     ObdPidReader,
     build_request,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "DecodedResponse",
     "DiagnosticRequest",
     "DiagnosticTransport",
+    "NegativeResponse",
     "ObdPidReader",
     "ObservationalTransport",
     "UnsafePayload",
