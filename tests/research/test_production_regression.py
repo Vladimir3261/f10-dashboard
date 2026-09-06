@@ -87,11 +87,17 @@ class ProductionUnchanged(unittest.TestCase):
         self.assertNotIn("candidate-f10-static-58xx", ids)
 
     def test_candidate_signal_keys_do_not_collide_with_production(self):
-        """The full tree - production plus candidates - loads cleanly."""
+        """
+        The full tree - production plus candidates - loads cleanly, and
+        the registry refuses a duplicate signal key at load, so the count
+        passing IS the no-collision proof. 10 -> 17 with the issue #15
+        candidate set (five d72 DDE files, an EGS speeds file, an SAE
+        extras file), 2026-09-06.
+        """
         registry = MappingRegistry.from_tree(
             support.MAPPINGS, production_only=False
         )
-        self.assertEqual(len(registry.mappings), 10)
+        self.assertEqual(len(registry.mappings), 17)
 
     def test_a_production_decode_spot_check(self):
         mapping = load_file(support.OBD_MAPPING)
