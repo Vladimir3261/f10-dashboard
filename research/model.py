@@ -30,6 +30,8 @@ __all__ = [
     "ResearchRecord",
     "record_to_json",
     "records_to_jsonl",
+    "record_from_json",
+    "records_from_jsonl",
     "validate_record",
 ]
 
@@ -206,3 +208,14 @@ def records_to_jsonl(records: List[ResearchRecord]) -> str:
     """
     lines = sorted(record_to_json(r) for r in records)
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def record_from_json(line: str) -> ResearchRecord:
+    """The inverse of `record_to_json`; round-trips exactly."""
+    raw = json.loads(line)
+    raw["fact_labels"] = tuple(raw.get("fact_labels", ()))
+    return ResearchRecord(**raw)
+
+
+def records_from_jsonl(text: str) -> List[ResearchRecord]:
+    return [record_from_json(line) for line in text.splitlines() if line.strip()]

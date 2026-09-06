@@ -28,13 +28,19 @@ mappings/verified/bmw/dde/n47/     empty until something is locally verified
 
 ```
 python3 -m research.build          # re-import everything, rewrite normalized + generated reports
+python3 -m research.build --evidence-only   # committed evidence only: no cache, no network (CI)
+python3 -m research.build --reports-only    # rewrite the two generated reports from what is there
 python3 -m unittest discover tests.research   # pipeline tests, no car, no network
 python3 -m bmwdiag.mapping validate mappings/ # candidates validate like any mapping
 ```
 
-`build` needs the source cache — see [sources/README.md](sources/README.md).
-Without it the committed normalized output stays as-is; the tests run on
-committed fixtures either way.
+A full `build` needs the source cache — see
+[sources/README.md](sources/README.md). **The normalized output is not
+tracked**: `normalized/n47/*.jsonl` is gitignored and regenerated on
+demand, because most of it is a bulk derivative of a licence-unknown
+SGBD export (see [normalized/README.md](normalized/README.md) and the
+legal notes). The tests run on committed fixtures either way and skip,
+visibly, the few that need the generated files.
 
 ## Layout
 
@@ -44,7 +50,7 @@ committed fixtures either way.
 | `importers/` | one deterministic importer per source format |
 | `model.py` / `gate.py` / `conflicts.py` | record model, candidate gate, conflict detection |
 | `evidence/n47/` | committed transcriptions of source-backed exchanges, with citations |
-| `normalized/n47/` | generated JSONL (signals / requests / jobs / evidence) |
+| `normalized/n47/` | generated JSONL (signals / requests / jobs / evidence) — gitignored, regenerate on demand |
 | `reports/` | generated (`n47-coverage`, `n47-conflicts`) + hand-written (audit, legal, unresolved) |
 
 ## Rules (short form; docs/MAPPING_RESEARCH.md has the long one)

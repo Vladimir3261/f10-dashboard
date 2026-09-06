@@ -7,12 +7,12 @@ data. The narrative reports (source audit, legal notes, unresolved
 questions) are hand-written and live directly under research/reports/.
 """
 
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from .conflicts import Conflict
 from .model import ResearchRecord
 
-__all__ = ["coverage_report", "conflicts_report"]
+__all__ = ["coverage_report", "conflicts_report", "withheld_sources"]
 
 #: Coverage groups, in report order. A record joins the first group whose
 #: predicate matches its normalized name or source naming.
@@ -28,6 +28,32 @@ GROUPS = (
     ("Injectors", ("injector",)),
     ("Electrical and IBS", ("voltage", "battery")),
 )
+
+
+def withheld_sources(sources: Optional[Dict[str, Dict[str, Any]]]) -> Set[str]:
+    """
+    Source ids whose manifest entry says `license.bulk_redistribution:
+    withheld`.
+
+    A withheld source still contributes every record to the (gitignored)
+    normalized data; the *committed* coverage report lists only the rows
+    somebody attached a normalized name to - a hand-picked fact with a
+    stated meaning - and reports the rest as a count. That keeps the
+    tracked tree free of a mechanical copy of the source table while the
+    licence question in research/reports/legal-and-license-notes.md is
+    open, and it is data in the manifest, not a threshold in code.
+    """
+    out: Set[str] = set()
+
+    for source_id, entry in (sources or {}).items():
+        license_block = entry.get("license") if isinstance(entry, dict) else None
+
+        if isinstance(license_block, dict) and (
+            license_block.get("bulk_redistribution") == "withheld"
+        ):
+            out.add(source_id)
+
+    return out
 
 
 def _group_for(record: ResearchRecord) -> str:
@@ -49,12 +75,27 @@ def _group_for(record: ResearchRecord) -> str:
 def coverage_report(
     records: Sequence[ResearchRecord],
     gate_results: Dict[str, List[str]],
+    sources: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
+    """
+    The coverage table. `sources` is the manifest; rows from a source it
+    marks `license.bulk_redistribution: withheld` are listed only when
+    they carry a normalized name and counted otherwise (see
+    `withheld_sources`). Without a manifest every row is listed.
+    """
+    withheld = withheld_sources(sources)
     signals = [r for r in records if r.record_type == "signal_definition"]
     grouped: Dict[str, List[ResearchRecord]] = {}
+    held: Dict[str, Dict[str, int]] = {}
 
     for record in signals:
-        grouped.setdefault(_group_for(record), []).append(record)
+        group = _group_for(record)
+
+        if record.source_id in withheld and not record.normalized_signal:
+            counts = held.setdefault(group, {})
+            counts[record.source_id] = counts.get(record.source_id, 0) + 1
+        else:
+            grouped.setdefault(group, []).append(record)
 
     lines = [
         "# N47 coverage",
@@ -70,15 +111,43 @@ def coverage_report(
         "",
     ]
 
+    total_held = sum(sum(c.values()) for c in held.values())
+
+    if total_held:
+        names = ", ".join(f"`{s}`" for s in sorted(withheld))
+        lines += [
+            f"**{total_held}** rows from {names} are counted per group but",
+            "not listed: the manifest marks that source",
+            "`license.bulk_redistribution: withheld` (licence unresolved,",
+            "see research/reports/legal-and-license-notes.md), so only the",
+            "rows carrying a normalized name appear here. The full rows are",
+            "in the gitignored normalized output that",
+            "`python3 -m research.build` regenerates from the source cache.",
+            "",
+        ]
+
     order = [title for title, _ in GROUPS] + ["Other / unclassified"]
 
     for title in order:
         rows = grouped.get(title)
+        counts = held.get(title)
+
+        if not rows and not counts:
+            continue
+
+        lines += [f"## {title}", ""]
+
+        if counts:
+            for source_id, n in sorted(counts.items()):
+                lines.append(
+                    f"{n} unlisted `{source_id}` rows without a normalized name."
+                )
+
+            lines.append("")
 
         if not rows:
             continue
 
-        lines += [f"## {title}", ""]
         lines.append(
             "| normalized | source record | variant | id | request | "
             "tier | verification | gate |"
