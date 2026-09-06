@@ -11,11 +11,17 @@ What it refuses (docs/CI.md has the reasoning):
   captures, telemetry databases, the research source cache);
 * a tracked `.env` or `.env.*` other than `*.example`, a tracked
   `infra/sync/config.json` or admin `config.json`, a tracked `*.db`;
-* a 17-character BMW/MINI VIN (`WBA`/`WBS`/`WBY`/`WMW` + 14 characters
-  from the VIN alphabet) anywhere in a tracked text file - the car is
-  referred to by its label `F10-520d-dev`, never by VIN. A test that
-  needs a VIN-shaped string marks the line `# hygiene: fake-vin`; the
-  marker is visible in review, which is the point;
+* a 17-character VIN anywhere in a tracked text file - the car is
+  referred to by its label `F10-520d-dev`, never by VIN. Three nets,
+  any one is a hit: a BMW/MINI WMI (`WBA`/`WBS`/`WBY`/`WBX`/`WMW`/
+  `5UX`) + 14 characters from the VIN alphabet; a prefix-independent
+  shape (11 VIN-alphabet characters with at least one letter, then a
+  6-digit serial, the way European BMW VINs are laid out); or any
+  17-character VIN-alphabet token whose ISO 3779 check digit (position
+  9) validates, which catches North-American-format VINs of any make.
+  A test that needs a VIN-shaped string marks the line
+  `# hygiene: fake-vin`; the marker is visible in review, which is the
+  point;
 * a token value in a tracked file: `...TOKEN=value` or a JSON
   `"token": "value"` whose value is at least 16 characters and not a
   placeholder (`change-me`, `<...>`, `${...}`, `{...}`, `os.environ`,
@@ -25,8 +31,10 @@ What it refuses (docs/CI.md has the reasoning):
 
 A hit prints the path and the line number only - never the matched
 text, because the whole point is that the text must not appear in a
-log either. Exit status 1 on any hit, 0 when clean. Stdlib only; needs
-git on PATH when run without arguments.
+log either. Binary files are not scanned; a text file over 4 MB is not
+scanned either, and says so (`skipped (size ...)`) so the log shows
+what was left out. Exit status 1 on any hit, 0 when clean. Stdlib
+only; needs git on PATH when run without arguments.
 """
 
 import os
@@ -37,8 +45,52 @@ from typing import Iterable, List, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-VIN = re.compile(r"\b(?:WBA|WBS|WBY|WMW)[A-HJ-NPR-Z0-9]{14}\b")
+#: Net 1: BMW / MINI world-manufacturer identifiers.
+VIN = re.compile(r"\b(?:WBA|WBS|WBY|WBX|WMW|5UX)[A-HJ-NPR-Z0-9]{14}\b")
+#: Net 2: prefix-independent shape - 11 VIN-alphabet characters holding
+#: at least one letter (so a 17-digit number is not a VIN), then a
+#: 6-digit serial.
+VIN_SHAPE = re.compile(
+    r"\b(?=[A-HJ-NPR-Z0-9]{0,10}[A-HJ-NPR-Z])[A-HJ-NPR-Z0-9]{11}[0-9]{6}\b"
+)
+#: Net 3: any 17-character VIN-alphabet token, checked against the ISO
+#: 3779 check digit at position 9 (North-American format; European BMW
+#: VINs carry no check digit, which is what nets 1 and 2 are for).
+VIN_ANY = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")
 FAKE_VIN_MARK = "hygiene: fake-vin"
+
+_VIN_VALUES = {c: v for c, v in zip("ABCDEFGHJKLMNPRSTUVWXYZ",
+                                    (1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5,
+                                     7, 9, 2, 3, 4, 5, 6, 7, 8, 9))}
+_VIN_WEIGHTS = (8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2)
+
+
+def vin_check_digit_valid(token: str) -> bool:
+    """ISO 3779 / FMVSS 115 check digit (position 9) for a 17-char token."""
+    if len(token) != 17:
+        return False
+
+    total = 0
+
+    for char, weight in zip(token, _VIN_WEIGHTS):
+        total += (int(char) if char.isdigit() else _VIN_VALUES.get(char, 0)) * weight
+
+    expected = "X" if total % 11 == 10 else str(total % 11)
+    return token[8] == expected
+
+
+def vin_hit(line: str) -> str:
+    """Which VIN net fires on this line ("" when none)."""
+    if VIN.search(line):
+        return "17-character VIN"
+
+    if VIN_SHAPE.search(line):
+        return "17-character VIN (shape)"
+
+    if any(vin_check_digit_valid(m) for m in VIN_ANY.findall(line)):
+        return "17-character VIN (check digit)"
+
+    return ""
 
 #: Token-shaped content. `*.example` / `*.template` files are exempt from
 #: the first two rules - the committed templates carry placeholders.
@@ -100,7 +152,11 @@ def content_problems(path: str, data: bytes) -> List[Tuple[int, str]]:
     """(line number, what) - the matched text is never returned."""
     hits: List[Tuple[int, str]] = []
 
-    if not _is_text(data) or len(data) > TEXT_MAX_BYTES:
+    if not _is_text(data):
+        return hits
+
+    if len(data) > TEXT_MAX_BYTES:
+        print(f"hygiene: {path}: skipped (size {len(data)} B > {TEXT_MAX_BYTES} B)")
         return hits
 
     example = ".example" in path or path.endswith(".template")
@@ -108,8 +164,11 @@ def content_problems(path: str, data: bytes) -> List[Tuple[int, str]]:
     text = data.decode("utf-8", errors="replace")
 
     for number, line in enumerate(text.splitlines(), 1):
-        if VIN.search(line) and FAKE_VIN_MARK not in line:
-            hits.append((number, "17-character VIN"))
+        if FAKE_VIN_MARK not in line:
+            what = vin_hit(line)
+
+            if what:
+                hits.append((number, what))
 
         if is_this_tool:
             continue

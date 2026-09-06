@@ -91,6 +91,49 @@ class Content(unittest.TestCase):
         data = b"\0\1\2" + FAKE_VIN.encode("ascii")
         self.assertEqual(hygiene.content_problems("x.bin", data), [])
 
+    def test_oversized_text_files_are_skipped_visibly(self):
+        data = b"x" * (hygiene.TEXT_MAX_BYTES + 1) + b"\n" + FAKE_VIN.encode("ascii")
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(hygiene.content_problems("big.html", data), [])
+
+        self.assertIn("big.html: skipped (size", out.getvalue())
+        self.assertNotIn(FAKE_VIN, out.getvalue())
+
+    # -- the prefix-independent nets -------------------------------------
+
+    def test_shape_net_catches_a_non_bmw_prefix(self):
+        # 11 VIN-alphabet characters with letters, then a 6-digit serial.
+        vin = "ZFA" + "C" * 8 + "123456"
+        self.assertEqual(self.hits("a.md", vin + "\n"),
+                         [(1, "17-character VIN (shape)")])
+        self.assertEqual(self.hits("a.md", f"x {vin} # {hygiene.FAKE_VIN_MARK}\n"), [])
+
+    def test_shape_net_ignores_plain_numbers_and_hex(self):
+        self.assertEqual(self.hits("a.md", "20260825191658000\n"), [])   # 17 digits
+        self.assertEqual(self.hits("a.md", "867133a886aefd540\n"), [])   # lowercase hex
+        self.assertEqual(self.hits("a.md", "ZFA" + "C" * 8 + "12345Z\n"), [])
+
+    def test_check_digit_net_catches_a_north_american_vin(self):
+        # Any 17-character token whose position-9 check digit validates.
+        # The serial ends in a letter so the shape net stays out of it.
+        body = "1HGCM826" + "_" + "3A00435Z"
+        valid = [body.replace("_", d) for d in "0123456789X"
+                 if hygiene.vin_check_digit_valid(body.replace("_", d))]
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(self.hits("a.md", valid[0] + "\n"),
+                         [(1, "17-character VIN (check digit)")])
+
+    def test_check_digit_net_ignores_a_wrong_check_digit(self):
+        body = "1HGCM826" + "_" + "3A00435Z"
+        wrong = [body.replace("_", d) for d in "0123456789X"
+                 if not hygiene.vin_check_digit_valid(body.replace("_", d))]
+        self.assertEqual(len(wrong), 10)
+
+        for token in wrong:
+            self.assertEqual(self.hits("a.md", token + "\n"), [])
+
 
 class Paths(unittest.TestCase):
     def test_private_paths_are_refused(self):
