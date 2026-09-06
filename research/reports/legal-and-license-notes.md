@@ -23,7 +23,7 @@ now, while it is cheap. Licenses were read at the pinned revisions in
 | `research/evidence/n47/klartext_f25/*.yaml` | manually transcribed protocol facts + structured factual data (scaling rows), cited to AGPL sources; **no code, no prose copied** |
 | `research/evidence/n47/f10_field/oil_pressure_586F.yaml` | manually transcribed protocol facts from an MIT source |
 | `research/evidence/n47/obdb/egs_dids.yaml` | structured factual data from a CC-BY-SA-4.0 source, attributed; share-alike applies if redistributed |
-| `research/normalized/n47/*.jsonl` (d73 portion) | structured factual data mechanically derived from the license-unknown gist — see the flag below |
+| `research/normalized/n47/*.jsonl` (d73 portion) | structured factual data mechanically derived from the license-unknown gist — **no longer tracked**; generated locally, see flag 1 |
 | `tests/research/fixtures/*` | small factual excerpts for deterministic tests, each with a source header |
 | `mappings/candidates/bmw/dde/n47/*.yaml` | independently authored files in our own format encoding cited protocol facts |
 | runtime `setup:` extension (`bmwdiag/`) | independently reproduced behavior — designed from the *documented wire sequence*, no reference implementation consulted for code |
@@ -35,9 +35,17 @@ now, while it is cheap. Licenses were read at the pinned revisions in
    which is itself an export of BMW's `D73N47A0` SGBD table. Individual
    facts are fine to *use*; **redistributing the bulk set** raises both
    the gist-license question and an EU **database-right** question on
-   BMW's side. The repository currently has zero commits and is not
-   hosted; resolve before publishing, or regenerate-on-demand from the
-   cache instead of committing the file.
+   BMW's side.
+   **Status (2026-09-05, issue #18):** the file — and the other three
+   normalized `.jsonl` — are removed from the tracked tree and
+   gitignored; they regenerate deterministically from the gitignored
+   source cache (`python3 -m research.build`). The manifest records
+   `license.bulk_redistribution: withheld` on `morguux-d73n47a0`, and
+   the generated coverage report lists a withheld source's rows only
+   when they carry a normalized name (26 rows), counting the rest
+   (1619) per group without reproducing them. The blobs remain in git
+   history from 2026-08-25 onwards; whether to rewrite history is an
+   owner decision, laid out in `docs/HISTORY_REWRITE.md`.
 2. **`ediabasx-docs-sgbd`** publishes whole PRG-derived tables. We used
    it only for individual row cross-checks (a handful of quoted rows
    with citations); do not bulk-scrape it, and do not mirror it.
