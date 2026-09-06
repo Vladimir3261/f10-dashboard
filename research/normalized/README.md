@@ -24,13 +24,19 @@ python3 -m research.build
 # committed evidence only (no cache, no network) - what CI runs
 python3 -m research.build --evidence-only
 
-# rewrite the two generated reports from whatever is here
+# rewrite the two generated reports from a full normalized set
 python3 -m research.build --reports-only
 ```
 
 A full build refuses to run on a wrong-hash cache. The tracked reports
 (`research/reports/n47-coverage.md`, `n47-conflicts.md`) are written by
 the full build and are the committed, reviewable view of this data.
+`--reports-only` refuses (exit 1, reports untouched) when the normalized
+set here is an `--evidence-only` build — the reports would otherwise
+silently lose every cached source; `--force` is the explicit override.
+`tests/research/test_tracked_reports.py` pins the tracked coverage
+report to the full-build view (1685 records, the withheld rows counted
+but not listed) and exercises that refusal.
 
 ## Tests
 

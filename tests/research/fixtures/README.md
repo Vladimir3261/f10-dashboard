@@ -1,9 +1,11 @@
 # Research test fixtures — provenance
 
 Small verbatim excerpts of the pinned sources, so the importers have
-deterministic input without the gitignored source cache. Each file has a
-header citing the source and its pinned revision. They stay small on
-purpose: a handful of rows is an individual fact with a citation; the
+deterministic input without the gitignored source cache. Each file cites
+the source and its pinned revision — the two XML excerpts in a comment
+header, the CSV in the sidecar `d73_excerpt.provenance.md` (the CSV
+importer has no comment syntax; line 1 must be the column row). They
+stay small on purpose: a handful of rows is an individual fact with a citation; the
 whole table is the bulk derivative the legal notes flag (see
 `research/reports/legal-and-license-notes.md`, "Derived technical facts"
 and flag 1), and the bulk lives only in the local cache.

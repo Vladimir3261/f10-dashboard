@@ -29,7 +29,8 @@ mappings/verified/bmw/dde/n47/     empty until something is locally verified
 ```
 python3 -m research.build          # re-import everything, rewrite normalized + generated reports
 python3 -m research.build --evidence-only   # committed evidence only: no cache, no network (CI)
-python3 -m research.build --reports-only    # rewrite the two generated reports from what is there
+python3 -m research.build --reports-only    # rewrite the two generated reports from a FULL normalized set
+                                            # (refuses on an --evidence-only set; --force overrides)
 python3 -m unittest discover tests.research   # pipeline tests, no car, no network
 python3 -m bmwdiag.mapping validate mappings/ # candidates validate like any mapping
 ```

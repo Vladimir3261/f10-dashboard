@@ -32,7 +32,9 @@ the committed evidence alone (no cache, no network) and writes the
 normalized output for those records; it does not touch the reports,
 which would otherwise silently lose the cached sources. It is the check
 CI runs. `--reports-only` reloads the existing normalized output and
-rewrites the two generated reports without re-importing anything.
+rewrites the two generated reports without re-importing anything - and
+refuses (exit 1, reports untouched) when that output is an
+evidence-only build, for the same reason; `--force` overrides.
 """
 
 import argparse
@@ -72,6 +74,16 @@ CACHE_FILES = {
     "motor_ccpage": os.path.join(CACHE, "ediabaslib", "Motor.ccpage"),
     "customjobs": os.path.join(CACHE, "bmwxdfs", "customjobs.xml"),
 }
+
+#: The source ids only a full build (with the cache) can produce. A
+#: normalized set that lacks any of them is an --evidence-only build,
+#: and the tracked reports must not be regenerated from it: they cover
+#: the cached sources too, and would silently lose them.
+CACHED_SOURCE_IDS = frozenset({
+    d73n47_csv.SOURCE_ID,
+    deep_obd_xml.SOURCE_ID,
+    test_o_customjobs.SOURCE_ID,
+})
 
 #: Normalized output files by record type, in write order.
 BUCKETS = (
@@ -363,6 +375,13 @@ def collect_records(strict: bool = True) -> List[ResearchRecord]:
     return records
 
 
+def missing_cached_sources(records: List[ResearchRecord]) -> List[str]:
+    """Cached source ids absent from `records`: non-empty means partial."""
+    present = {r.source_id for r in records}
+
+    return sorted(CACHED_SOURCE_IDS - present)
+
+
 def load_normalized(directory: str = NORMALIZED) -> List[ResearchRecord]:
     """Reload every record from an existing normalized directory."""
     records: List[ResearchRecord] = []
@@ -443,7 +462,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     mode.add_argument(
         "--reports-only", action="store_true",
         help="rewrite the generated reports from the existing normalized "
-             "output without re-importing anything",
+             "output without re-importing anything; refuses when that "
+             "output is an --evidence-only build (see --force)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="with --reports-only: rewrite the reports even from a partial "
+             "(evidence-only) normalized set - the tracked reports then "
+             "lose every cached source",
     )
     args = parser.parse_args(argv)
 
@@ -451,7 +477,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     relationships = load_relationships()
 
     if args.reports_only:
-        records = load_normalized()
+        records = load_normalized(NORMALIZED)
+        missing = missing_cached_sources(records)
+
+        if missing and not args.force:
+            print(
+                "[!] --reports-only refused: the normalized output is a "
+                "partial (--evidence-only) build - it has no records from "
+                f"{', '.join(missing)}, so the tracked reports would lose "
+                "every cached source. Run the full build with the source "
+                "cache (research/sources/README.md), or pass --force to "
+                "rewrite them anyway.",
+                file=sys.stderr,
+            )
+
+            return 1
+
+        if missing:
+            print(f"[!] --force: rewriting the reports without {', '.join(missing)}",
+                  file=sys.stderr)
     else:
         records = collect_records(strict=not args.evidence_only)
 
@@ -478,13 +522,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # -- write --------------------------------------------------------
     if not args.reports_only:
-        write_normalized(records)
+        write_normalized(records, NORMALIZED)
 
     if args.evidence_only:
         print("[i] --evidence-only: reports not rewritten (they cover the "
               "cached sources too)")
     else:
-        write_reports(records, gate_results, found, sources)
+        write_reports(records, gate_results, found, sources, REPORTS)
 
     eligible = sorted(k for k, v in gate_results.items() if not v)
 

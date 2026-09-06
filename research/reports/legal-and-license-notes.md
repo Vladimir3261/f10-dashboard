@@ -24,7 +24,7 @@ now, while it is cheap. Licenses were read at the pinned revisions in
 | `research/evidence/n47/f10_field/oil_pressure_586F.yaml` | manually transcribed protocol facts from an MIT source |
 | `research/evidence/n47/obdb/egs_dids.yaml` | structured factual data from a CC-BY-SA-4.0 source, attributed; share-alike applies if redistributed |
 | `research/normalized/n47/*.jsonl` (d73 portion) | structured factual data mechanically derived from the license-unknown gist — **no longer tracked**; generated locally, see flag 1 |
-| `tests/research/fixtures/*` | small factual excerpts for deterministic tests, each with a source header |
+| `tests/research/fixtures/*` | small factual excerpts for deterministic tests, each cited to its pinned source (in-file header for the XML excerpts, the `d73_excerpt.provenance.md` sidecar for the CSV, which admits no comment row) |
 | `mappings/candidates/bmw/dde/n47/*.yaml` | independently authored files in our own format encoding cited protocol facts |
 | runtime `setup:` extension (`bmwdiag/`) | independently reproduced behavior — designed from the *documented wire sequence*, no reference implementation consulted for code |
 

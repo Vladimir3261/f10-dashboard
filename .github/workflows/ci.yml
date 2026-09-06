@@ -25,13 +25,14 @@ jobs:
         python: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned by commit, version in the comment: no moving parts.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           # check_mapping_versions.py diffs against the PR base ref, so
           # the base must be reachable from this checkout.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: ${{ matrix.python }}
 
@@ -49,9 +50,13 @@ jobs:
 
       - name: Changed mappings bumped their version (PRs only)
         if: github.event_name == 'pull_request'
+        # The base ref reaches the shell through the environment, never
+        # by template expansion inside `run:`.
+        env:
+          BASE: ${{ github.base_ref }}
         run: |
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          python3 tools/check_mapping_versions.py --against "origin/${{ github.base_ref }}"
+          git fetch --no-tags origin "$BASE"
+          python3 tools/check_mapping_versions.py --against "origin/$BASE"
 
       - name: Research pipeline on the committed evidence (no cache, no network)
         run: python3 -m research.build --evidence-only

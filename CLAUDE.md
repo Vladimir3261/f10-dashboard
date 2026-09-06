@@ -198,7 +198,7 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   (`samples.quality`); the display suppresses them and derived channels
   drop with their flagged inputs. engine.yaml v4 declares lambda's
   0xFFFF sentinel and MAP's 255 saturation. See `docs/DATA_QUALITY.md`.
-- 1,050 tests, no car / no network / no BMW data required
+- 1,095 tests, no car / no network / no BMW data required
   (`python3 tools/run_tests.py` prints the skip count; 3 skip without the
   research source cache). CI runs the same checks on every PR —
   `docs/CI.md`.
