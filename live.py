@@ -68,6 +68,8 @@ from bmwdiag.protocol import (
     DiagnosticError,
     LinkError,
     NegativeResponse,
+    ObdExchange,
+    ObdReadReport,
     ObservationalTransport,
     PendingTimeout,
     RequestTimeout,
@@ -1338,6 +1340,14 @@ class ObdSession:
         #: may be the previous one. The executor marks those readings
         #: `stale`. Rebuilt on every `read()`.
         self.ambiguous_pids: set = set()
+        #: What the last `read()` did on the wire, for the executor's
+        #: stage accounting. Rebuilt on every `read()`.
+        self.last_report: Optional[ObdReadReport] = None
+
+    @property
+    def retired(self) -> set:
+        """PIDs this session will no longer ask for (see `read`)."""
+        return self.dead
 
     def _mode01(self, pids: List[int], timeout: Optional[float] = None) -> Dict[int, bytes]:
         resp = self.client.request(bytes([0x01] + pids), timeout)
@@ -1363,46 +1373,109 @@ class ObdSession:
 
         return out
 
+    def _exchange(
+        self, pids: List[int], report: ObdReadReport
+    ) -> Tuple[Dict[int, bytes], Optional[BaseException]]:
+        """
+        One Mode 01 frame, accounted for.
+
+        Returns what came back and the exception if it did not. A link
+        error is re-raised, never absorbed: before #16 both read paths
+        caught every `HsfzError`, so a socket that had died was retried
+        PID by PID, each failure counted as a strike, and the whole OBD
+        set was retired against a link that simply needed reconnecting.
+        The executor's generic path has always let a link fault
+        propagate; this makes the OBD path match.
+        """
+        started = time.monotonic()
+
+        try:
+            got = self._mode01(pids)
+        except HsfzLinkError:
+            raise
+        except (HsfzError,) + TIMEOUTS as exc:
+            report.exchanges.append(ObdExchange(
+                tuple(pids), started, time.monotonic(),
+                answered=isinstance(exc, HsfzError) and bool(
+                    getattr(exc, "answered", False)
+                ),
+                error=exc,
+            ))
+
+            return {}, exc
+
+        report.exchanges.append(ObdExchange(
+            tuple(pids), started, time.monotonic(), True, tuple(got),
+        ))
+
+        return got, None
+
     def read(self, pids: List[int]) -> Dict[int, bytes]:
-        """Read a set of PIDs, batching where the ECU allows it."""
+        """
+        Read a set of PIDs, batching where the ECU allows it.
+
+        Leaves `last_report` describing every frame this call put on the
+        wire (`bmwdiag.protocol.ObdReadReport`) so the executor can
+        count the wire once and attribute it to the logical requests -
+        six PIDs in one frame is one exchange, not six.
+        """
         result: Dict[int, bytes] = {}
+        report = ObdReadReport(retired=set(self.dead))
+        self.last_report = report
         self.ambiguous_pids = set()
+        pids = [pid for pid in pids if pid not in self.dead]
 
         if self.multi_ok:
-            try:
-                for i in range(0, len(pids), 6):
-                    batch = pids[i:i + 6]
-                    got = self._mode01(batch)
+            for i in range(0, len(pids), 6):
+                batch = pids[i:i + 6]
+                got, error = self._exchange(batch, report)
 
-                    if not all(p in got for p in batch):
-                        raise HsfzUnexpectedReply("incomplete multi-PID response")
+                if error is not None:
+                    #
+                    # The ECU refused or ignored the batch as a whole:
+                    # fall back to one PID per frame from here on. What
+                    # earlier batches returned is kept.
+                    #
+                    self.multi_ok = False
+                    break
 
-                    result.update(got)
+                result.update(got)
 
+                if not all(p in got for p in batch):
+                    #
+                    # A positive answer missing PIDs: the ECU answered
+                    # the frame but does not batch the way we asked.
+                    # Keep what it did return, single-read the rest.
+                    #
+                    self.multi_ok = False
+                    break
+            else:
                 return result
-            except HsfzError:
-                self.multi_ok = False
-                result.clear()
 
         for pid in pids:
-            if pid in self.dead:
+            if pid in result:
                 continue
 
-            try:
-                result.update(self._mode01([pid]))
+            got, error = self._exchange([pid], report)
+
+            if error is None and pid in got:
+                result.update(got)
                 self.fails.pop(pid, None)
-            except (HsfzError,) + TIMEOUTS:
-                #
-                # A PID the ECU ignores costs a full timeout every
-                # cycle, so retire it after a few strikes.
-                #
-                self.fails[pid] = self.fails.get(pid, 0) + 1
-
-                if self.fails[pid] >= 3:
-                    self.dead.add(pid)
-                    print(f"[!] dropping unresponsive PID 0x{pid:02X}")
-
                 continue
+
+            #
+            # A PID the ECU ignores costs a full timeout every cycle, so
+            # retire it after a few strikes. The retirement is reported
+            # once, by the executor, from `retired_now`.
+            #
+            self.fails[pid] = self.fails.get(pid, 0) + 1
+
+            if self.fails[pid] >= 3:
+                self.dead.add(pid)
+                report.retired.add(pid)
+                report.retired_now.add(pid)
+                report.strikes[pid] = self.fails[pid]
+                print(f"[!] dropping unresponsive PID 0x{pid:02X}")
 
         return result
 
@@ -1602,6 +1675,16 @@ class Recorder:
         self.vehicle = None
         self.rows = 0
         self.dropped = 0
+        #
+        # Rows actually committed, per channel key - the last stage of
+        # the pipeline (issue #16). "Recorded" means a row is in SQLite,
+        # not that a value was queued: the queue can drop under
+        # pressure (`dropped`) and nothing between the decoder and the
+        # commit is otherwise visible. Written by the writer thread
+        # only; read by the diagnostics view through `persisted()`.
+        #
+        self._persisted: Dict[str, int] = {}
+        self._key_of_param: Dict[int, str] = {}
         self.db: Optional[sqlite3.Connection] = None
         #
         # Where label/unit/pid for a channel come from. Set once the
@@ -1919,8 +2002,19 @@ class Recorder:
         ).fetchone()[0]
 
         self.param_ids[key] = ident
+        self._key_of_param[ident] = key
 
         return ident
+
+    def persisted(self) -> Dict[str, int]:
+        """Committed sample rows per channel key, this process. Copied."""
+        for _ in range(3):
+            try:
+                return dict(self._persisted)
+            except RuntimeError:                # changed size during iteration
+                continue
+
+        return {}
 
     def _note_run_channel(self, param_id: int, key: str) -> None:
         """
@@ -1982,6 +2076,13 @@ class Recorder:
         self.db.commit()
 
         self.rows += len(pending)
+
+        for row in pending:
+            key = self._key_of_param.get(row[2])
+
+            if key is not None:
+                self._persisted[key] = self._persisted.get(key, 0) + 1
+
         pending.clear()
 
     def _writer(self) -> None:
@@ -2283,8 +2384,23 @@ class Diagnostics:
             if client is not None and hasattr(client, "link_stats")
             else None
         )
+        #: The physical frame counts, once per frame - what the wire
+        #: carried, as opposed to what the scheduler asked for.
+        wire = executor.wire_stats() if executor is not None else None
+        #: Rows committed per channel: the last stage. Absent when the
+        #: process records nothing (--no-record), and the view says
+        #: "not recording" rather than zero.
+        recorder = state.get("recorder")
+        persisted = (
+            recorder.persisted()
+            if recorder is not None and hasattr(recorder, "persisted")
+            else None
+        )
         extra_ids = set(state.get("extra_ids") or ())
         now = time.time()
+
+        def age(ts: Any) -> Optional[float]:
+            return None if not ts else round(now - ts, 1)
 
         #: request id -> the mapping file that declares it
         owner: Dict[str, Any] = {}
@@ -2302,7 +2418,14 @@ class Diagnostics:
             ) + 1
 
         requests = []
-        totals = {"sent": 0, "ok": 0, "failed": 0, "late": 0, "ambiguous": 0}
+        totals = {
+            "sent": 0, "ok": 0, "failed": 0, "late": 0, "ambiguous": 0,
+            "scheduled": 0, "submitted": 0, "skipped_resting": 0,
+            "skipped_retired": 0, "positive_response": 0,
+            "negative_response": 0, "timeout": 0, "nack": 0,
+            "no_response": 0, "decode_failed": 0, "decoded_signals": 0,
+            "accepted_signals": 0, "all_rejected": 0, "persisted_signals": 0,
+        }
 
         for request in profile.requests:
             st = stats.get(request.id, {})
@@ -2311,8 +2434,19 @@ class Diagnostics:
             sent = st.get("sent", 0)
             ok = st.get("ok", 0)
 
+            #: Rows committed for this request's signals. None when
+            #: nothing is recording - not zero, which would read as
+            #: "decoded but lost".
+            persisted_signals = (
+                None if persisted is None
+                else sum(persisted.get(sig.key, 0) for sig in request.signals)
+            )
+
             for key in totals:
-                totals[key] += st.get(key, 0)
+                if key == "persisted_signals":
+                    totals[key] += persisted_signals or 0
+                else:
+                    totals[key] += st.get(key, 0)
 
             #
             # A staggered class fires one member per firing, so its
@@ -2400,6 +2534,67 @@ class Diagnostics:
                 #: link tab can render "NRC 0x31 requestOutOfRange"
                 #: without parsing prose.
                 "last_detail": st.get("last_detail"),
+                #
+                # The pipeline, stage by stage (issue #16). Every name is
+                # one unambiguous point between the scheduler and the
+                # database, so "sent 590" can no longer mean any of
+                # "scheduled", "put on the wire", "answered" or "stored".
+                #
+                #   scheduled  -> the plan handed it to the executor
+                #   submitted  -> actually put on the wire; the rest were
+                #                 skipped because resting or retired
+                #   wire       -> frames, ATTRIBUTED: a shared OBD batch
+                #                 counts once for each request it carried
+                #                 (the physical count is `totals.wire`);
+                #                 setup frames apart from the poll
+                #   outcome    -> what came back: positive, negative
+                #                 (NRC), timeout, NACK, no_response (the
+                #                 batch was answered without this PID),
+                #                 late (answer after the timeout,
+                #                 discarded), decode_failed
+                #   signals    -> decoded by the mapping, accepted by
+                #                 quality, committed to SQLite;
+                #                 `all_rejected` counts positive responses
+                #                 whose every signal was unusable
+                #
+                "state": st.get("state", "idle"),
+                "stages": {
+                    "scheduled": st.get("scheduled", 0),
+                    "submitted": st.get("submitted", 0),
+                    "skipped_resting": st.get("skipped_resting", 0),
+                    "skipped_retired": st.get("skipped_retired", 0),
+                    "wire": {
+                        "exchanges": st.get("exchanges", 0),
+                        "tx_frames": st.get("tx_frames", 0),
+                        "rx_frames": st.get("rx_frames", 0),
+                        "setup_tx_frames": st.get("setup_tx_frames", 0),
+                        "setup_rx_frames": st.get("setup_rx_frames", 0),
+                        "setup_faults": st.get("setup_faults", 0),
+                    },
+                    "positive_response": st.get("positive_response", 0),
+                    "negative_response": st.get("negative_response", 0),
+                    "timeout": st.get("timeout", 0),
+                    "nack": st.get("nack", 0),
+                    "no_response": st.get("no_response", 0),
+                    "late": st.get("late", 0),
+                    "decode_failed": st.get("decode_failed", 0),
+                    "decoded_signals": st.get("decoded_signals", 0),
+                    "accepted_signals": st.get("accepted_signals", 0),
+                    "all_rejected": st.get("all_rejected", 0),
+                    "last_rejection": st.get("last_rejection"),
+                    "persisted_signals": persisted_signals,
+                },
+                "last_tx_age": age(st.get("last_tx")),
+                "last_rx_age": age(st.get("last_rx")),
+                #: Answered-exchange latency: `avg` over the session,
+                #: `p95`/`median` over the last `window` exchanges.
+                "latency_ms": st.get("latency_ms"),
+                #: The EFFECTIVE refresh interval, measured between
+                #: successful decodes on the monotonic clock, beside the
+                #: declared `period_s`. For a staggered class or a duty-
+                #: cycled mode the two differ by design; this is the one
+                #: a dataset actually has.
+                "refresh_s": st.get("refresh_s"),
             })
 
         values = state.get("values") or {}
@@ -2415,6 +2610,7 @@ class Diagnostics:
 
             counts = quality.get(key, {})
             flagged = sum(n for q, n in counts.items() if q != "ok")
+            request_stats = stats.get(request_id, {}) if request_id else {}
 
             channels.append({
                 "key": key,
@@ -2436,6 +2632,15 @@ class Diagnostics:
                     None if not counts
                     else round(100.0 * flagged / sum(counts.values()), 1)
                 ),
+                #: Rows committed for this channel (None: not recording).
+                "persisted": (
+                    None if persisted is None else persisted.get(key, 0)
+                ),
+                #: The measured refresh interval of the request that
+                #: carries it; a derived channel has no exchange of its
+                #: own and reports none.
+                "refresh_s": request_stats.get("refresh_s"),
+                "state": request_stats.get("state") if request_id else None,
             })
 
         mappings = []
@@ -2497,11 +2702,28 @@ class Diagnostics:
             "channels": channels,
             "totals": {
                 **totals,
+                #: Null when nothing is recording, like the per-request
+                #: figure - a zero here beside null rows read as "decoded
+                #: and lost".
+                "persisted_signals": (
+                    None if persisted is None else totals["persisted_signals"]
+                ),
                 "requests": len(profile.requests),
                 "channels": len(channels),
                 "success_pct": (
                     None if not totals["sent"]
                     else round(100.0 * totals["ok"] / totals["sent"], 1)
+                ),
+                #: PHYSICAL frames, once each. The per-request `stages.wire`
+                #: counts attribute a batch to every member, so they add
+                #: up to more than this whenever OBD batching is on - by
+                #: design, and this is the number the link actually saw.
+                "wire": wire,
+                "recorder": (
+                    None if recorder is None else {
+                        "rows": getattr(recorder, "rows", 0),
+                        "dropped_cycles": getattr(recorder, "dropped", 0),
+                    }
                 ),
             },
             "transport": transport,
@@ -3008,6 +3230,7 @@ def poll_loop(
             #
             diag.publish(
                 profile=profile, executor=executor, plan=plan, client=client,
+                recorder=rec,
                 ecu=engine.label(), ecu_addr=engine.addr, gateway=ip,
                 other_ecus=[e.label() for e in ecus if e.addr != engine.addr],
                 identity=identity,

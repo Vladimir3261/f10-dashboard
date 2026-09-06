@@ -7,7 +7,7 @@ tests substitute a dictionary.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:                                    # pragma: no cover - 3.8+
     from typing import Protocol, runtime_checkable
@@ -25,6 +25,8 @@ from .correlate import ResponseExpectation, declared_response
 __all__ = [
     "DiagnosticTransport",
     "ObdPidReader",
+    "ObdExchange",
+    "ObdReadReport",
     "DiagnosticRequest",
     "DecodedResponse",
     "NegativeResponse",
@@ -74,6 +76,59 @@ class ObdPidReader(Protocol):
 
     def read(self, pids: List[int]) -> Dict[int, bytes]:
         ...                             # pragma: no cover
+
+
+@dataclass
+class ObdExchange:
+    """
+    One physical Mode 01 exchange, as the reader saw it.
+
+    A reader batches several logical requests into one frame, so the
+    executor cannot count the wire from the requests it handed over. The
+    reader tells it instead: which PIDs rode in this frame, whether the
+    far side answered (a negative response and a NACK are answers; a
+    timeout is not), which PIDs the answer actually carried, and the
+    exception when the exchange failed - the real one, so the fault
+    keeps its kind (`transport_timeout`, `negative_response`, ...)
+    instead of collapsing into "no response". `started`/`finished` are
+    monotonic; the latency is the difference.
+
+    `answered` is liveness, not a frame count: a pending timeout is
+    answered (the ECU said wait, so the link is alive) although no
+    answer ever arrived. When `error` is set the executor derives what
+    the exchange received from the error itself - a pending timeout is
+    its `pending` frames and no latency sample, an NRC is one timed
+    frame, a NACK one untimed gateway frame, a plain timeout nothing -
+    and reads `answered` only when there is no error.
+    """
+
+    pids: Tuple[int, ...]
+    started: float
+    finished: float
+    answered: bool = True
+    returned: Tuple[int, ...] = ()
+    error: Optional[BaseException] = None
+
+
+@dataclass
+class ObdReadReport:
+    """
+    What one `ObdPidReader.read()` call did on the wire.
+
+    Optional on a reader - `MappingExecutor` looks for it as
+    `reader.last_report` after each read and, absent one, assumes the
+    read was a single answered exchange carrying every PID it asked for.
+    `retired_now` names PIDs the reader gave up on DURING this read (so
+    the retirement can be reported once); `retired` is every PID it will
+    no longer attempt, which the executor consults BEFORE asking so a
+    retired PID is never counted as submitted.
+    """
+
+    exchanges: List[ObdExchange] = field(default_factory=list)
+    retired_now: Set[int] = field(default_factory=set)
+    retired: Set[int] = field(default_factory=set)
+    #: How many faults each PID retired in `retired_now` had accumulated.
+    strikes: Dict[int, int] = field(default_factory=dict)
 
 
 class UnresolvedTargetError(MappingError):
