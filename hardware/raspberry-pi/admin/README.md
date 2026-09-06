@@ -77,15 +77,40 @@ type and verification status, and an `--extra` badge for the ones loaded
 only because `--extra-mappings` named them. That flag is the repo's "no
 proprietary data in the production set" line, made visible per run.
 
-**Requests**, failing first — where each goes (`0x12 pid 0x0C`,
-`0x18 did 0xDA2E`), its real interval, and sent / ok / failed with a
-success rate and the last error. **`sent` with no `ok` is a channel the
-car is not answering**, which in the sample table is indistinguishable
-from one nobody asked for: both are simply absent rows.
+**Requests**, failing first — one summary row per request: where it
+goes (`0x12 pid 0x0C`, `0x18 did 0xDA2E`), its interval as *declared →
+measured*, and asked / ok / failed with a success rate, the state and
+the last error. **`asked` is how many times the request was put on the
+wire** — not how often it was scheduled (a resting or retired request is
+scheduled and skipped) and not a frame count (six OBD PIDs go in one
+frame). A request that was asked but never `ok` is a channel the car is
+not answering, which in the sample table is indistinguishable from one
+nobody asked for: both are simply absent rows. A **retired** one (an OBD
+PID that struck out three times) is no longer asked at all, and says
+so rather than freezing its counters.
 
-Staggered classes report their *per-channel* interval. The DDE reads
-declare 0.5 s, but that is the gap between firings of the class and one
-member goes out per firing — so the honest number is ~11 s, not 0.5.
+Tap a row for the whole pipeline behind it, one stage per line:
+`scheduled → submitted → wire` (exchanges, tx / rx frames, with the
+F303 setup frames counted apart), the outcomes (positive, NRC, timeout,
+NACK, no answer in the batch, late, decode failed), `decoded → accepted
+→ stored` signals with a flag when an answer had *every* signal
+rejected by quality, latency (session average, p95 over the last 32,
+last tx / rx ages) and the **measured** refresh interval beside the
+declared one. Everything on the row is in the JSON
+(`/api/diagnostics`, `requests[].stages`); the row only picks.
+
+Staggered classes are where declared and measured differ by design.
+The DDE reads declare 0.5 s, but that is the gap between firings of the
+class and one member goes out per firing — so the measured refresh is
+~11 s, not 0.5, and that is the number a dataset actually has.
+`sampling` mode shows as a median of the polling cadence with the
+ten-minute pause as `max` of the window (the last 16 refreshes) — and
+as `last` only until the next decode: the pause is not hidden in the
+median, and it ages out of the window rather than being averaged away.
+
+The session line above carries the physical wire count (once per
+frame; the per-request rows attribute a shared OBD batch to every
+member, so they add up to more) and what the recorder committed.
 
 **Not being read** — the answer to *"why is this channel missing?"*
 Resolution filters silently by design: a mapping for another ECU variant
@@ -95,9 +120,10 @@ variant, a derived channel lost an input. Identifiers render in hex, so
 they are greppable against a mapping file.
 
 **Channels** — every channel with its unit, the request it came from (or
-*derived*), the mapping version that decoded it, and whether it is
-stored. A channel marked not-stored is `log: false` — read and displayed
-on purpose, never written.
+*derived*), the mapping version that decoded it, its measured refresh,
+whether it is stored and how many rows actually reached SQLite this
+process. A channel marked not-stored is `log: false` — read and displayed
+on purpose, never written; `rows` shows a dash when nothing is recording.
 
 ## The Claude tab
 

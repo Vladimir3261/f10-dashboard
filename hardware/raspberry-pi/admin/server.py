@@ -1372,6 +1372,18 @@ PAGE = r"""<!doctype html>
   td.bad { color:var(--bad); } td.ok { color:var(--good); }
   td.warn { color:var(--warn); }
   tr.rowbad td.k { color:var(--bad); }
+  tr.reqrow { cursor:pointer; }
+  tr.reqrow td:first-child::before { content:"▸ "; color:var(--muted);
+                                     font-size:10px; }
+  tr.reqrow.open td:first-child::before { content:"▾ "; }
+  tr.reqdetail { display:none; }
+  tr.reqdetail.open { display:table-row; }
+  tr.reqdetail td { white-space:normal; font-size:12px; line-height:1.6;
+                    color:var(--muted); padding:8px 9px 12px 22px;
+                    background:var(--card2); }
+  tr.reqdetail b { color:var(--text); font-weight:600; }
+  tr.reqdetail .stage { display:block; }
+  tr.reqdetail .arrow { color:var(--accent); margin:0 4px; }
   .drop { padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
   .drop:last-child { border-bottom:0; }
   .drop b { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
@@ -1507,10 +1519,16 @@ PAGE = r"""<!doctype html>
     <div class="card">
       <h2>Requests</h2>
       <p class="hint" style="margin-top:0">
-        Failing first. <b>sent</b> is how many times this session asked;
-        a request with sent but no ok is a channel the car is not
-        answering, which is otherwise indistinguishable from one nobody
-        asked for.
+        Failing first. <b>asked</b> is how many times this session put
+        the request on the wire — not how often it was scheduled (a
+        resting or retired request is scheduled and skipped), and not a
+        frame count (six OBD PIDs go in one frame). A request that was
+        asked but never <b>ok</b> is a channel the car is not answering,
+        which is otherwise indistinguishable from one nobody asked for;
+        a <b>retired</b> one is no longer asked at all. <b>every</b> is
+        the declared period → the measured one. Tap a row for the whole
+        pipeline: scheduled → submitted → frames → outcome → decoded →
+        accepted → stored.
       </p>
       <div class="tablewrap"><table id="carrequests"></table></div>
     </div>
@@ -1835,6 +1853,8 @@ function renderLoaded(loaded, connected) {
 /* Fetched only while its tab is open: a much bigger payload than the
    status poll, and nothing in it changes second to second. */
 let carLoaded = false;
+/* Request rows whose pipeline detail is open, by request id. */
+const openRequests = new Set();
 
 async function loadCar(force) {
   if (carLoaded && !force) return;
@@ -1881,7 +1901,7 @@ function renderCar(d) {
 
   $("carsession").innerHTML =
     `<div class="grid">`
-    + stat("Requests sent", (t.sent || 0).toLocaleString())
+    + stat("Requests asked", (t.submitted == null ? t.sent || 0 : t.submitted).toLocaleString())
     + stat("Success", t.success_pct == null ? "—" : t.success_pct + "%",
            t.success_pct == null ? "" :
            t.success_pct > 98 ? "good" : t.success_pct > 90 ? "warn" : "bad")
@@ -1900,6 +1920,36 @@ function renderCar(d) {
        /* What the transport refused to hand to anyone. A request's own
           counters cannot show a discarded frame - no request received
           it - so the link-level tally lives here (issue #12). */
+       /* The PHYSICAL frame count, once per frame. The per-request
+          rows attribute a shared OBD batch to every member, so their
+          frames add up to more than this whenever batching is on. */
+       t.wire
+         ? `wire: <b>${(t.wire.exchanges || 0).toLocaleString()}</b> exchanges · `
+           + `<b>${(t.wire.tx_frames || 0).toLocaleString()}</b> tx · `
+           + `<b>${(t.wire.rx_frames || 0).toLocaleString()}</b> rx`
+           + (t.wire.setup_tx_frames || t.wire.setup_faults
+               ? ` · setup <b>${t.wire.setup_tx_frames || 0}</b> tx / `
+                 + `<b>${t.wire.setup_rx_frames || 0}</b> rx`
+                 + (t.wire.setup_faults
+                     ? ` (<b>${t.wire.setup_faults}</b> failed)` : "")
+               : "")
+           + (t.wire.obd_batches
+               ? ` · ${t.wire.obd_batched_pids} PIDs in ${t.wire.obd_batches} batches`
+               : "")
+         : "",
+       `scheduled <b>${(t.scheduled || 0).toLocaleString()}</b> · `
+         + `asked <b>${(t.submitted || 0).toLocaleString()}</b>`
+         + (t.skipped_resting ? ` · <b>${t.skipped_resting}</b> skipped resting` : "")
+         + (t.skipped_retired ? ` · <b>${t.skipped_retired}</b> skipped retired` : ""),
+       `signals: decoded <b>${(t.decoded_signals || 0).toLocaleString()}</b> · `
+         + `accepted <b>${(t.accepted_signals || 0).toLocaleString()}</b> · `
+         + (t.recorder
+             ? `stored <b>${(t.persisted_signals || 0).toLocaleString()}</b>`
+               + ` in ${(t.recorder.rows || 0).toLocaleString()} rows`
+               + (t.recorder.dropped_cycles
+                   ? ` · <b>${t.recorder.dropped_cycles}</b> cycles dropped` : "")
+             : "not recording")
+         + (t.all_rejected ? ` · <b>${t.all_rejected}</b> answers all rejected` : ""),
        d.transport
          ? `link: <b>${d.transport.timeouts || 0}</b> timeouts · `
            + `<b>${d.transport.late_response || 0}</b> late · `
@@ -1933,21 +1983,81 @@ function renderCar(d) {
         : `<span class="badge rej">${escape_(m.verification)}</span>`}
     </div>`).join("");
 
-  /* Failing first: that is the order you debug in. A resting request
-     is mid-story - the executor stood it down after repeated faults -
-     so it sorts with the failures, not the healthy rows. */
-  const reqs = (d.requests || []).slice().sort((a, b) => {
-    const fa = a.resting_for ? 0 : a.sent && !a.ok ? 0 : a.failed ? 1 : 2;
-    const fb = b.resting_for ? 0 : b.sent && !b.ok ? 0 : b.failed ? 1 : 2;
-    return fa - fb || a.id.localeCompare(b.id);
-  });
+  /* Failing first: that is the order you debug in. A retired request
+     (the reader gave up on it) and one that was asked but never
+     answered come first, then resting (stood down after repeated
+     faults), then anything with failures, then the healthy rows. */
+  const rank = q => q.state === "retired" ? 0
+    : q.stages && q.stages.submitted && !q.ok ? 0
+    : q.resting_for ? 1 : q.failed ? 2 : 3;
+  const reqs = (d.requests || []).slice().sort((a, b) =>
+    rank(a) - rank(b) || a.id.localeCompare(b.id));
+  const secs = v => v == null ? "—" : v >= 100 ? Math.round(v) + "s"
+    : v >= 10 ? v.toFixed(1) + "s" : v.toFixed(2) + "s";
+  const ms = v => v == null ? "—" : Math.round(v) + " ms";
+  const n = v => (v || 0).toLocaleString();
+
+  /* One row per request; the pipeline behind it, one stage per line,
+     so the summary stays a summary. Every number here is in the JSON
+     (`stages`, `latency_ms`, `refresh_s`); the row only picks. */
+  const detail = q => {
+    /* An older live.py has no `stages` at all. Zeros would read as "a
+       request that never went out"; say there is nothing to show. */
+    if (!q.stages) return `<span class="stage">— (this live.py reports no stage counters; update it)</span>`;
+    const st = q.stages, w = st.wire || {};
+    const skipped = [];
+    if (st.skipped_resting) skipped.push(`${st.skipped_resting} resting`);
+    if (st.skipped_retired) skipped.push(`${st.skipped_retired} retired`);
+    /* `decode_failed` is a subset of `positive` (a frame that fitted
+       the request and the mapping could not read), not another
+       outcome beside it - so it is shown inside the positive count. */
+    const positive = st.positive_response
+      ? `positive <b>${n(st.positive_response)}</b>`
+        + (st.decode_failed ? ` (of which <b>${n(st.decode_failed)}</b> decode failed)` : "")
+      : "";
+    const outcomes = [
+      ["negative (NRC)", st.negative_response],
+      ["timeout", st.timeout], ["nack", st.nack],
+      ["no answer in batch", st.no_response], ["late", st.late],
+    ].filter(([, v]) => v).map(([k, v]) => `${k} <b>${n(v)}</b>`);
+    if (positive) outcomes.unshift(positive);
+    const setup = w.setup_tx_frames || w.setup_rx_frames || w.setup_faults
+      ? ` (+ setup <b>${n(w.setup_tx_frames)}</b> tx / <b>${n(w.setup_rx_frames)}</b> rx`
+        + (w.setup_faults ? `, <b>${w.setup_faults}</b> failed in setup` : "") + ")"
+      : "";
+    const lat = q.latency_ms;
+    const ref = q.refresh_s;
+    return `<span class="stage">scheduled <b>${n(st.scheduled)}</b>`
+      + `<span class="arrow">→</span>submitted <b>${n(st.submitted)}</b>`
+      + (skipped.length ? ` (skipped: ${skipped.join(", ")})` : "")
+      + `<span class="arrow">→</span>wire <b>${n(w.exchanges)}</b> exchanges, `
+      + `<b>${n(w.tx_frames)}</b> tx / <b>${n(w.rx_frames)}</b> rx frames${setup}</span>`
+      + `<span class="stage">outcome: ${outcomes.length ? outcomes.join(" · ") : "nothing yet"}</span>`
+      + `<span class="stage">signals: decoded <b>${n(st.decoded_signals)}</b>`
+      + `<span class="arrow">→</span>accepted <b>${n(st.accepted_signals)}</b>`
+      + `<span class="arrow">→</span>stored `
+      + (st.persisted_signals == null ? "<b>—</b> (not recording)" : `<b>${n(st.persisted_signals)}</b>`)
+      + (st.all_rejected
+          ? ` · <span class="tick no">${st.all_rejected} answer${st.all_rejected === 1 ? "" : "s"} with every signal rejected`
+            + (st.last_rejection ? ` (${escape_(st.last_rejection.join(", "))})` : "") + `</span>`
+          : "")
+      + `</span>`
+      + `<span class="stage">latency: `
+      + (lat ? `avg <b>${ms(lat.avg)}</b> · p95 <b>${ms(lat.p95)}</b> (last ${lat.window}) · last <b>${ms(lat.last)}</b>` : "—")
+      + ` · last tx <b>${secs(q.last_tx_age)}</b> ago · last rx <b>${secs(q.last_rx_age)}</b> ago</span>`
+      + `<span class="stage">refresh: declared <b>${secs(q.period_s)}</b> · measured `
+      + (ref ? `median <b>${secs(ref.median)}</b> · avg <b>${secs(ref.avg)}</b> · max <b>${secs(ref.max)}</b> (last ${ref.window}) · last <b>${secs(ref.last)}</b> (over ${ref.n} refreshes)` : "<b>—</b>")
+      + `</span>`;
+  };
 
   $("carrequests").innerHTML =
     `<thead><tr><th>request</th><th>where</th><th>every</th>
-      <th>sent</th><th>ok</th><th>fail</th><th>rate</th><th>last error</th>
+      <th>asked</th><th>ok</th><th>fail</th><th>rate</th><th>state · last error</th>
       </tr></thead><tbody>`
-    + reqs.map(q => {
-        const dead = q.sent && !q.ok;
+    + reqs.map((q, i) => {
+        const st = q.stages || {};
+        const submitted = st.submitted == null ? q.sent : st.submitted;
+        const dead = q.state === "retired" || (submitted && !q.ok);
         const rate = q.success_pct == null ? "—" : q.success_pct + "%";
         const cls = q.success_pct == null ? "" :
           q.success_pct > 98 ? "ok" : q.success_pct > 90 ? "warn" : "bad";
@@ -1960,17 +2070,44 @@ function renderCar(d) {
            would read as a hung page. */
         const resting = q.resting_for
           ? `resting ~${Math.ceil(q.resting_for)}s after `
-            + `${q.consecutive_faults} fault${q.consecutive_faults === 1 ? "" : "s"} · `
+            + `${q.consecutive_faults} fault${q.consecutive_faults === 1 ? "" : "s"}`
           : "";
-        return `<tr class="${dead ? "rowbad" : ""}">
+        const every = q.period_s == null ? "—"
+          : q.refresh_s && q.refresh_s.median != null
+            ? `${secs(q.period_s)} → ${secs(q.refresh_s.median)}`
+            : secs(q.period_s);
+        const state = q.state === "retired"
+          ? `<span class="tick no">retired</span> `
+          : resting ? `<span class="tick no">${escape_(resting)}</span> `
+          : q.state === "idle" ? `<span class="sub">idle</span> ` : "";
+        return `<tr class="reqrow ${dead ? "rowbad" : ""}" data-i="${i}">
           <td class="k">${escape_(q.id)}</td>
           <td>${what}</td>
-          <td>${q.period_s == null ? "—" : q.period_s + "s"}</td>
-          <td>${q.sent}</td><td>${q.ok}</td><td>${q.failed}</td>
+          <td>${every}</td>
+          <td>${n(submitted)}</td><td>${n(q.ok)}</td><td>${n(q.failed)}</td>
           <td class="${cls}">${rate}</td>
-          <td>${q.resting_for ? `<span class="tick no">${escape_(resting.slice(0, -3))}</span> ` : ""}${q.late ? `<span class="tick no">${q.late} late</span> ` : ""}${q.ambiguous ? `<span class="tick no">${q.ambiguous} stale</span> ` : ""}${faultText(q.last_detail) ? `<span class="tick no">${escape_(faultText(q.last_detail))}</span> ` : ""}${escape_(q.last_error || "")}</td></tr>`;
+          <td>${state}${st.all_rejected ? `<span class="tick no">${st.all_rejected} all rejected</span> ` : ""}${q.late ? `<span class="tick no">${q.late} late</span> ` : ""}${q.ambiguous ? `<span class="tick no">${q.ambiguous} stale</span> ` : ""}${faultText(q.last_detail) ? `<span class="tick no">${escape_(faultText(q.last_detail))}</span> ` : ""}${escape_(q.last_error || "")}</td></tr>
+          <tr class="reqdetail" data-i="${i}"><td colspan="8">${detail(q)}</td></tr>`;
       }).join("")
     + `</tbody>`;
+
+  /* Tap a summary row to open its pipeline. Rows opened before a
+     refresh stay open across it: the table is rebuilt whenever the tab
+     is (re)opened - `loadCar(true)` on every switch to it, never on the
+     system poll - and a detail that closed itself under your thumb
+     would be unreadable. */
+  for (const row of $("carrequests").querySelectorAll("tr.reqrow")) {
+    const id = reqs[row.dataset.i].id;
+    if (openRequests.has(id)) {
+      row.classList.add("open");
+      row.nextElementSibling.classList.add("open");
+    }
+    row.onclick = () => {
+      const open = row.classList.toggle("open");
+      row.nextElementSibling.classList.toggle("open", open);
+      if (open) openRequests.add(id); else openRequests.delete(id);
+    };
+  }
 
   const why = {
     ecu_mismatch: "Mapping files for another ECU or variant",
@@ -2002,15 +2139,22 @@ function renderCar(d) {
     return bad.map(([q, n]) => `${escape_(q)} ${n}`).join(", ");
   };
 
+  /* `rows` is what reached SQLite for this channel, this process - the
+     last stage, distinct from "logged" (whether it is meant to be). A
+     dash means nothing is recording. `every` is the measured refresh
+     of the request that carries the channel; derived channels have no
+     exchange of their own. */
   $("carchannels").innerHTML =
     `<thead><tr><th>channel</th><th>unit</th><th>from</th>
-      <th>v</th><th>stored</th><th>quality</th><th>value</th></tr></thead><tbody>`
-    + (d.channels || []).map(c => `<tr>
+      <th>v</th><th>every</th><th>stored</th><th>rows</th><th>quality</th><th>value</th></tr></thead><tbody>`
+    + (d.channels || []).map(c => `<tr class="${c.state === "retired" ? "rowbad" : ""}">
         <td class="k">${escape_(c.key)}</td>
         <td>${escape_(c.unit || "")}</td>
-        <td>${escape_(c.derived ? "derived" : c.request)}</td>
+        <td>${escape_(c.derived ? "derived" : c.request)}${c.state === "retired" ? ' <span class="tick no">retired</span>' : ""}</td>
         <td>${c.version == null ? "—" : c.version}</td>
+        <td>${c.refresh_s && c.refresh_s.median != null ? secs(c.refresh_s.median) : "—"}</td>
         <td class="${c.logged ? "" : "warn"}">${c.logged ? "yes" : "no"}</td>
+        <td>${c.persisted == null ? "—" : n(c.persisted)}</td>
         <td class="${c.flagged ? "warn" : ""}">${qcell(c)}</td>
         <td>${c.value == null ? "—" : escape_(String(c.value))}</td>
         </tr>`).join("")

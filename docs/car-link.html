@@ -991,6 +991,71 @@ targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</sp
         written again. Otherwise a 60-second channel would look like it was
         sampled at 10 Hz.
       </div>
+
+      <h3 style="margin-top:28px">What one request goes through</h3>
+      <p class="whereami">execute.py · stats() → live.py · /api/diagnostics · requests[].stages</p>
+      <p>
+        Every request carries a count at each of these points, and each name
+        means exactly one thing. "sent 590" used to mean any of the first
+        four; now it is <code>submitted</code> and nothing else.
+      </p>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Stage</th><th>Counted when</th><th>Not to be confused with</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">scheduled</td><td><code>due()</code> handed the request to the executor</td><td>a resting or retired request is scheduled every cycle and never goes out</td></tr>
+            <tr><td class="mono">submitted</td><td>it was actually put on the wire this cycle (the historical name <code>sent</code> is kept as an alias)</td><td><code>skipped_resting</code> / <code>skipped_retired</code> are the difference. <code>submitted</code> and <code>wire.exchanges</code> are not the same number, in either direction: one submission is <em>several</em> exchanges when an OBD batch is refused and re-read PID by PID (or answered without a PID, which the reader re-reads singly), and it is <em>zero</em> exchanges when the F303 define that arms a dynamic read fails — the poll never goes out, and the fault is a <code>setup_fault</code></td></tr>
+            <tr><td class="mono">wire.exchanges / tx_frames / rx_frames</td><td>frames, <em>attributed</em>: six OBD PIDs in one frame count once for each of the six requests; the physical count is <code>totals.wire</code>, once per frame. <code>rx_frames</code> is what a failed exchange actually received: an NRC or a NACK is one frame, a pending timeout is its <code>responsePending</code> frames, a plain timeout is none</td><td>F303 setup frames (<code>2C 03</code> clear, <code>2C 01</code> define) are counted apart as <code>setup_tx_frames</code> / <code>setup_rx_frames</code> — a read that arms is three frames, not one — and a define the ECU refuses is a <code>setup_fault</code> <em>and</em> a setup frame received</td></tr>
+            <tr><td class="mono">positive_response</td><td>a frame fitting the request came back</td><td>counted <em>before</em> decoding, so it can exceed <code>ok</code></td></tr>
+            <tr><td class="mono">negative_response / timeout / nack / no_response</td><td>what came back instead, by outcome. <code>no_response</code> is an OBD batch answered without this PID — in the error stream it is <code>batch_omitted</code> when the single re-read in the same cycle delivered the PID (the reader adapting, once per connection) and <code>no_response</code> when it did not; the others are the fault kinds below</td><td>a NACK or an NRC <em>is</em> a received frame (it counts in <code>rx_frames</code>); an NRC has a latency, a NACK does not (the gateway answered, not the ECU); a timeout has neither — and a pending timeout has the <code>0x78</code> frames but no latency, because nothing was answered to time</td></tr>
+            <tr><td class="mono">decode_failed / late</td><td><code>decode_failed</code> is a <em>subset</em> of <code>positive_response</code>: a frame that fitted the request and the mapping could not read (<code>ok + decode_failed = positive_response</code>). <code>late</code> is an answer that arrived after its request had timed out</td><td>neither is a fifth outcome beside the four above — the admin panel shows decode failures inside the positive count for that reason</td></tr>
+            <tr><td class="mono">decoded_signals</td><td>values the mapping produced from the response</td><td></td></tr>
+            <tr><td class="mono">accepted_signals</td><td>of those, the ones quality let through (<code>ok</code>)</td><td><code>all_rejected</code> counts positive responses whose <em>every</em> signal was a sentinel or saturated — the case that looks like a clean <code>ok</code> from the request counters — with the labels in <code>last_rejection</code></td></tr>
+            <tr><td class="mono">persisted_signals</td><td>rows committed to SQLite for this request's channels, counted by the writer thread after the commit</td><td><code>null</code> when nothing is recording — not zero, which would read as "decoded but lost"</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p style="margin-top:16px">
+        Beside the counts: <code>last_tx</code> / <code>last_rx</code> (as
+        ages), <code>latency_ms</code> (average over the session, p95 and
+        median over the last 32 answered exchanges — a fixed ring, a few
+        microseconds per request) and <code>refresh_s</code>, the
+        <strong>measured</strong> interval between successful decodes on the
+        monotonic clock. A <code>dde_dyn</code> member declares 0.5 s and is
+        refreshed about every 11 s by the rotation; <code>sampling</code> mode
+        goes quiet for ten minutes at a time. The declared period says what
+        was asked for; only the measured one says what a dataset has. The
+        median over the last 16 is what the channel does while it is polling;
+        the pause is <code>last</code> until the next decode and
+        <code>max</code> of the window for the 16 refreshes after it.
+      </p>
+
+      <div class="aside" style="margin-top:20px">
+        <b>Retired is not "asked and unanswered".</b> An OBD PID the ECU
+        ignores three times in a row is retired for the connection — never
+        asked again, so it stops costing a timeout every cycle. It is still
+        scheduled (the plan does not know), but it is not submitted, not a
+        frame, not a fault. Its <code>state</code> says <code>retired</code>
+        and one <code>retired</code> record with the strike count goes to the
+        error stream; before, it kept counting as sent and unanswered on every
+        cycle it was never asked, and its faults — real timeouts — were
+        recorded as <code>no_response</code>.
+        <br><br>
+        <b>The two paths differ here, deliberately.</b> A UDS request that
+        keeps failing <em>rests</em> (a growing pause, then it is tried
+        again — <code>skipped_resting</code>); an OBD PID that strikes out is
+        <em>retired</em> for the connection and is not tried again. There is
+        no un-retirement short of a reconnect: the OBD set is standard
+        SAE PIDs the ECU either advertises or does not, so a PID that
+        ignored three requests is not going to start answering, whereas a
+        DDE identifier can stop answering for a while (a sleeping
+        transmission, a busy ECU) and come back. If a PID is retired that
+        should not be, the fix is to reconnect, not to wait.
+      </div>
     </div>
   </section>
 
@@ -1019,6 +1084,7 @@ targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</sp
             <tr><td class="mono">decode</td><td>bytes arrived but the mapping could not read them</td><td>record — this is a mapping bug</td></tr>
             <tr><td class="mono">late_response</td><td>the answer to a request that had already timed out arrived — recorded under <em>that</em> request</td><td>discard, count on the request's <code>late</code>, carry on</td></tr>
             <tr><td class="mono">unexpected_response</td><td>a frame matching nothing asked (under the pseudo-id <code>hsfz:0x12</code>)</td><td>discard, count, trace, carry on</td></tr>
+            <tr><td class="mono">retired</td><td>an OBD PID struck out (three consecutive faults) and will not be asked again this connection — a state change, recorded once with the strike count, not another fault</td><td>stop asking; the request reads <code>state: retired</code></td></tr>
           </tbody>
         </table>
       </div>
