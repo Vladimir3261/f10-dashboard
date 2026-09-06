@@ -52,11 +52,16 @@ sources:
     license:
       id: unknown
       commercial_runtime_copy_allowed: false
+      bulk_redistribution: withheld
       notes: >
         No license attached to the gist. Content is a structured export of
         BMW SGBD measurement data (SG_FUNKTIONEN-shaped) - both the gist
         license and the underlying database right are unresolved. Treat
-        derived bulk output as non-redistributable until reviewed.
+        derived bulk output as non-redistributable until reviewed:
+        `bulk_redistribution: withheld` keeps the mechanically derived
+        rows out of the tracked tree (normalized output is gitignored and
+        regenerated locally; the coverage report counts them instead of
+        listing them) - only rows given a normalized name are reproduced.
     trust:
       tier: B
       primary_evidence: [sgbd_derived_table]

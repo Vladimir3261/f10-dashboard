@@ -2,10 +2,12 @@
 The source manifest: pins and license metadata are mandatory.
 """
 
+import os
 import unittest
 
 from tests import support  # noqa: F401
 
+from research import reports_gen
 from research.manifest import (
     check_source_ids,
     load_manifest,
@@ -32,6 +34,59 @@ class Manifest(unittest.TestCase):
                          "unknown")
         self.assertEqual(self.sources["bmw-xdfs-testo"]["license"]["id"],
                          "unknown")
+
+    def test_bulk_derivative_of_the_gist_is_withheld(self):
+        """
+        The gist's licence is unresolved, so its mechanical derivative
+        never enters the tracked tree: the manifest says so, the
+        normalized output is gitignored, and the coverage report counts
+        the unnamed rows instead of listing them.
+        """
+        self.assertEqual(
+            self.sources["morguux-d73n47a0"]["license"]["bulk_redistribution"],
+            "withheld",
+        )
+        self.assertEqual(reports_gen.withheld_sources(self.sources),
+                         {"morguux-d73n47a0"})
+
+        with open(os.path.join(support.ROOT, ".gitignore"), encoding="utf-8") as handle:
+            self.assertIn("/research/normalized/**/*.jsonl", handle.read())
+
+    def test_coverage_report_counts_withheld_rows_and_lists_named_ones(self):
+        def row(record_id, source_id, name=None):
+            return ResearchRecord(
+                record_id=record_id, record_type="signal_definition",
+                source_id=source_id, evidence_tier="B",
+                verification="discovered", safety="unknown",
+                normalized_signal=name,
+                source={"source_record": f"SRC_{record_id}",
+                        "source_identifier": "0x0424"},
+                applicability={"sgbd": "D73N47A0"},
+                request={"completeness": "unknown"},
+                license={"source_license": "unknown"},
+            )
+
+        records = [
+            row("g.named", "morguux-d73n47a0", "dpf.differential_pressure"),
+            row("g.bulk1", "morguux-d73n47a0"),
+            row("g.bulk2", "morguux-d73n47a0"),
+            row("w.unnamed", "wican-issue-752"),
+        ]
+        gate = {r.record_id: ["target"] for r in records}
+        text = reports_gen.coverage_report(records, gate, self.sources)
+
+        self.assertIn("SRC_g.named", text)
+        self.assertIn("SRC_w.unnamed", text)
+        self.assertNotIn("SRC_g.bulk1", text)
+        self.assertNotIn("SRC_g.bulk2", text)
+        self.assertIn("**2** rows from `morguux-d73n47a0`", text)
+        self.assertIn("2 unlisted `morguux-d73n47a0` rows", text)
+        self.assertIn("Signal-definition records: **4**", text)
+
+        # Without the manifest nothing is withheld - the flag is data.
+        everything = reports_gen.coverage_report(records, gate)
+        self.assertIn("SRC_g.bulk1", everything)
+        self.assertNotIn("unlisted", everything)
 
     def test_restrictive_licenses_are_marked_no_runtime_copy(self):
         for source_id in ("klartext", "ediabaslib", "ediabasx", "bimmerz-box"):

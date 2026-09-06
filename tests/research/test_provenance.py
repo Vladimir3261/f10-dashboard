@@ -3,18 +3,28 @@ Provenance: every record carries its origin, and labels distinguish
 source facts from our inference.
 """
 
+import contextlib
+import io
 import json
 import os
+import tempfile
 import unittest
 
 from tests import support  # noqa: F401
 
+from research import build
 from research.build import _f10_field_records, _obdb_records
 from research.importers import klartext_f25, wican_issue_fixture
 from research.manifest import check_source_ids, load_manifest
 from research.model import FACT_LABELS, validate_record
 
 NORMALIZED = os.path.join(support.ROOT, "research", "normalized", "n47")
+
+NO_NORMALIZED = (
+    "research/normalized/n47/signals.jsonl is not generated (gitignored; "
+    "needs the source cache: python3 -m research.build - see "
+    "research/normalized/README.md)"
+)
 
 
 def evidence_records():
@@ -73,29 +83,76 @@ class Provenance(unittest.TestCase):
                 record.verification, "locally_verified", record.record_id
             )
 
-    def test_original_source_names_stay_queryable(self):
-        """PFltLd_* / STAT_*_WERT survive into the committed output."""
+    def test_evidence_only_output_round_trips(self):
+        """
+        The committed evidence alone builds valid, sorted, reloadable
+        JSONL - this is the part of the pipeline CI can prove without
+        the source cache.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                build.write_normalized(self.records, tmp)
+
+            files = sorted(os.listdir(tmp))
+            self.assertEqual(
+                files, ["evidence.jsonl", "jobs.jsonl", "requests.jsonl",
+                        "signals.jsonl"],
+            )
+
+            with open(os.path.join(tmp, "signals.jsonl"), encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+
+            self.assertEqual(lines, sorted(lines))
+            ids = [json.loads(line)["record_id"] for line in lines]
+            self.assertEqual(len(ids), len(set(ids)))
+
+            for row in (json.loads(line) for line in lines):
+                self.assertIn("source_id", row)
+                self.assertIn("license", row)
+
+            reloaded = build.load_normalized(tmp)
+
+        self.assertEqual(
+            sorted(reloaded, key=lambda r: r.record_id),
+            sorted(self.records, key=lambda r: r.record_id),
+        )
+
+    # -- the full normalized output (gitignored, needs the cache) --------
+    #
+    # These two skip when it has not been generated. The skip is visible
+    # in the runner output on purpose: a green suite with no cache says
+    # nothing about the cached importers.
+
+    def _full_signals(self):
         path = os.path.join(NORMALIZED, "signals.jsonl")
 
         if not os.path.isfile(path):
-            self.skipTest("normalized output not generated")
+            self.skipTest(NO_NORMALIZED)
 
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
+
+        if '"source_id": "morguux-d73n47a0"' not in text:
+            self.skipTest(
+                "research/normalized/n47/signals.jsonl is an --evidence-only "
+                "build (no cached sources) - the full-output checks need "
+                "python3 -m research.build with the source cache"
+            )
+
+        return text
+
+    def test_original_source_names_stay_queryable(self):
+        """PFltLd_* / STAT_*_WERT survive into the generated output."""
+        text = self._full_signals()
 
         for needle in ("PFltLd_mSotSimCont", "PFltLd_mSotMeas",
                        "STAT_MOTOROEL_TEMPERATUR_WERT"):
             self.assertIn(needle, text, needle)
 
     def test_normalized_output_is_valid_sorted_jsonl(self):
-        path = os.path.join(NORMALIZED, "signals.jsonl")
+        lines = self._full_signals().splitlines()
 
-        if not os.path.isfile(path):
-            self.skipTest("normalized output not generated")
-
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-
+        self.assertEqual(lines, sorted(lines))
         ids = [json.loads(line)["record_id"] for line in lines]
         self.assertEqual(len(ids), len(set(ids)))
 

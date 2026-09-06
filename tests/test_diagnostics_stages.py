@@ -457,6 +457,9 @@ class SetupFramesAreNotThePoll(unittest.TestCase):
         self.assertEqual(st["tx_frames"], 0)
         self.assertEqual(st["timeout"], 1)
         self.assertEqual(st["failed"], 1)
+        #: and the session-level wire dict carries the fault too - it is
+        #: the key the admin page's "(N failed)" reads (#36 leftover).
+        self.assertEqual(self.executor.wire_stats()["setup_faults"], 1)
 
     def test_a_negative_response_is_a_received_frame_with_a_latency(self):
         from bmwdiag.errors import NegativeResponse
@@ -562,6 +565,7 @@ class SetupFramesAreNotThePoll(unittest.TestCase):
         self.assertIsNone(st["latency_ms"])
         wire = executor.wire_stats()
         self.assertEqual(wire["setup_rx_frames"], 1)
+        self.assertEqual(wire["setup_faults"], 1)
         self.assertEqual(wire["rx_frames"], 0)
 
 

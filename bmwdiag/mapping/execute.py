@@ -240,6 +240,11 @@ def fault_kind(exc: BaseException) -> str:
     and are not renamed; finer distinctions travel in `fault_detail()`.
     `retired` (issue #16) is the one state change recorded through the
     same stream: an OBD PID struck out and will not be asked again.
+    `batch_omitted` (issue #16) is `no_response`'s one-off sibling: the
+    batch left the PID out but the same-cycle re-read delivered it - the
+    reader adapting to an ECU that will not batch, not a PID the car is
+    withholding. Both count on the `no_response` outcome; only the kind
+    tells them apart, which is why it exists.
     A mapping error that is not a decode failure (a loader problem
     surfacing at poll time) is still reported as `decode`: it is our data,
     not the car, and that is what the kind has always meant.
@@ -431,7 +436,7 @@ class MappingExecutor:
         #
         self._wire: Dict[str, int] = {
             "exchanges": 0, "tx_frames": 0, "rx_frames": 0,
-            "setup_tx_frames": 0, "setup_rx_frames": 0,
+            "setup_tx_frames": 0, "setup_rx_frames": 0, "setup_faults": 0,
             "obd_batches": 0, "obd_batched_pids": 0,
         }
         #: PIDs the OBD reader has retired, mirrored here so a request
@@ -1166,6 +1171,7 @@ class MappingExecutor:
                     #
                     stat["setup_faults"] += 1
                     stat["setup_rx_frames"] += rx
+                    self._wire["setup_faults"] += 1
                     self._wire["setup_rx_frames"] += rx
                 else:
                     if rx:
