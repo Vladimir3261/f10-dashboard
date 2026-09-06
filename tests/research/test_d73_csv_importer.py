@@ -144,7 +144,11 @@ class FullCsv(unittest.TestCase):
 
     def setUp(self):
         if not os.path.isfile(CACHE):
-            self.skipTest("source cache not populated")
+            self.skipTest(
+                "local/research-cache/gists/morguux/D73N47A0.csv is not "
+                "present (gitignored source cache; fetch commands in "
+                "research/sources/README.md)"
+            )
 
         with open(CACHE, encoding="utf-8") as handle:
             self.text = handle.read()

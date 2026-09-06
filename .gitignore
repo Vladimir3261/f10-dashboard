@@ -25,6 +25,16 @@ telemetry_json/
 # the gateway. The VIN-redacted copies under validation-runs/ ARE tracked.
 /local/validation-runs-raw/
 
+# ------------------------------------------------------- research output
+#
+# The normalized research records are a mechanical derivative of sources
+# whose licence is unresolved (the manifest marks them
+# `license.bulk_redistribution: withheld`; see
+# research/reports/legal-and-license-notes.md). They are regenerated
+# from the gitignored source cache with `python3 -m research.build` and
+# never committed. The README next to them IS tracked.
+/research/normalized/**/*.jsonl
+
 # ------------------------------------------------------------- python
 __pycache__/
 *.py[cod]

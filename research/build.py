@@ -1,28 +1,47 @@
 """
 Pipeline orchestrator: sources -> normalized records -> reports.
 
-    python3 -m research.build
+    python3 -m research.build                  # full build (needs the cache)
+    python3 -m research.build --evidence-only  # committed evidence only
+    python3 -m research.build --reports-only   # reports from existing output
 
 Reads the pinned source cache under local/research-cache/ (see
 research/sources/README.md for how to populate it), runs every importer,
 validates all records against the model and the manifest, runs the
 candidate gate and conflict detection, and rewrites:
 
-    research/normalized/n47/signals.jsonl
-    research/normalized/n47/requests.jsonl
-    research/normalized/n47/jobs.jsonl
-    research/normalized/n47/evidence.jsonl
-    research/reports/n47-coverage.md
-    research/reports/n47-conflicts.md
+    research/normalized/n47/signals.jsonl      (gitignored)
+    research/normalized/n47/requests.jsonl     (gitignored)
+    research/normalized/n47/jobs.jsonl         (gitignored)
+    research/normalized/n47/evidence.jsonl     (gitignored)
+    research/reports/n47-coverage.md           (tracked)
+    research/reports/n47-conflicts.md          (tracked)
 
 Output is deterministic: identical inputs produce byte-identical files.
 The narrative reports are hand-maintained and not touched here.
+
+The normalized output is NOT tracked: the bulk of it is a mechanical
+derivative of a source whose licence is unresolved (see
+research/reports/legal-and-license-notes.md and the manifest's
+`license.bulk_redistribution: withheld`), so it lives only in a local
+checkout and is regenerated on demand. The tracked reports list only the
+rows that carry a normalized name and count the rest.
+
+`--evidence-only` runs the same validation, gate and conflict stages on
+the committed evidence alone (no cache, no network) and writes the
+normalized output for those records; it does not touch the reports,
+which would otherwise silently lose the cached sources. It is the check
+CI runs. `--reports-only` reloads the existing normalized output and
+rewrites the two generated reports without re-importing anything - and
+refuses (exit 1, reports untouched) when that output is an
+evidence-only build, for the same reason; `--force` overrides.
 """
 
+import argparse
 import hashlib
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from bmwdiag.mapping import yamlsubset
 
@@ -37,7 +56,12 @@ from .importers import (
     wican_issue_fixture,
 )
 from .manifest import check_source_ids, load_manifest, load_relationships
-from .model import ResearchRecord, records_to_jsonl, validate_record
+from .model import (
+    ResearchRecord,
+    records_from_jsonl,
+    records_to_jsonl,
+    validate_record,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "local", "research-cache")
@@ -50,6 +74,24 @@ CACHE_FILES = {
     "motor_ccpage": os.path.join(CACHE, "ediabaslib", "Motor.ccpage"),
     "customjobs": os.path.join(CACHE, "bmwxdfs", "customjobs.xml"),
 }
+
+#: The source ids only a full build (with the cache) can produce. A
+#: normalized set that lacks any of them is an --evidence-only build,
+#: and the tracked reports must not be regenerated from it: they cover
+#: the cached sources too, and would silently lose them.
+CACHED_SOURCE_IDS = frozenset({
+    d73n47_csv.SOURCE_ID,
+    deep_obd_xml.SOURCE_ID,
+    test_o_customjobs.SOURCE_ID,
+})
+
+#: Normalized output files by record type, in write order.
+BUCKETS = (
+    ("signals.jsonl", "signal_definition"),
+    ("requests.jsonl", "request_evidence"),
+    ("jobs.jsonl", "job_definition"),
+    ("evidence.jsonl", "raw_exchange"),
+)
 
 #: Hand-written narrative for the conflict report; the table below it is
 #: generated. Kept here so one command rewrites the whole file coherently.
@@ -333,12 +375,34 @@ def collect_records(strict: bool = True) -> List[ResearchRecord]:
     return records
 
 
-def main() -> int:
-    sources = load_manifest()
-    relationships = load_relationships()
-    records = collect_records(strict=True)
+def missing_cached_sources(records: List[ResearchRecord]) -> List[str]:
+    """Cached source ids absent from `records`: non-empty means partial."""
+    present = {r.source_id for r in records}
 
-    # -- validation ---------------------------------------------------
+    return sorted(CACHED_SOURCE_IDS - present)
+
+
+def load_normalized(directory: str = NORMALIZED) -> List[ResearchRecord]:
+    """Reload every record from an existing normalized directory."""
+    records: List[ResearchRecord] = []
+
+    for name, _ in BUCKETS:
+        path = os.path.join(directory, name)
+
+        if not os.path.isfile(path):
+            raise SystemExit(
+                f"[!] {path} is missing - run `python3 -m research.build` "
+                "(with the source cache) or `--evidence-only` first"
+            )
+
+        with open(path, encoding="utf-8") as handle:
+            records += records_from_jsonl(handle.read())
+
+    return records
+
+
+def check_records(records: List[ResearchRecord], sources) -> List[str]:
+    """Model validation, manifest cross-check and id uniqueness."""
     problems: List[str] = []
 
     for record in records:
@@ -347,17 +411,105 @@ def main() -> int:
 
     problems += check_source_ids(records, sources)
 
-    if problems:
-        for problem in problems:
-            print(f"[!] {problem}", file=sys.stderr)
-
-        return 1
-
     ids = [r.record_id for r in records]
 
     if len(ids) != len(set(ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
-        print(f"[!] duplicate record ids: {dupes}", file=sys.stderr)
+        problems.append(f"duplicate record ids: {dupes}")
+
+    return problems
+
+
+def write_normalized(records: List[ResearchRecord], directory: str = NORMALIZED) -> None:
+    os.makedirs(directory, exist_ok=True)
+
+    for name, record_type in BUCKETS:
+        bucket = [r for r in records if r.record_type == record_type]
+        path = os.path.join(directory, name)
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(records_to_jsonl(bucket))
+
+        print(f"[+] wrote {path} ({len(bucket)} records)")
+
+
+def write_reports(records, gate_results, found, sources, directory: str = REPORTS) -> None:
+    os.makedirs(directory, exist_ok=True)
+
+    with open(os.path.join(directory, "n47-coverage.md"), "w",
+              encoding="utf-8") as handle:
+        handle.write(reports_gen.coverage_report(records, gate_results, sources))
+
+    with open(os.path.join(directory, "n47-conflicts.md"), "w",
+              encoding="utf-8") as handle:
+        handle.write(reports_gen.conflicts_report(found, CONFLICT_NARRATIVE))
+
+    print(f"[+] wrote {directory}/n47-coverage.md and n47-conflicts.md")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m research.build",
+        description="Rebuild the normalized research records and the generated reports.",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--evidence-only", action="store_true",
+        help="import the committed evidence only (no source cache needed); "
+             "writes the normalized output for those records, leaves the "
+             "reports alone",
+    )
+    mode.add_argument(
+        "--reports-only", action="store_true",
+        help="rewrite the generated reports from the existing normalized "
+             "output without re-importing anything; refuses when that "
+             "output is an --evidence-only build (see --force)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="with --reports-only: rewrite the reports even from a partial "
+             "(evidence-only) normalized set - the tracked reports then "
+             "lose every cached source",
+    )
+    args = parser.parse_args(argv)
+
+    sources = load_manifest()
+    relationships = load_relationships()
+
+    if args.reports_only:
+        records = load_normalized(NORMALIZED)
+        missing = missing_cached_sources(records)
+
+        if missing and not args.force:
+            print(
+                "[!] --reports-only refused: the normalized output is a "
+                "partial (--evidence-only) build - it has no records from "
+                f"{', '.join(missing)}, so the tracked reports would lose "
+                "every cached source. Run the full build with the source "
+                "cache (research/sources/README.md), or pass --force to "
+                "rewrite them anyway.",
+                file=sys.stderr,
+            )
+
+            return 1
+
+        if missing:
+            print(f"[!] --force: rewriting the reports without {', '.join(missing)}",
+                  file=sys.stderr)
+    else:
+        records = collect_records(strict=not args.evidence_only)
+
+    # Order is part of the contract: conflict pairs are reported (a, b)
+    # in record order, so every mode must see the same order.
+    records.sort(key=lambda r: r.record_id)
+
+    # -- validation ---------------------------------------------------
+    problems = check_records(records, sources)
+
+    if problems:
+        for problem in problems:
+            print(f"[!] {problem}", file=sys.stderr)
+
         return 1
 
     # -- gate + conflicts --------------------------------------------
@@ -368,34 +520,15 @@ def main() -> int:
     found = conflicts_mod.detect_conflicts(records)
     confirmed = conflicts_mod.confirmations(records, relationships)
 
-    # -- write normalized --------------------------------------------
-    os.makedirs(NORMALIZED, exist_ok=True)
+    # -- write --------------------------------------------------------
+    if not args.reports_only:
+        write_normalized(records, NORMALIZED)
 
-    buckets = {
-        "signals.jsonl": [r for r in records if r.record_type == "signal_definition"],
-        "requests.jsonl": [r for r in records if r.record_type == "request_evidence"],
-        "jobs.jsonl": [r for r in records if r.record_type == "job_definition"],
-        "evidence.jsonl": [r for r in records if r.record_type == "raw_exchange"],
-    }
-
-    for name, bucket in buckets.items():
-        path = os.path.join(NORMALIZED, name)
-
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(records_to_jsonl(bucket))
-
-        print(f"[+] wrote {path} ({len(bucket)} records)")
-
-    # -- write generated reports -------------------------------------
-    os.makedirs(REPORTS, exist_ok=True)
-
-    with open(os.path.join(REPORTS, "n47-coverage.md"), "w",
-              encoding="utf-8") as handle:
-        handle.write(reports_gen.coverage_report(records, gate_results))
-
-    with open(os.path.join(REPORTS, "n47-conflicts.md"), "w",
-              encoding="utf-8") as handle:
-        handle.write(reports_gen.conflicts_report(found, CONFLICT_NARRATIVE))
+    if args.evidence_only:
+        print("[i] --evidence-only: reports not rewritten (they cover the "
+              "cached sources too)")
+    else:
+        write_reports(records, gate_results, found, sources, REPORTS)
 
     eligible = sorted(k for k, v in gate_results.items() if not v)
 

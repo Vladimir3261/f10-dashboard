@@ -1028,8 +1028,31 @@ class DiagnosticsProxy(AdminCase):
         self.assertIn("reports no stage counters", page)
         self.assertIn("decode failed)", page)
         self.assertNotIn('["decode failed", st.decode_failed]', page)
-        self.assertIn("t.wire.setup_faults", page)
         self.assertNotIn("rebuilt every poll", page)
+
+    def test_every_session_wire_key_the_page_reads_is_produced(self):
+        """
+        #36 leftover: the session line read `t.wire.setup_faults` for its
+        "(N failed)" suffix, but the executor's session-level wire dict
+        had no such key, so the suffix could never render. Pin the
+        contract at the producer: every `t.wire.<key>` the page reads
+        must be a key `MappingExecutor.wire_stats()` returns (which is
+        what live.py puts in `totals.wire`), and a failed setup define
+        must actually put a count under it.
+        """
+        import re
+
+        from bmwdiag.mapping.execute import MappingExecutor
+
+        page = self.get("/").read().decode()
+        read_keys = set(re.findall(r"\bt\.wire\.([a-z_]+)", page))
+        self.assertIn("setup_faults", read_keys)
+
+        wire = MappingExecutor(None, targets={"x": 0}).wire_stats()
+
+        self.assertEqual(read_keys - set(wire), set(),
+                         "page reads wire keys the executor never produces")
+        self.assertEqual(wire["setup_faults"], 0)
 
 
 class DeploymentFiles(unittest.TestCase):

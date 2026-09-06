@@ -161,6 +161,13 @@ Tier-D (untraceable) claims never generate anything executable.
 python3 -m research.build       # re-import, regenerate normalized data + reports
 ```
 
+The normalized records themselves (`research/normalized/n47/*.jsonl`)
+are generated, gitignored and rebuilt from a local source cache: the
+bulk of them derive from a licence-unknown export of a BMW SGBD table,
+which this repository does not redistribute. The tracked, reviewable
+view is the generated coverage report. Details:
+`research/normalized/README.md`, `research/reports/legal-and-license-notes.md`.
+
 The current candidates under `mappings/candidates/` encode three
 source-backed request families - the F-series dynamic `0xF303` sequence
 (wire-verified on an F25 X3), the E-series DDE7 non-echoing
@@ -211,3 +218,12 @@ synthetic VIN.
 If you record telemetry from your own car, note that `runs.vin` in
 `telemetry.db` holds the real VIN read from the gateway — which is one
 more reason the database is gitignored.
+
+## Licence, contributing, security
+
+No LICENSE file yet — the owner is choosing one; until then nothing
+here is licensed for reuse. `CONTRIBUTING.md` (code),
+`CONTRIBUTING_DATA.md` (mapping evidence and provenance),
+`THIRD_PARTY.md` (where every cited fact came from, and under what
+licence) and `SECURITY.md` (scope and reporting) are the policy; CI
+runs the checks in `docs/CI.md` on every pull request.
