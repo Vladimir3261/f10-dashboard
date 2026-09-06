@@ -223,8 +223,24 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def discovery_args(args) -> argparse.Namespace:
+    """
+    The arguments discovery gets: everything the operator passed EXCEPT
+    `--ecu`, which is the READ address only.
+
+    `live.connect_and_discover` treats `args.ecu` as a forced engine ECU
+    and probes it with OBD `01 00` - which the EGS never answers
+    (tools/egs.py), so `--ecu 0x18` would abort with "forced ECU 0x18
+    did not answer" before a single 0x19 frame was sent. Every EGS
+    artifact so far was made the other way round: the engine discovered
+    by capability at 0x12, the request *routed* to 0x18. This keeps it
+    that way.
+    """
+    return argparse.Namespace(**{**vars(args), "ecu": None})
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     vc = _load_validate_candidate()
 
     print("=" * 60)
@@ -233,10 +249,15 @@ def main() -> int:
     print("[i] live.py must NOT be running: the ZGW serves one HSFZ "
           "client at a time.\n")
 
-    client, engine = vc.connect_engine(args)
+    client, engine = vc.connect_engine(discovery_args(args))
     addr = args.ecu if args.ecu is not None else engine.addr
 
     artifacts = vc.RunArtifacts("dtc")
+    # The artifact class is shared with the validation tool and stamps
+    # that tool's name and 0x22/0x2C allowlist by default; this readout
+    # is a different tool with a narrower allowlist. Say so in the meta.
+    artifacts.meta["tool"] = "tools/dtc.py"
+    artifacts.meta["allowlist"] = [hex(udsdtc.SERVICE)]
     artifacts.set_environment(
         gateway=client.ip, ecu=f"0x{addr:02X}",
         engine_ecu=engine.label(),

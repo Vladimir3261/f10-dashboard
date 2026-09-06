@@ -511,14 +511,28 @@ def cmd_identify(args) -> int:
         client.close()
 
 
+def destination(request, engine_addr: int) -> int:
+    """
+    Where one request goes: the mapping's fixed `target:` when it has
+    one (the EGS files say `0x18`), else the discovered engine.
+
+    Every command resolves through this one function. The sweep used to
+    send everything to the engine regardless, so a fixed-target file
+    "swept" the DDE with EGS DIDs and reported no answer - while `run`
+    on the same file routed correctly. The engine is found by capability
+    (PID 0x0C); a fixed target is never discovered, only routed to.
+    """
+    return request.target.resolve({"discovered_engine": engine_addr}) \
+        or engine_addr
+
+
 def _run_one(client, engine, request, decode_ok: bool) -> Dict:
     """Send one request's setup sequence + poll; decode if it answered."""
     log: List[Dict] = []
     transport = GatedTransport(live.HsfzTransport(client), log)
 
-    targets = {"discovered_engine": engine.addr}
     poll = build_payload(request)
-    dst = request.target.resolve(targets) or engine.addr
+    dst = destination(request, engine.addr)
 
     print(f"\n[>] {request.id}  ->  0x{dst:02X}")
 
@@ -681,9 +695,7 @@ def cmd_run(args) -> int:
                 try:
                     GatedTransport(live.HsfzTransport(client), []).request(
                         bytes.fromhex("2C 03 F3 03"),
-                        dst=request.target.resolve(
-                            {"discovered_engine": engine.addr}
-                        ) or engine.addr,
+                        dst=destination(request, engine.addr),
                         timeout=2.0,
                     )
                 except Exception:
@@ -791,7 +803,7 @@ def cmd_sweep(args) -> int:
 
     artifacts = RunArtifacts("sweep")
     client, engine = connect_engine(args)
-    dst = engine.addr
+    dst_of = {r.id: destination(r, engine.addr) for r in requests}
     transport = GatedTransport(live.HsfzTransport(client), [])
 
     keys = [s.key for r in requests for s in r.signals]
@@ -799,8 +811,10 @@ def cmd_sweep(args) -> int:
     stats: Dict[str, Dict] = {}
     units = {s.key: s.unit for r in requests for s in r.signals}
 
-    print(f"\n[i] sweeping {len(requests)} request(s) for {args.seconds:.0f}s "
-          f"- WORK THE THROTTLE NOW. Ctrl-C to stop early.\n")
+    routed = ", ".join(f"0x{d:02X}" for d in sorted(set(dst_of.values())))
+    print(f"\n[i] sweeping {len(requests)} request(s) -> {routed} for "
+          f"{args.seconds:.0f}s - WORK THE THROTTLE NOW. Ctrl-C to stop "
+          f"early.\n")
 
     started = time.monotonic()
     rounds = 0
@@ -810,7 +824,7 @@ def cmd_sweep(args) -> int:
             t = round(time.monotonic() - started, 2)
 
             for request in requests:
-                values = _poll_value(transport, request, dst)
+                values = _poll_value(transport, request, dst_of[request.id])
 
                 for key, value in values.items():
                     series[key].append([t, value])
@@ -852,7 +866,10 @@ def cmd_sweep(args) -> int:
 
     artifacts.set_environment(
         gateway=getattr(client, "ip", "?"), ecu=engine.label(),
-        ecu_addr=f"0x{dst:02X}", supported_pid_count=len(engine.supported),
+        ecu_addr=", ".join(
+            f"0x{d:02X}" for d in sorted(set(dst_of.values()))
+        ),
+        supported_pid_count=len(engine.supported),
         mapping_file=os.path.relpath(args.path, _ROOT),
         seconds=args.seconds, rounds=rounds,
     )

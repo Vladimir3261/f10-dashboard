@@ -10,14 +10,21 @@ What these tests pin:
     imports this module could clear the memory even by mistake;
   * the tool's readout records ONLY 0x19 frames, including with --detail;
   * a truncated DTC list is an error, never "fewer faults";
+  * `--ecu` is a READ address: discovery is never forced to it (the EGS
+    answers no OBD PID, so a forced 0x18 would abort before any 0x19);
   * the two tools share ONE definition of the status-byte semantics.
 
 No car, no network: a fake request function answers from a script.
 """
 
+import argparse
+import contextlib
 import importlib.util
+import io
 import os
+import types
 import unittest
+from unittest import mock
 
 from tests import support  # noqa: F401
 from tests.support import hexb
@@ -336,6 +343,120 @@ class TheToolSendsOnlyReads(unittest.TestCase):
 
         [record] = self.tool.read_faults(refusing, 0x12)
         self.assertEqual(record["outcome"], "negative_response")
+
+
+class FakeArtifacts:
+    """RunArtifacts' surface, with the sibling tool's default meta."""
+
+    instances = []
+
+    def __init__(self, cmd):
+        self.cmd = cmd
+        self.meta = {"kind": cmd, "tool": "tools/validate_candidate.py",
+                     "allowlist": ["0x1", "0x9", "0x22", "0x2c"]}
+        self.records = []
+        FakeArtifacts.instances.append(self)
+
+    def set_environment(self, **kw):
+        self.meta.setdefault("environment", {}).update(kw)
+
+    def add(self, record):
+        self.records.append(record)
+
+    def write(self):
+        return ("validation-runs/fake", "local/fake")
+
+
+class FakeClient:
+    ip = "169.254.0.1"
+
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def request_safe(self, payload, timeout, dst):
+        self.sent.append((bytes(payload), dst, timeout))
+        return hexb("59 02 FF")
+
+    def close(self):
+        self.closed = True
+
+
+class TheToolDoesNotForceDiscovery(unittest.TestCase):
+    """
+    `live.connect_and_discover` treats `args.ecu` as a forced engine and
+    probes it with OBD `01 00`. The EGS never answers that, so the tool
+    must discover the engine by capability and only ROUTE to `--ecu`.
+    """
+
+    def setUp(self):
+        self.dtc = load_tool("dtc")
+        FakeArtifacts.instances = []
+
+    def test_ecu_is_stripped_from_what_discovery_sees(self):
+        args = argparse.Namespace(ip="1.2.3.4", local_ip=None, vin=None,
+                                  ecu=0x18, scan_timeout=0.3, scan_full=False)
+
+        seen = self.dtc.discovery_args(args)
+
+        self.assertIsNone(seen.ecu)
+        self.assertEqual(seen.ip, "1.2.3.4")
+        self.assertEqual(seen.scan_timeout, 0.3)
+        self.assertEqual(args.ecu, 0x18, "the operator's args were mutated")
+
+    def _run_main(self, argv):
+        client = FakeClient()
+        engine = types.SimpleNamespace(
+            addr=0x12, supported={0x0C}, label=lambda: "0x12 DDE",
+        )
+        discovery_saw = []
+
+        def connect_engine(args):
+            discovery_saw.append(args)
+            return client, engine
+
+        fake_vc = types.SimpleNamespace(
+            connect_engine=connect_engine,
+            RunArtifacts=FakeArtifacts,
+            nrc_fields=lambda exc: {"nrc": exc.nrc},
+            NegativeResponse=__import__("bmwdiag.protocol",
+                                        fromlist=["x"]).NegativeResponse,
+        )
+
+        with mock.patch.object(self.dtc, "_load_validate_candidate",
+                               return_value=fake_vc), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = self.dtc.main(argv)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(discovery_saw), 1)
+        self.assertTrue(client.closed)
+
+        return discovery_saw[0], client, FakeArtifacts.instances[-1]
+
+    def test_ecu_0x18_is_routed_to_not_discovered(self):
+        seen, client, artifacts = self._run_main(["--ecu", "0x18"])
+
+        self.assertIsNone(seen.ecu, "discovery was forced to 0x18")
+        self.assertEqual(client.sent, [(hexb("19 02 FF"), 0x18, 3.0)])
+        self.assertEqual(artifacts.meta["environment"]["ecu"], "0x18")
+        self.assertEqual(artifacts.meta["environment"]["engine_ecu"],
+                         "0x12 DDE")
+
+    def test_without_ecu_the_read_goes_to_the_discovered_engine(self):
+        seen, client, _ = self._run_main([])
+
+        self.assertIsNone(seen.ecu)
+        self.assertEqual([dst for _, dst, _ in client.sent], [0x12])
+
+    def test_the_artifact_names_this_tool_and_its_allowlist(self):
+        _, _, artifacts = self._run_main(["--ecu", "0x18", "--count"])
+
+        self.assertEqual(artifacts.cmd, "dtc")
+        self.assertEqual(artifacts.meta["tool"], "tools/dtc.py")
+        self.assertEqual(artifacts.meta["allowlist"], ["0x19"])
+        self.assertEqual([r["kind"] for r in artifacts.records],
+                         ["dtc_count", "dtc_report"])
 
 
 class OneDefinitionOfTheStatusByte(unittest.TestCase):

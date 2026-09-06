@@ -12,6 +12,8 @@ candidate must get right BEFORE a drive can say anything about it:
     (scale, then add, then round - the same separated steps the verified
     files rely on), and the declared range/quality semantics fire,
   * declared setpoint/actual pairs land in one rotation slot,
+  * the validation tool's sweep routes each request to the mapping's
+    fixed `target:` (the EGS at 0x18), not to the discovered engine,
   * and none of it reaches the car by default: run_car.sh does not load
     these, and the production mapping is untouched.
 
@@ -19,8 +21,14 @@ No car, no network, no BMW data: the fake ECU answers the F303 define
 with the raw words the tests choose.
 """
 
+import argparse
+import contextlib
+import importlib.util
+import io
 import os
+import types
 import unittest
+from unittest import mock
 
 from tests import support  # noqa: F401
 from tests.support import hexb
@@ -278,6 +286,84 @@ class TheEgsCandidateResolvesByFamily(unittest.TestCase):
         self.assertEqual(profile.requests, [])
         [dropped] = profile.report.by_reason("family")
         self.assertIn("transmission", dropped.detail)
+
+
+def load_validate_candidate():
+    spec = importlib.util.spec_from_file_location(
+        "validate_candidate",
+        os.path.join(support.ROOT, "tools", "validate_candidate.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    return module
+
+
+class TheSweepRoutesByTarget(unittest.TestCase):
+    """
+    `validate_candidate.py sweep` used to send every request to the
+    discovered engine, ignoring a fixed `target:` - so sweeping the EGS
+    file would have polled the DDE with EGS DIDs and reported no answer,
+    while `run` on the same file routed correctly. One resolver now
+    serves both, and the sweep loop is pinned to use it.
+    """
+
+    def setUp(self):
+        self.vc = load_validate_candidate()
+
+    def test_one_resolver_fixed_target_wins_else_the_engine(self):
+        for request in load_file(EGS_SPEEDS).requests:
+            with self.subTest(request=request.id):
+                self.assertEqual(self.vc.destination(request, 0x12), 0x18)
+
+        for request in load_file(INJECTORS).requests:
+            with self.subTest(request=request.id):
+                self.assertEqual(self.vc.destination(request, 0x12), 0x12)
+                self.assertEqual(self.vc.destination(request, 0x10), 0x10)
+
+    def test_the_sweep_loop_polls_the_fixed_target(self):
+        vc = self.vc
+        polled = []
+        engine = types.SimpleNamespace(
+            addr=0x12, supported={0x0C}, label=lambda: "0x12 DDE",
+        )
+        client = types.SimpleNamespace(ip="169.254.0.1", close=lambda: None)
+
+        class Artifacts:
+            def __init__(self, cmd):
+                self.meta = {"environment": {}}
+
+            def add(self, record):
+                pass
+
+            def set_environment(self, **kw):
+                self.meta["environment"].update(kw)
+
+            def write(self):
+                return ("t", "r")
+
+        def poll_value(transport, request, dst):
+            polled.append((request.id, dst))
+            return {}
+
+        args = argparse.Namespace(path=EGS_SPEEDS, all=True, request=[],
+                                  seconds=0.02, interval=0)
+
+        with mock.patch.object(vc, "connect_engine",
+                               return_value=(client, engine)), \
+                mock.patch.object(vc.live, "HsfzTransport", lambda c: c), \
+                mock.patch.object(vc, "GatedTransport", lambda t, log: t), \
+                mock.patch.object(vc, "_poll_value", poll_value), \
+                mock.patch.object(vc, "RunArtifacts", Artifacts), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = vc.cmd_sweep(args)
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(polled, "the sweep loop never ran")
+        self.assertEqual({dst for _, dst in polled}, {0x18},
+                         "an EGS request was sent to the engine")
+        self.assertEqual({rid for rid, _ in polled},
+                         {"egs.speeds.DA2A", "egs.atf.DA12"})
 
 
 class TheSaeExtraResolvesByAdvertisement(unittest.TestCase):
