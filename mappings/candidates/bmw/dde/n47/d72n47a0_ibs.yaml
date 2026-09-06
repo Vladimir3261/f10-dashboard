@@ -1,0 +1,200 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Battery / charging system as the DDE (0x12) sees it: the IBS
+# (intelligent battery sensor) current, voltage and temperature it
+# receives over the bus, the ECU's relative state-of-charge counter, the
+# distance-to-start-limit figure and the alternator current. Read via the
+# proven F-series dynamic 0xF303 path. NOT yet read on F10-520d-dev -
+# Tier B table claims (sgbd_derived).
+#
+# Issue #15, domain 4. Hypothesis (docs/TELEMETRY_CANDIDATES.md, "IBS"):
+# (a) a battery that is losing capacity shows as a falling SOC baseline
+# at the same trip length and a bigger voltage sag under the same
+# current step, months before a no-start; (b) charge balance per trip
+# (integral of IBS current) tells whether short trips are net-negative -
+# the owner's use case, not a generic one; (c) IBS current at 0.5 s is
+# the only channel here that can be cross-checked against a KNOWN load
+# step (headlights, rear defroster) without a clamp meter, which is what
+# proves the 0.08 A/bit scale and the -200 A offset.
+#
+# These values ORIGINATE in the IBS on the negative terminal and reach
+# the DDE over the body bus; what the DDE reports is its received copy
+# (possibly stale, possibly rate-limited). The authoritative readout is
+# the job STATUS_MESSWERTE_IBS (`22 40 2B`: T_BATT, U_BATT, I_BATT plus
+# 22 bytes IBSINFO) - but the table does not state that reply's byte
+# layout, so it is NOT mapped; the validation plan captures the raw
+# `22 40 2B` frame beside the F303 values so the layout can be inferred
+# from agreement, not guessed.
+#
+# Rows quoted from the pinned d72n47a0 SG_FUNKTIONEN table
+# (emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+# docs/sgbd/d72n47a0.md, sha256 161ec6ea...6a544b; re-fetched and
+# hash-checked 2026-09-06, source cache absent on this host). SG_ADR 12,
+# SERVICE 22;2C; unsigned int (u16 BE) unless noted.
+#
+#   IIBAT     0x4286  A     x0.08     -200  "Batteriestrom von IBS gemessen"
+#   IIUBAT    0x428D  V     x0.00025  +6    "Batteriespannung von IBS gemessen"
+#   ITBAT     0x428C  degC  x0.009237 -50   "Batterietemperatur"
+#   Soc_rel   0x42A2  %     x0.001526       "Relativzaehler fuer Ladezustand SoC"
+#   D_soc     0x4285  -     x0.003052       "Abstand zur Startfaehigkeitsgrenze"
+#   IIGEN     0x4290  A     x1  (unsigned char, u8)  "Generatorstrom"
+#
+# Sign convention of IIBAT (charge positive or discharge positive) is NOT
+# stated - the load-step test settles it. No sentinel is stated; the
+# raw range 0..65535 maps to -200..5042.8 A, so a 0xFFFF placeholder
+# would decode as an absurd +5042.8 A and `valid_max` flags it `clipped`
+# rather than letting it into a trip integral.
+#
+# Not requested (documented): Soc_quali 0x427B (Ah, x0.0182), IGENL
+# 0x425A (alternator raw load %, x0.003052), SUGEN 0x4283 (alternator
+# voltage setpoint, x0.1 V), U_bn_soll 0x4281 (u8 x0.1 V), IUBAT2 0x4200
+# (mV x0.389105 - a second voltage path), Ibs_errors 0x42A3 (u8, enum
+# not stated), Q_iruhe2 0x427D (quiescent-current Ah), and the block
+# jobs STATUS_MESSWERTE_IBS `22 40 2B` / STATUS_BZEDIAG `22 40 3B`
+# (layouts not stated).
+#
+# !! ONE REQUEST AT A TIME - all share dynamic DID 0xF303 !!
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-ibs
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - IBS battery current (0.5 s rotation) and the slow
+    battery state set (IBS voltage, battery temperature, relative SOC,
+    distance to start limit, alternator current) from the d72n47a0
+    SG_FUNKTIONEN table via 0xF303. Not yet read on F10-520d-dev.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Rows: IIBAT 0x4286 (A, 0.08/-200), IIUBAT
+    0x428D (V, 0.00025/+6), ITBAT 0x428C (degC, 0.009237/-50), Soc_rel
+    0x42A2 (%, 0.001526), D_soc 0x4285 (-, 0.003052), IIGEN 0x4290 (A,
+    u8). SG_ADR 12, SERVICE 22;2C. Tier B (sgbd_derived).
+
+verification:
+  status: candidate
+  method: >
+    Not yet attempted on the car. Plan (docs/TELEMETRY_CANDIDATES.md,
+    "IBS"): engine running at idle, `tools/validate_candidate.py sweep
+    <this file> n47.d72.dyn.4286 n47.d72.dyn.428D --seconds 120` while
+    switching a known load (dipped beam ~2x55 W = ~8-9 A at 13.5 V, rear
+    defroster ~15-20 A) on for 20 s and off; pass = a current step of
+    the expected magnitude with a matching small voltage dip, IBS
+    voltage within 0.3 V of standard OBD PID 0x42 at the same moment,
+    battery temperature within ~10 degC of ambient (PID 0x46) on a cold
+    car, SOC and D_soc in 0..100; fail = no step, a step of the wrong
+    magnitude by more than 2x (scale wrong), or a constant.
+  vehicle: F10-520d-dev (VIN in local/VEHICLES.md)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  sgbd: d72n47a0                # the table the rows came from - provenance
+  match:
+    capability:
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.4286, n47.d72.dyn.42A2]
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+# Two rates, by physics.
+#   IIBAT (current) on `dde_dyn` (0.5 s rotation, declared identically to
+#   the verified files): current changes in under a second with every
+#   consumer and with alternator regulation, and the trip charge balance
+#   is an integral - undersampling it is a bias, not just noise. +1
+#   member on the rotation.
+#   Everything else on `dde_slow` (one member per 10 s, round-robin; the
+#   same class the injector file declares, identically): SOC is a
+#   counter that moves ~1 %/min at most, battery temperature has a time
+#   constant of tens of minutes, alternator current and IBS voltage are
+#   context for the current channel, not tracking pairs. Five members ->
+#   each every ~50 s alone, ~140 s when loaded with the injector file.
+polling_classes:
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
+  dde_slow: {seconds: 10, priority: 6, stagger: true}
+
+requests:
+
+  n47.d72.dyn.4286:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 86 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_ibs_current:
+        label: Battery current (IBS)
+        unit: A
+        display: {digits: 1, min: -200, max: 200}
+        # Sign convention unknown until the load-step test. valid_max
+        # keeps a placeholder 0xFFFF (+5042.8 A) out of any integral.
+        decode: {type: uint16_be, scale: 0.08, add: -200.0, round: 2, valid_max: 1000}
+
+  n47.d72.dyn.428D:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 8D 01 02"]
+    polling: {class: dde_slow}
+    response: {data_length: 2}
+    signals:
+      n47d_ibs_voltage:
+        label: Battery voltage (IBS)
+        unit: V
+        display: {digits: 2, min: 6, max: 16}
+        decode: {type: uint16_be, scale: 0.00025, add: 6.0, round: 4}
+
+  n47.d72.dyn.428C:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 8C 01 02"]
+    polling: {class: dde_slow}
+    response: {data_length: 2}
+    signals:
+      n47d_battery_temp:
+        label: Battery temperature (IBS)
+        unit: °C
+        display: {digits: 1, min: -40, max: 80}
+        decode: {type: uint16_be, scale: 0.009237, add: -50.0, round: 2}
+
+  n47.d72.dyn.42A2:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 A2 01 02"]
+    polling: {class: dde_slow}
+    response: {data_length: 2}
+    signals:
+      n47d_battery_soc:
+        label: Battery SOC (relative counter)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.001526, round: 2}
+
+  # "Distance to the start-capability limit" - dimensionless in the
+  # table. What the number means (percent of SOC above the limit? Ah?)
+  # is unknown; logged as decoded, interpreted only after a run.
+  n47.d72.dyn.4285:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 85 01 02"]
+    polling: {class: dde_slow}
+    response: {data_length: 2}
+    signals:
+      n47d_battery_start_margin:
+        label: Distance to start limit
+        unit: ""
+        display: {digits: 1, min: 0, max: 200}
+        decode: {type: uint16_be, scale: 0.003052, round: 2}
+
+  n47.d72.dyn.4290:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 90 01 01"]
+    polling: {class: dde_slow}
+    response: {data_length: 1}
+    signals:
+      n47d_alternator_current:
+        label: Alternator current
+        unit: A
+        display: {digits: 0, min: 0, max: 250}
+        decode: {type: uint8, round: 0}

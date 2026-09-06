@@ -235,6 +235,68 @@ health. Rail actual-vs-setpoint and EGR deviation are the next two.
 - **P/R/N/D selector and reverse encoding** remain unfound (needs a
   `0x18`/`0x63` DID scan).
 
+### 3b. Issue #15 candidates — the drives that would verify them (2026-09-06)
+
+The offline half of issue #15 landed as seven candidate files plus a
+read-only DTC tool, all `verification.status: candidate`, none in
+`run_car.sh`. `docs/TELEMETRY_CANDIDATES.md` has the hypothesis, the
+exact invocation and the pass/fail per domain; this is the to-do. Each
+one: stop `live.py`, `identify`, the sweep below, commit the artifact,
+then flip the file to `verified` (version 2, artifact named in
+`verification.method`) or `rejected`.
+
+1. **Injector corrections** (`d72n47a0_injectors.yaml`) — warm idle,
+   `run --all` then `sweep --all --seconds 180`. Pass: four
+   corrections within ±2 mg/hub summing to ~0, setpoint a few mg/hub.
+   Watch for values clustering at ±20 — that would be the **d73 scale**
+   (`×0.156863 −20`, byte-wide), which disagrees with the d72 row and
+   is noted in the file.
+2. **EGR position pair** (`d72n47a0_egr.yaml`) — 120 s sweep with two
+   hard accelerations, then a drive with `./run_car.sh --extra-mappings
+   <file>` so `n47d_egr_deviation` (0x487A) is in the same session.
+   This is what `docs/HEALTH_MODELS.md` § EGR (`unavailable`) is waiting
+   for. Bonus: a 3-request rotation change is a chance to re-test the
+   F303 cross-talk hypothesis from item 3 above with the raw bytes.
+3. **VNT / swirl / throttle pairs + governor deviation**
+   (`d72n47a0_airpath.yaml`) — 180 s sweep, then a drive with
+   full-throttle pulls under `--extra-mappings`. Pass includes
+   `n47d_boost_gov_dev` matching `boost_set − boost_act` (verified pair)
+   in sign and within ~50 hPa. If the plain `TrbCh_*` rows are constant,
+   record it and try the `*VNT` rows next time — not before.
+4. **IBS** (`d72n47a0_ibs.yaml`) — idle, 120 s sweep of 4286 + 428D with
+   a known load step (dipped beam ~8–9 A, rear defroster ~15–20 A), then
+   `run --all`. Pass: the step reproduces within 2×, IBS voltage within
+   0.3 V of PID 0x42.
+5. **EGS speeds** (`egs/f10_transmission_speeds.yaml`) — 300 s sweep
+   (no `--ecu`: the sweep now routes each request to the file's fixed
+   `target: 0x18`; the EGS answers no OBD PID and cannot be *discovered*)
+   then a drive under `--extra-mappings` with locked-up
+   cruise. The drive **assigns** the two `DA2A` words (turbine vs
+   output shaft, by ratio against `0x46ED` and road speed per gear) and
+   fits `DA12` against `0x46F0` — the file names nothing until then.
+6. **Tank** (`d72n47a0_tank.yaml`) — `run` at two known fuel levels
+   across a refuel. The KOMBI senders have **no traceable source**; the
+   owner's `local/captures/kombi_dids.json` (not on the build host) is
+   to be mined first — see the doc for what to look for (≥2-byte 0x63
+   DIDs that move with fuel level, a left/right pair, vs `IFTNK`).
+7. **DTC readout** — `python3 tools/dtc.py --count --detail` once per
+   ECU (0x12, then `--ecu 0x18` — the read address only; discovery
+   still finds the engine by capability), the first `validation-runs/*-dtc/`
+   artifact. Read-only by construction (0x19 only; 0x14 has no code
+   path). The count must agree with PID 0x01 (next item).
+8. **SAE extras** (`obd/engine_sae_extra.yaml`) — 60 s sweep at idle
+   through key-off with `tools/dtc.py --count` for the cross-check.
+   On pass: PIDs 0x01 and 0x4C move into `engine.yaml` as **v6** with a
+   pin re-base; the other eight unpolled advertised PIDs stay out for
+   the reasons in the doc.
+
+Rotation cost if *all* were loaded: `dde_dyn` 23 → 34 requests
+(~14 s per member) plus a new `dde_slow` rotation of 15. `dde_slow` and
+`egs_slow` are not named in `config/modes.yaml`: every mode scales them
+×1.0 and `sampling` does not exempt them (see the doc). Validate one
+file at a time; what enters `run_car.sh` afterwards is a separate
+decision per file.
+
 ### 4. Superseded / historical
 
 The original experiments 1 and 2 (boost under load, transmission

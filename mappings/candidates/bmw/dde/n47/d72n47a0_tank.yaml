@@ -1,0 +1,107 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Fuel tank content as the DDE (0x12) RECEIVES it over the body bus, via
+# the proven F-series dynamic 0xF303 path. NOT yet read on F10-520d-dev -
+# a Tier B table claim (sgbd_derived).
+#
+# Issue #15, domain 6 (fuel/body/KOMBI). The standard OBD fuel level
+# (PID 0x2F, mapped in engine.yaml as `fuel` -> `fuel_l`) is NOT
+# advertised by this DDE (validation-runs/20260825T191658Z-identify: the
+# 0x20-0x3F capability word lacks 0x2F), so the dashboard's fuel tile has
+# never had a value on this car. This row is the DDE's copy of the
+# cluster's calculated tank content, in LITRES - the only fuel-level
+# quantity with a traceable source on this host.
+#
+# What it is NOT: the left/right tank SENDER readings. Those live in the
+# KOMBI (0x63) and no traceable request for them exists in the sources on
+# this host (the owner's local KOMBI capture, local/captures/
+# kombi_dids.json, is gitignored and absent here - docs/
+# TELEMETRY_CANDIDATES.md says what to mine from it). A calculated
+# content cannot separate a bad sender from a bad calculation; it CAN
+# give the trip-level fuel-consumption cross-check against the OBD fuel
+# rate integral (PID 0x5E is mapped but not advertised either; the
+# analysis layer has the MAF/lambda-based estimate).
+#
+# Row quoted from the pinned d72n47a0 SG_FUNKTIONEN table
+# (emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+# docs/sgbd/d72n47a0.md, sha256 161ec6ea...6a544b; re-fetched and
+# hash-checked 2026-09-06). SG_ADR 12, SERVICE 22;2C, unsigned int:
+#
+#   IFTNK  0x4458  l  x0.001907  "Tankfuellstand - Kraftstoff"
+#
+# 0.001907 l/bit over 16 bits spans 0..125 l; the F10's tank is 70 l,
+# so anything above ~75 l is a placeholder, not fuel (`valid_max`).
+# No sentinel stated.
+#
+# !! ONE REQUEST AT A TIME - shares dynamic DID 0xF303 !!
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-tank
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - calculated tank content in litres as received by the DDE
+    (IFTNK 0x4458, d72n47a0 SG_FUNKTIONEN) via 0xF303. Not yet read on
+    F10-520d-dev; standard PID 0x2F is not advertised by this DDE.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Row: IFTNK 0x4458 (l, 0.001907). Unsigned
+    int, SG_ADR 12, SERVICE 22;2C. Tier B (sgbd_derived).
+
+verification:
+  status: candidate
+  method: >
+    Not yet attempted on the car. Plan (docs/TELEMETRY_CANDIDATES.md,
+    "Tank"): ignition on, `tools/validate_candidate.py run <this file>`;
+    pass = the decoded litres agree with the cluster's range/level
+    display to within the display's resolution (the iDrive "range" in
+    km divided by the shown average consumption gives litres to ~2 l),
+    and a later run after a known refuel shows the same delta; fail =
+    a constant across a refuel, or a value above the 70 l tank.
+  vehicle: F10-520d-dev (VIN in local/VEHICLES.md)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  sgbd: d72n47a0                # the table the row came from - provenance
+  match:
+    capability:
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.4458]
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+# `dde_slow` (one member per 10 s, round-robin; declared identically in
+# the injector and IBS files). Physics: a 70 l tank empties at ~0.1
+# l/min on the motorway and the cluster's calculated content is itself
+# damped over minutes; a 0.5 s slot would only measure the damping
+# filter. Fuel slosh on corners is exactly the noise the KOMBI already
+# removes.
+polling_classes:
+  dde_slow: {seconds: 10, priority: 6, stagger: true}
+
+requests:
+
+  n47.d72.dyn.4458:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 44 58 01 02"]
+    polling: {class: dde_slow}
+    response: {data_length: 2}
+    signals:
+      n47d_tank_content:
+        label: Tank content (calculated, via DDE)
+        unit: L
+        display: {digits: 1, min: 0, max: 70}
+        decode: {type: uint16_be, scale: 0.001907, round: 3, valid_max: 75}
