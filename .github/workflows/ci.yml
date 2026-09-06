@@ -1,0 +1,60 @@
+# Continuous checks. docs/CI.md says what each step is for and how to run
+# the same thing locally. Nothing here needs a secret, a network beyond
+# the checkout, a car, or the research source cache.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: checks (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13: what the Pi runs (docs/PI_COMMISSIONING.md, 3.13.5).
+        # 3.12: the development host.
+        python: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check_mapping_versions.py diffs against the PR base ref, so
+          # the base must be reachable from this checkout.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Hygiene (no VIN, token, local/ or .env in the tracked tree)
+        run: python3 tools/check_hygiene.py
+
+      - name: Byte-compile everything
+        run: python3 -m compileall -q .
+
+      - name: Mapping files validate
+        run: python3 -m bmwdiag.mapping validate mappings/
+
+      - name: Mapping versions match the lock
+        run: python3 -m bmwdiag.mapping lock --check mappings/
+
+      - name: Changed mappings bumped their version (PRs only)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          python3 tools/check_mapping_versions.py --against "origin/${{ github.base_ref }}"
+
+      - name: Research pipeline on the committed evidence (no cache, no network)
+        run: python3 -m research.build --evidence-only
+
+      - name: Test suite (skips are printed, not hidden)
+        run: python3 tools/run_tests.py

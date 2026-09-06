@@ -267,13 +267,13 @@ class IdentProbe(unittest.TestCase):
 
 class Redaction(unittest.TestCase):
     def test_vin_bearing_keys_are_masked(self):
-        red = vc._redact({"vin": "WBAFAKE00000TEST0", "ecu": "0x12"})
+        red = vc._redact({"vin": "WBAFAKE00000TEST0", "ecu": "0x12"})  # hygiene: fake-vin
         self.assertNotIn("WBAFW", red["vin"])
         self.assertEqual(red["ecu"], "0x12")
 
     def test_vin_shaped_values_anywhere_are_masked(self):
-        red = vc._redact({"note": "car WBAFAKE00000TEST0 responded"})
-        self.assertNotIn("WBAFAKE00000TEST0", red["note"])
+        red = vc._redact({"note": "car WBAFAKE00000TEST0 responded"})  # hygiene: fake-vin
+        self.assertNotIn("WBAFAKE00000TEST0", red["note"])  # hygiene: fake-vin
 
     def test_ordinary_hex_is_not_over_redacted(self):
         red = vc._redact({"tx": "2c 01 f3 03 45 17 01 02", "ms": 6.1})

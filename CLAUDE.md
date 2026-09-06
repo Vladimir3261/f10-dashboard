@@ -198,7 +198,10 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   (`samples.quality`); the display suppresses them and derived channels
   drop with their flagged inputs. engine.yaml v4 declares lambda's
   0xFFFF sentinel and MAP's 255 saturation. See `docs/DATA_QUALITY.md`.
-- 619 tests, no car / no network / no BMW data required.
+- 1,050 tests, no car / no network / no BMW data required
+  (`python3 tools/run_tests.py` prints the skip count; 3 skip without the
+  research source cache). CI runs the same checks on every PR —
+  `docs/CI.md`.
 
 ## Repo map
 
@@ -222,7 +225,8 @@ infra/                      the ClickHouse lake + telemetry sync (deploy on a VP
   sync/                     fault-tolerant local agent (reads SQLite RO, ships batches)
   common/wire.py            columnar + LZMA batch format (~4 bytes/sample)
 tools/                      read-only research + validation (egs.py, export_json.py,
-                            validate_candidate.py)
+                            validate_candidate.py) + the CI guards (run_tests.py,
+                            check_hygiene.py, check_mapping_versions.py)
 validation-runs/            on-car artifacts, VIN-redacted, one dir per run
 drive-sessions/             analysis output (VIN-redacted), one dir per analysed run
 docs/                       MAPPING_ARCHITECTURE.md, MAPPING_RESEARCH.md, ROADMAP.md
@@ -241,7 +245,8 @@ Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and
   `validation-runs/` (VIN-redacted) plus a raw copy under gitignored
   `local/`. Never commit the raw copy or a VIN.
 - **Tests must pass with no car, no network, no BMW data.**
-  `python3 -m unittest discover`. The production mapping is byte-pinned —
+  `python3 -m unittest discover` (or `python3 tools/run_tests.py`, which
+  also prints every skip). The production mapping is byte-pinned —
   a test fails if it changes. The pin is a tripwire, not a freeze:
   re-base it only together with a `mapping.version` bump and a note in
   the test saying what changed and why.

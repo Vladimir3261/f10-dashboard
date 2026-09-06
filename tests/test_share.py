@@ -21,7 +21,7 @@ from . import support
 import live
 
 
-FULL_VIN = "WBAXX00000XX00000"
+FULL_VIN = "WBAXX00000XX00000"  # hygiene: fake-vin
 
 
 class StubTelemetry:
