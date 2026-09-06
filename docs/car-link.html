@@ -1084,6 +1084,8 @@ targets = {<span class="v">"discovered_engine"</span>: <span class="hl">0x12</sp
             <tr><td class="mono">decode</td><td>bytes arrived but the mapping could not read them</td><td>record — this is a mapping bug</td></tr>
             <tr><td class="mono">late_response</td><td>the answer to a request that had already timed out arrived — recorded under <em>that</em> request</td><td>discard, count on the request's <code>late</code>, carry on</td></tr>
             <tr><td class="mono">unexpected_response</td><td>a frame matching nothing asked (under the pseudo-id <code>hsfz:0x12</code>)</td><td>discard, count, trace, carry on</td></tr>
+            <tr><td class="mono">no_response</td><td>an OBD batch came back without this PID and the single re-read in the same cycle did not deliver it either — the ECU is not delivering that PID</td><td>record, count on the request's <code>no_response</code>, carry on (three in a row retire the PID)</td></tr>
+            <tr><td class="mono">batch_omitted</td><td>the same wire event — a batch answered without this PID — but the re-read delivered it: the reader learning, once per connection, that this ECU will not batch. Counted on the same <code>no_response</code> outcome, but its own kind in the error stream so "the reader adapted" is not read as "the car is not answering"</td><td>record once, carry on; no strike</td></tr>
             <tr><td class="mono">retired</td><td>an OBD PID struck out (three consecutive faults) and will not be asked again this connection — a state change, recorded once with the strike count, not another fault</td><td>stop asking; the request reads <code>state: retired</code></td></tr>
           </tbody>
         </table>
