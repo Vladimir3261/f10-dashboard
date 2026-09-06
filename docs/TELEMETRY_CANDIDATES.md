@@ -1,0 +1,538 @@
+# Telemetry candidates — the offline half of issue #15
+
+Issue #15 asks for telemetry chosen by **diagnostic usefulness**, one
+domain at a time, in priority order. Its acceptance criteria are
+on-car; this document is everything that can be done *before* a drive
+and nothing that can only be claimed after one. Every channel below is
+**`verification.status: candidate`** — a sourced hypothesis with a
+decode, a polling decision and a pass/fail test. None is verified. None
+is loaded by `./run_car.sh`.
+
+Read with `docs/MAPPING_RESEARCH.md` (provenance labels, tiers,
+verification states), `docs/HEALTH_MODELS.md` (the models a channel
+would feed) and `docs/POLLING_AND_SAFETY.md` (why a rotation slot costs
+what it costs).
+
+## What could and could not be re-derived on this host (2026-09-06)
+
+- **The research source cache is absent** (`local/research-cache/` —
+  `python3 -m research.build` reports `missing cached sources: d73_csv,
+  motor_ccpage, customjobs`). The tracked normalized records
+  (`research/normalized/n47/signals.jsonl`, 1,685 rows) are mostly the
+  **d73n47a0** table (morguux, Tier B) — a *different diagnostic
+  variant* from this car's d72-compatible DDE, and by the "variants
+  never merge" rule not a source for a d72 file.
+- **There is no importer for the d72n47a0 table.** The verified d72 files
+  (`d72n47a0_dynamic/flow/dpf_egr/gearbox.yaml`) were built by quoting
+  individual rows from the pinned `ediabasx-docs-sgbd` export, with the
+  commit and hash in the file. The candidates here were built the same
+  way: the pinned page (`emdzej/ediabasx-docs-sgbd @
+  b644de8fbfbb4b207f57794e3c7894dc1dc58627`, `docs/sgbd/d72n47a0.md`) was
+  re-fetched and its sha256
+  `161ec6ea9db155b57b27599a4ed79b071120aa9e89418f265459a5186e6a544b`
+  matched the manifest before any row was read. Only the rows quoted in
+  each file were used — the table is a lookup oracle, not a bulk source.
+- **The d73 records were used for one thing:** a cross-variant
+  consistency check on the quoted rows. Every row agrees to the last
+  digit between d72 and d73 **except `FBC_qDvtCylPhys_n`** (d73:
+  `×0.156863 −20`, byte-wide; d72: `×0.003052 −100`, 16-bit). That is
+  recorded in the injector file as the thing the drive must watch for.
+- **The KOMBI capture (`local/captures/kombi_dids.json`) is not on this
+  host** — it is in the owner's gitignored `local/`. The tank domain says
+  what to mine from it rather than guessing values.
+- **Nothing was run against the car.** Every number in the tests is a
+  chosen raw word through the decoder, never a wire observation.
+
+## The candidate set
+
+| # | Domain | Source tier | File | Channels | Polling | Needs a drive |
+|---|--------|-------------|------|----------|---------|---------------|
+| 1 | Injector corrections | B (`sgbd_derived`) | `mappings/candidates/bmw/dde/n47/d72n47a0_injectors.yaml` | `n47d_inj_corr_cyl1..4`, `n47d_inj_qty_set`, `n47d_misfire_ct_0..3` | `dde_slow` (10 s rotation) | yes |
+| 2 | EGR requested / actual | B | `…/d72n47a0_egr.yaml` | `n47d_egr_pos_set` + `n47d_egr_pos_act` (pair), `n47d_egr_rate_set` | `dde_dyn` | yes |
+| 3 | VNT / boost + swirl | B | `…/d72n47a0_airpath.yaml` | `n47d_vnt_set`+`_act`, `n47d_swirl_set`+`_act`, `n47d_throttle_set`+`_act` (3 pairs), `n47d_boost_gov_dev` | `dde_dyn` | yes |
+| 4 | IBS battery | B | `…/d72n47a0_ibs.yaml` | `n47d_ibs_current` (`dde_dyn`); `n47d_ibs_voltage`, `n47d_battery_temp`, `n47d_battery_soc`, `n47d_battery_start_margin`, `n47d_alternator_current` (`dde_slow`) | mixed | yes |
+| 5 | EGS speeds / converter slip | C (`source_claim`, OBDb) | `mappings/candidates/bmw/egs/f10_transmission_speeds.yaml` | `egs_da2a_w0`, `egs_da2a_w1` (`egs`), `egs_da12_raw` (`egs_slow`) | `egs` 2 Hz | yes — field order and scale unknown |
+| 6 | KOMBI tank senders | **none traceable** (senders); B for the DDE's calculated content | `…/d72n47a0_tank.yaml` | `n47d_tank_content` | `dde_slow` | yes; senders need the local capture first |
+| 7 | DTC / freeze frame | A (ISO 14229-1 format) + B (ISTA's `19 02 0C` from the table) | `bmwdiag/dtc.py`, `tools/dtc.py` | on-demand readout, not a channel | **not polled** | yes (a first readout artifact) |
+| 8 | Remaining SAE PIDs | A (SAE J1979) | `mappings/candidates/obd/engine_sae_extra.yaml` | `mil`, `dtc_count` (`rare`), `throttle_cmd` (`context`) | OBD batches | yes; promotion = engine.yaml v6 + pin re-base |
+
+Rotation cost when *every* candidate is loaded beside the car set
+(pinned by `tests/test_telemetry_candidates.py`): `dde_dyn` 23 → 34
+requests (21 → 28 slots, ~10.5 s → ~14 s per member at 0.5 s), plus a
+new `dde_slow` rotation of 15 members (one every 10 s, so ~150 s per
+member), `egs` 1 → 2 at 2 Hz, `egs_slow` 1. That is a **validation
+load**, chosen to prove scales, not a set to drive with; the per-domain
+plans below load one file at a time.
+
+## How every candidate is validated (common part)
+
+1. Stop `live.py` — the ZGW serves one HSFZ client.
+2. `python3 tools/validate_candidate.py identify` first, so the artifact
+   records the same engine ECU, supported-PID count and profile outcome
+   the candidate will be judged against.
+3. The per-domain `run` / `sweep` invocation below. Every run writes a
+   tracked, VIN-redacted artifact under `validation-runs/<UTC>-<cmd>/`
+   and a raw copy under gitignored `local/`; commit the tracked one.
+   `validate_candidate.py` takes **one** file; where the pass criterion
+   is a cross-check against a *verified* channel, the second step is a
+   drive with `./run_car.sh --extra-mappings <candidate file>`, which
+   records the candidate beside the verified set in one session (the
+   way the drive-9/10 channels were confirmed) — the cross-check is then
+   an `analysis/` query on that session, not a second sweep.
+4. Pass/fail is decided against the criterion written in the file's
+   `verification.method` (quoted here). Pass → `verification.status:
+   verified` **with `mapping.version: 2`** and the artifact named in
+   `method`; fail → `rejected`, with the reason, and the row stays in
+   the file as a documented dead end. A pass never moves a file into
+   `run_car.sh` by itself — that is a separate decision about rotation
+   cost.
+
+Every request in every file is `0x22`/`0x2C` (DDE, EGS) or `0x01` (SAE);
+`tests/test_telemetry_candidates.py` runs each setup frame and payload
+through `assert_observational`, and `live.HsfzClient` gates them again
+on the wire.
+
+---
+
+## 1. Injector corrections — `d72n47a0_injectors.yaml`
+
+**Source.** d72n47a0 `SG_FUNKTIONEN`: `FBC_qDvtCylPhys_0..3` `0x5591..0x5594`
+(mg/hub, ×0.003052 −100, *geometric* cylinder order), `SMEIO` `0x45D5`
+(mg/hub, same scale — the commanded quantity *before* balancing),
+`MisfDet_ctMifDrivCyc_0..3` `0x442A..0x442D` (count). Tier B. Not
+requested but documented: `IMKZ1..4` `0x5570..0x5573` (the same
+corrections in *firing* order — on a 4-cylinder a permutation of the
+first set, which is the self-consistency check).
+
+**Analysis note (hypothesis).** The DDE's Mengenausgleichsregelung
+(FBC) learns a per-cylinder quantity correction so all four cylinders
+produce equal torque at idle. The *spread* between the four and its
+*trend over weeks* is the earliest injector-ageing signature the ECU
+exposes — a drifting cylinder shows here long before a rough idle or a
+DTC. This is a **new health model**, not an input to an existing one:
+`injector balance` = per-cylinder correction conditioned on coolant
+temperature and idle state, baseline per cylinder, drift on the
+spread. Expressed as a fraction of `n47d_inj_qty_set` so that 0.3 mg/hub
+means the same thing at 5 and at 40 mg/hub.
+
+*What it cannot support:* it cannot say *why* a cylinder drifts
+(injector vs compression vs a valve) — that needs a compression test or
+a leak-down; and the table does not say whether FBC runs off-idle (a
+typical EDC17 FBC balances at idle and holds), so a correction sampled
+under load may be a frozen value. The misfire counters' index order
+(geometric vs firing) is *unknown* until a run with a known
+single-cylinder event says which.
+
+**Logged continuously?** Yes, on `dde_slow` (one member every 10 s;
+each of the nine refreshes every ~90 s). An adaptation value that moves
+over minutes has no business on the 0.5 s rotation — nine more `dde_dyn`
+members would slow every existing member for nothing.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py run mappings/candidates/bmw/dde/n47/d72n47a0_injectors.yaml --all
+python3 tools/validate_candidate.py sweep mappings/candidates/bmw/dde/n47/d72n47a0_injectors.yaml --all --seconds 180
+```
+at warm idle (coolant > 80 °C, no load, A/C off).
+*Cross-check:* the four corrections are a zero-sum balance, so their
+sum should sit near 0; reading `0x5570..0x5573` (IMKZ, firing order
+1-3-4-2) ad hoc with `run <file> n47.d72.dyn.5570`-style requests after
+temporarily adding them must give the same four values permuted.
+*Pass:* all four within ±2 mg/hub of zero, sum within ±0.5 mg/hub,
+the setpoint a few mg/hub at idle, misfire counters 0 or a small stable
+number. *Fail:* any cylinder outside ±10 mg/hub, the four values
+identical to the last bit (a constant, not a control quantity), a
+one-byte response, or values clustering at ±20 (the d73 scale — see the
+cross-variant note in the file).
+
+---
+
+## 2. EGR requested / actual — `d72n47a0_egr.yaml`
+
+**Source.** `EGRVlv_rDesEGR` `0x4C93` (%, ×0.003052 −100, setpoint),
+`EGRVlv_rSens` `0x4C97` (%, ×0.001526, sensed position), `AirCtl_rDesVal`
+`0x487E` (EGR-rate setpoint, ×0.01). Tier B. The two position rows use
+different scales *as printed*; not harmonised.
+
+**Analysis note.** `docs/HEALTH_MODELS.md` § EGR is today `unavailable:
+requested/actual not yet mapped`. This pair is what it is waiting for:
+the same residual-per-cell shape as boost and rail tracking, on
+`n47d_egr_pos_act − n47d_egr_pos_set`, with the declared 1.0 s pair
+tolerance (both members are in one rotation slot, so the scheduler gap
+is 0; the wire gap is one exchange). Combined with the verified
+mass-flow governor deviation (`n47d_egr_deviation`, `0x487A`), it
+separates the two EGR faults: **valve tracks its setpoint but the air
+mass still misses** (flow path, cooler, MAF) from **valve does not
+reach its setpoint** (sticking, sooted — the N47 classic). Session 9
+showed `0x487A` living in the warm-up transient; the pair should be
+judged there too.
+
+*What it cannot support:* EGR *flow* (there is no flow sensor; the
+governor deviation is the ECU's own model residual), and which end of
+the position scale is "closed" — the table does not say.
+
+**Logged continuously?** Yes, `dde_dyn` (+3 requests, +2 slots on the
+verified rotation). A valve that moves in ~100 ms belongs in the 0.5 s
+class or the pair is meaningless.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py sweep mappings/candidates/bmw/dde/n47/d72n47a0_egr.yaml --all --seconds 120
+```
+warm idle for 30 s, then a short drive with two hard accelerations
+(sanity: ranges, the pair moves). Then one drive with
+`./run_car.sh --extra-mappings mappings/candidates/bmw/dde/n47/d72n47a0_egr.yaml`.
+*Cross-check:* against `n47d_egr_deviation` (`0x487A`, verified, in the
+same session).
+*Pass:* both positions in 0..100 %, sensed tracks setpoint within ~5 %
+after a step, both move towards one end under hard acceleration while
+the rate setpoint (`0x487E`) drops. *Fail:* a position outside 0..100,
+or the sensed value flat while `0x487A` moves.
+
+---
+
+## 3. VNT / boost actuator and swirl flaps — `d72n47a0_airpath.yaml`
+
+**Source.** `TrbCh_rDes` `0x4CC9` (duty %, ×0.01), `TrbCh_rAct` `0x4CC4`
+(position %, ×0.001526), `PCR_pGovDvt` `0x42CD` (hPa, ×0.999985 −32767,
+the boost governor's own deviation), `VSwVlv_r` `0x48D9` / `VSwVlv_rAct`
+`0x48D7` (swirl setpoint / position), `ThrVlv_rDesVal` `0x4BFB` /
+`ThrVlv_rAct` `0x4BF8` (intake throttle). Tier B. The two-stage rows
+(`TrbChVNT_*`, `TrbChLP_*`, `PCR_pGovDvtLP`) exist in the table and are
+**not** requested: the 520d's N47 is single-stage. If the plain rows
+answer a constant while the `*VNT` rows would move, that is the finding
+to record.
+
+**Analysis note.** The verified **boost tracking** model sees setpoint
+vs actual *pressure* and can say "0.18 bar under setpoint at this
+load" but not why. The VNT pair adds the actuator layer: asked for more
+and delivering it → the problem is downstream (leak, restricted intake,
+turbine); asked for more and not following → actuator/vane sticking.
+`n47d_boost_gov_dev` is the ECU's own tracking error — a cross-check of
+the analysis layer's `boost_act − boost_set` against the number the
+controller actually uses (expect the same sign and magnitude within
+~50 hPa at steady state; a disagreement means the analysis pairing is
+wrong, not the car). The swirl pair is a **known N47 failure mode**
+(`docs/ROADMAP.md`): a flap that never reaches its setpoint is the
+signature. The throttle pair is the proprietary twin of SAE 0x11/0x4C
+(domain 8).
+
+*What it cannot support:* a setpoint that is a *duty cycle* and an
+actual that is a *position* need not be numerically equal even when
+tracking is perfect — the test is "monotonic, no lag, no saturation",
+not "equal". Turbo *speed* is not available (`ASMod_nTrbCh` `0x4D67` is a
+model output; the N47 has no speed sensor).
+
+**Logged continuously?** Yes, `dde_dyn` — with the explicit cost noted
+in the file (+7 requests, +4 slots). This is the most expensive file;
+the "not requested" list is long for that reason.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py sweep mappings/candidates/bmw/dde/n47/d72n47a0_airpath.yaml --all --seconds 180
+```
+for the range sanity check, then a drive with several full-throttle
+pulls in 3rd/4th and one long overrun under
+`./run_car.sh --extra-mappings mappings/candidates/bmw/dde/n47/d72n47a0_airpath.yaml`
+so the verified boost pair (`d72n47a0_flow.yaml`) is in the same session
+for the cross-check.
+*Pass:* VNT setpoint and position both in 0..100 and moving together
+with the verified boost setpoint (`0x42C8`); governor deviation ~0 hPa
+at steady cruise and matching the sign and magnitude of
+`boost_set − boost_act` within ~50 hPa; swirl flaps moving at low
+rpm/load only; throttle near fully open except at idle/overrun/shutdown.
+*Fail:* any position outside 0..100, a pair whose members never move
+together, or a governor deviation whose sign disagrees with the verified
+pressure pair.
+
+---
+
+## 4. IBS battery — `d72n47a0_ibs.yaml`
+
+**Source.** `IIBAT` `0x4286` (A, ×0.08 −200), `IIUBAT` `0x428D` (V,
+×0.00025 +6), `ITBAT` `0x428C` (°C, ×0.009237 −50), `Soc_rel` `0x42A2`
+(%, ×0.001526), `D_soc` `0x4285` (distance to the start-capability limit,
+×0.003052), `IIGEN` `0x4290` (alternator current, u8 A). Tier B. The IBS
+block jobs (`22 40 2B` / `22 40 3B`) are documented, not mapped — the
+table does not state their layout.
+
+**Analysis note.** Two hypotheses. (a) **Charging-system health**: the
+current sign convention and the alternator current give the charge
+balance per trip; a battery that no longer accepts charge shows as a
+falling SOC trend across trips at comparable alternator output and
+temperature — a *drift* model in the `HEALTH_MODELS.md` sense with
+`n47d_battery_temp` as the condition. (b) **A better eligibility gate**
+for every other model: the verified warm-up model already excludes
+cranking; the IBS current identifies the cranking window and the
+post-start recharge exactly, and `D_soc` is the ECU's own "start
+capability" number — the one the car acts on (shutting down consumers)
+before any lamp. `n47d_ibs_voltage` is the cross-check for standard PID
+0x42 (control-module voltage) already in the production set.
+
+*What it cannot support:* battery *capacity* (needs a discharge test),
+and anything about the IBS's own calibration — a SOC of 80 % is the
+IBS's claim.
+
+**Logged continuously?** Split by physics: **current** on `dde_dyn`
+(it changes with every consumer switch and with the cranking window),
+the **state** set on `dde_slow` (SOC and temperature move over minutes
+to hours; a sample every ~60 s each is plenty).
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py sweep mappings/candidates/bmw/dde/n47/d72n47a0_ibs.yaml n47.d72.dyn.4286 n47.d72.dyn.428D --seconds 120
+python3 tools/validate_candidate.py run   mappings/candidates/bmw/dde/n47/d72n47a0_ibs.yaml --all
+```
+engine idling, then during the sweep switch a **known load** on for
+20 s and off: dipped beam (2 × 55 W ≈ 8–9 A at 13.5 V), then the rear
+defroster (≈ 15–20 A).
+*Cross-check:* the current step's magnitude against the known load;
+`n47d_ibs_voltage` against PID 0x42 at the same moment; battery
+temperature against ambient (PID 0x46) on a cold car.
+*Pass:* a current step of the expected magnitude with a matching small
+voltage dip; IBS voltage within 0.3 V of PID 0x42; battery temperature
+within ~10 °C of ambient when cold; SOC and `D_soc` in 0..100.
+*Fail:* no step; a step wrong by more than 2× (the scale is wrong); a
+constant.
+
+---
+
+## 5. EGS input/output speed and converter slip — `f10_transmission_speeds.yaml`
+
+**Source.** OBDb `BMW-5-Series` signalset (commit
+`d634524724470765a16c2867eea515e462336f0e`, CC-BY-SA-4.0; the evidence
+copy is `research/evidence/n47/obdb/egs_dids.yaml`): EGS `0x18`, DID
+`0xDA2A` "two s16 fields, rpm" (`5SERIES_TQ_CNVRT_RPM`), DID `0xDA12`
+"len 8, max 255, scalar" (`5SERIES_ATF_TEMP`, decode incomplete). Tier C
+(`source_claim`): the field order within `DA2A` and any scale for `DA12`
+are **not stated**, so the file names the words by offset and keeps
+`DA12` raw.
+
+**Analysis note.** Converter slip = engine rpm − turbine rpm. The
+turbine speed is already verified from the DDE's received copy
+(`n47d_turbine_rpm`, `0x46ED`, in `d72n47a0_gearbox.yaml`), so **slip is an
+analysis-layer derivation available today** — `rpm − n47d_turbine_rpm`,
+conditioned on gear and lock-up state. What `DA2A` adds is the EGS's own
+number (no bus latency, and the *output* shaft speed, which with `gear`
+gives the per-gear ratio and a tyre/final-drive constant). A slip that
+grows at comparable load in a locked-up gear is the converter clutch
+wearing; a slip that appears at the *same* load and gear where it used
+to be zero is the actionable drift. `DA12` vs the verified `0x46F0`
+(gearbox oil temperature, the DDE's received copy) is a decode
+exercise: an affine fit with r² > 0.99 across a warm-up gives the scale,
+otherwise it stays raw.
+
+*What it cannot support:* nothing about clutch *pressure* or the
+selector position (P/R/N/D remains unfound — `n47-next-session.md`).
+
+**Logged continuously?** `DA2A` on `egs` (2 Hz, same as `gear` — resolves
+the state, not the 300 ms transient); `DA12` on `egs_slow` (1/10 s). Two
+requests, not four: the EGS is the ECU that sleeps and answers a routing
+NACK when it does, so every extra request is a fault we may provoke.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py --ecu 0x18 sweep mappings/candidates/bmw/egs/f10_transmission_speeds.yaml --all --seconds 300
+```
+for the range sanity check (both words in 0..8000 and moving), then a
+drive under
+`./run_car.sh --extra-mappings mappings/candidates/bmw/egs/f10_transmission_speeds.yaml`
+— steady cruise in a locked-up gear, a few shifts and a stretch in a low
+gear at low speed — so the verified `d72n47a0_gearbox.yaml` channels and
+`gear` are in the same session.
+*Cross-check:* one `DA2A` field vs the verified `0x46ED` turbine speed
+(within 1 % at cruise) and vs engine rpm (PID 0x0C, within 3 % when
+locked up); the other field vs road speed (PID 0x0D) with a constant
+ratio *per gear*; `DA12` vs `0x46F0`.
+*Pass:* the two fields are assignable (one is the turbine, the other is
+proportional to road speed with a constant ratio per gear) and `DA12`
+tracks `0x46F0` affinely. *Fail:* both fields tracking rpm (no
+output-shaft speed), a field that does not move with speed, or `DA12`
+constant across a 20 °C warm-up. On pass the file is re-pointed with the
+words named (`egs_turbine_rpm`, `egs_output_rpm`) at version 2.
+
+---
+
+## 6. Fuel: KOMBI tank senders — `d72n47a0_tank.yaml` (partial)
+
+**Source.** For the *senders* — the left/right level probes the KOMBI
+(`0x63`) reads — **no traceable source exists on this host**, so no
+request is written for them (Tier D produces nothing executable). The
+one fuel quantity with a source is the DDE's *received* calculated tank
+content: `IFTNK` `0x4458` (l, ×0.001907), Tier B. Standard PID `0x2F`
+(fuel level) is **not advertised** by this DDE (capability scan
+`validation-runs/20260825T191658Z-identify`), which is why the
+dashboard's fuel tile has never shown a value.
+
+**What to mine from the owner's `local/captures/kombi_dids.json`** (not
+on this host; do not guess values):
+- every KOMBI (`0x63`) DID that answered with **2 or more bytes** and
+  whose value *moved between captures at different fuel levels*, or
+  differs from the `DA`/`D0`-range static identity DIDs already in
+  `mappings/candidates/bmw/kombi/f10_static.yaml`;
+- **a pair** of DIDs (or two fields of one DID) that move together but
+  not identically — the F10 has a saddle tank with two senders, and the
+  cluster's litres is a function of both; a single field that equals
+  `IFTNK` is the calculated content, not a sender;
+- the raw resistance/voltage form if present (senders are typically
+  reported as Ω or as a 0..255 ADC count before the characteristic);
+- and for each: the request as sent (`22 xx xx`), the response length,
+  and the capture's fuel level as shown on the cluster at that moment.
+Any DID found that way enters a new `kombi/f10_tank.yaml` as `discovered`
+with `source.type: trace` and the capture named — never as a scale.
+
+**Analysis note.** With only the calculated content, the model is the
+**trip-level fuel-consumption cross-check**: Δlitres over a trip vs the
+integral of the analysis layer's MAF/lambda-based fuel estimate (PID
+0x5E is mapped but not advertised either). A persistent bias between
+the two is either the estimate or the level calculation; with the two
+senders it becomes possible to say which, and to see a sender drifting
+against the other. *What it cannot support:* a bad sender vs a bad
+calculation — not from `IFTNK` alone.
+
+**Logged continuously?** `dde_slow` — the value moves on a scale of
+minutes at best.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py run mappings/candidates/bmw/dde/n47/d72n47a0_tank.yaml
+```
+ignition on, at two known fuel levels (before and after a refuel of a
+known quantity from the pump receipt).
+*Cross-check:* the cluster's range ÷ shown average consumption gives
+litres to ~2 l; the refuel delta must reproduce within the pump's
+quantity ±2 l. *Pass:* both agree. *Fail:* a constant across the
+refuel, or a value above the 70 l tank.
+
+---
+
+## 7. DTC and freeze-frame — `bmwdiag/dtc.py`, `tools/dtc.py` (on demand)
+
+**Decision: not polled.** A stored code changes a few times a year,
+the readout is one exchange per subfunction, and the answer is a list —
+the lake's narrow `samples` table is the wrong shape for it. What the
+*polled* set needs is "was a fault stored during this run", and SAE PID
+0x01 gives that as one byte (domain 8). Fault context is therefore an
+**on-demand, read-only tool** with a tracked artifact, in the same
+format as every validation run:
+
+```
+python3 tools/dtc.py                     # engine ECU, 19 02 FF (everything)
+python3 tools/dtc.py --mask 0x0C         # what ISTA's FS_LESEN asks for (pending+confirmed)
+python3 tools/dtc.py --count             # + 19 01, the number PID 0x01 must agree with
+python3 tools/dtc.py --detail            # + 19 04 snapshot and 19 06 extended data per DTC
+python3 tools/dtc.py --ecu 0x18          # the EGS
+```
+
+**Source.** ISO 14229-1 for the `0x19` request/response format (Tier A,
+a public standard); the d72n47a0 table for what ISTA sends on this
+family — `FS_LESEN` = `19 02 0C`, `FS_LESEN_DETAIL` = `19 04 / 19 06 /
+19 09`, `FS_LESEN_PERMANENT` = `19 15` (Tier B, quoted for the mask
+constant only). Codes are reported as BMW's 16-bit fault number +
+failure-type byte, **not** translated to SAE Pxxxx — that translation
+would be an inference the wire does not support; the ISTA text lookup
+is the owner's, offline. Snapshot/extended bodies are kept **raw** in
+the artifact: the DIDs inside and their lengths are ECU-specific and
+unsourced.
+
+**Safety.** Every payload is built by `bmwdiag.dtc`, whose builders run
+`assert_observational` before returning and assert service `0x19`;
+`tools/dtc.py` runs the gate again per exchange and `live.HsfzClient`
+gates on the wire. Service `0x14` (ClearDiagnosticInformation) is on the
+refusal list and the tool has no code path that builds it —
+`tests/test_dtc.py` pins that at the AST level (no `bytes(` construction,
+no service literal in the tool) and pins that a readout with `--count
+--detail` sends only `0x19` frames. Fault memory is never cleared from
+here: clearing destroys evidence and is a write.
+
+**Analysis note.** The readout is the *ground truth* the polled
+`dtc_count` (PID 0x01) is checked against, and the eligibility gate's
+justification: a baseline built while a fault was stored has learned
+the fault. *What it cannot support:* a time series (by design), and any
+claim about codes it cannot name — a BMW number without the ISTA text
+is a key, not a diagnosis.
+
+**On-car plan.** `python3 tools/dtc.py --count --detail` once, engine
+running, then `--ecu 0x18`. *Pass:* a `59 02` reply that parses (an empty
+list is a pass), `19 01`'s count equal to the number of confirmed
+entries in the list, and PID 0x01's count (domain 8) equal to it in the
+same session. *Fail:* a reply that does not parse (the artifact keeps
+the raw bytes — that is the finding), or an NRC to `19 02` itself. An
+NRC to `19 04`/`19 06` for a given code is *data*, recorded per code.
+
+---
+
+## 8. Remaining SAE PIDs — `engine_sae_extra.yaml`
+
+**Accounting** (capability scan `validation-runs/20260825T191658Z-identify`,
+engine.yaml v5):
+
+| | PIDs |
+|---|---|
+| advertised (30) | 01 04 05 0B 0C 0D 0F 10 11 13 1C 1F 20 21 23 24 2C 2D 30 31 33 3C 40 41 42 45 46 49 4A 4C |
+| polled by engine.yaml (20 of them) | 04 05 0B 0C 0D 0F 10 11 1F 23 24 2C 2D 31 33 3C 42 45 46 49 |
+| mapped but **not advertised** (resolve to nothing on this car) | 2F 5C 5E 62 |
+| advertised and **unpolled** (10) | 01 13 1C 20 21 30 40 41 4A 4C |
+
+Of the ten, **two carry a hypothesis** and are in the candidate file;
+the other eight are deliberately absent, each for a reason:
+
+- `0x01` **MIL / confirmed-DTC count** (`mil`, `dtc_count`, class `rare`).
+  Hypothesis: every condition-normalised baseline must exclude samples
+  taken while a fault is stored, or it learns the fault; no polled
+  channel says so today. One byte per minute labels every run.
+- `0x4C` **commanded throttle** (`throttle_cmd`, class `context`, batched
+  with its partner `0x11`). Hypothesis: commanded vs position is the
+  intake-throttle setpoint/actual pair from the *standard* set — the one
+  pair in this whole document that could ever enter the production set,
+  because it needs no BMW data. Declared with the same separated steps
+  as `0x11` (`scale: 100.0, divide: 255.0`), and the test proves the two
+  decode bit-identically for every raw byte.
+- `13`, `1C`, `20`, `40` — capability / sensor-layout words: constants.
+- `21` (distance with MIL on) and `30` (warm-ups since DTCs cleared) —
+  only move while a fault is stored; the on-demand readout (domain 7)
+  carries that context with the code itself.
+- `41` — the drive-cycle monitor status: a per-cycle readiness word, no
+  trend.
+- `4A` — accelerator pedal E, the second track of the pedal already
+  polled as `0x49`; a second copy of the same pedal is a plausibility
+  check the ECU already performs, not a health signal.
+
+**Production-set decision: unchanged.** `mappings/obd/engine.yaml` is
+byte-identical to master (the pin test stands, no version bump). The
+two PIDs sit in a candidate file so the "production set is the standard
+SAE set that has proved itself on this car" property keeps meaning what
+it says. **Promotion path** after a drive: move both into engine.yaml as
+**v6**, re-base the byte-pin test with a note naming this document and
+the artifact, and delete the candidate file.
+
+**On-car plan.**
+```
+python3 tools/validate_candidate.py sweep mappings/candidates/obd/engine_sae_extra.yaml --all --seconds 60
+python3 tools/dtc.py --count
+```
+at idle, then key-off with the sweep still running for the throttle
+close.
+*Pass:* `dtc_count` equals the confirmed-code count from `19 01`/`19 02`
+in the same session and `mil` matches the cluster lamp; `throttle_cmd`
+tracks `0x11` within 10 % (both near open at idle, both drop at
+key-off). *Fail:* a count that disagrees with the `0x19` readout, or
+`0x4C` constant while `0x11` moves.
+
+---
+
+## What still needs a drive (summary for the PR)
+
+Every file above. Specifically, in the order the issue ranks them:
+
+1. injectors — warm idle `run --all` + 180 s sweep, IMKZ permutation check;
+2. EGR — 120 s sweep with two hard accelerations, beside `dpf_egr.yaml`;
+3. air path — 180 s sweep with full-throttle pulls, beside `flow.yaml`;
+4. IBS — 120 s sweep with a known load step (dipped beam, rear defroster);
+5. EGS speeds — 300 s sweep on `--ecu 0x18` beside `gearbox.yaml`, locked-up cruise;
+6. tank — `run` at two known fuel levels across a refuel; the KOMBI
+   senders need the local capture mined first;
+7. DTC — one `tools/dtc.py --count --detail` readout per ECU, the first
+   `validation-runs/*-dtc/` artifact;
+8. SAE extras — 60 s sweep at idle through key-off, with `tools/dtc.py
+   --count` for the cross-check; then the engine.yaml v6 promotion.

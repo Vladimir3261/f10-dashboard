@@ -1,0 +1,140 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Transmission depth from the EGS itself (0x18, static UDS 22): torque-
+# converter turbine speed + output-shaft speed (DA2A) and the raw ATF
+# temperature word (DA12). NOT yet read on F10-520d-dev. A different ECU
+# from the DDE; everything here is a Tier C community claim
+# (source_claim), the weakest tier that may still produce a candidate.
+#
+# Issue #15, domain 5. Hypothesis (docs/TELEMETRY_CANDIDATES.md,
+# "Transmission"): converter slip = engine rpm - turbine rpm is the ZF
+# 8HP's lock-up-clutch health signal (slip that grows at the same gear,
+# load and ATF temperature over months = clutch wear or a control
+# problem), and output-shaft rpm x final drive vs road speed is a free
+# consistency check on the whole speed chain. The DDE ALREADY has a
+# verified copy of turbine speed (n47d_turbine_speed, Com_nTSC 0x46ED in
+# d72n47a0_gearbox.yaml, 0.5 rpm/bit, tracked engine rpm at cruise) -
+# which is exactly what proves or refutes the DA2A decode without any
+# other instrument. Output-shaft speed exists on no DDE row; it is the
+# one quantity only the EGS can give.
+#
+# Source: research/evidence/n47/obdb/egs_dids.yaml - OBDb/BMW-5-Series @
+# d634524724470765a16c2867eea515e462336f0e, signalsets/v3/default.json
+# (CC-BY-SA-4.0, retrieved 2026-08-25). Claims:
+#   obdb.5series.DA2A  22 DA 2A  "Torque converter speed + output shaft
+#                      speed", fmt "two s16 fields, unit rpm"  (complete)
+#   obdb.5series.DA12  22 DA 12  "Automatic transmission fluid
+#                      temperature", fmt "len 8, max 255, unit scalar"
+#                      (INCOMPLETE - no scale, offset or unit)
+# The same source's DA2E byte-0 claim (P/R/N/D selector) was WRONG on
+# this car (f10_transmission.yaml: byte 0 is a constant, byte 1 the
+# gear), so these rows carry no more trust than "worth one read". Which
+# s16 is which in DA2A is NOT stated: labelled by offset, and the
+# validation plan assigns the names by behaviour (the one that equals
+# engine rpm at lock-up is the turbine).
+#
+# Not requested: obdb.5series.DA25 (engine oil temp "len 16 signed add
+# -48") - the DDE's verified oil temp (0x4517) is the authoritative
+# source and an EGS copy feeds no model; DA12 IS requested despite the
+# incomplete decode because the verified DDE copy of gearbox oil temp
+# (Com_tGbxOil 0x46F0, u8 -40) is the EGS's own value received over the
+# bus, so the DA12 scale can be DERIVED from agreement rather than
+# guessed - that is the whole point of reading it raw.
+# ======================================================================
+
+mapping:
+  id: candidate-f10-egs-speeds
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - EGS (0x18) turbine + output-shaft speed (22 DA2A, two
+    s16 rpm per OBDb) and the raw ATF-temperature byte (22 DA12, decode
+    unknown). Tier C; not yet read on F10-520d-dev.
+
+source:
+  type: manual
+  file: research/evidence/n47/obdb/egs_dids.yaml
+  notes: >
+    OBDb/BMW-5-Series @ d634524724470765a16c2867eea515e462336f0e
+    (CC-BY-SA-4.0), signalsets/v3/default.json, ecu 0x18: DA2A "two s16
+    fields, unit rpm" (5SERIES_TQ_CNVRT_RPM); DA12 "len 8, max 255, unit
+    scalar" (5SERIES_ATF_TEMP, decode incomplete). Tier C (source_claim).
+    Field order within DA2A not stated by the source.
+
+verification:
+  status: candidate
+  method: >
+    Not yet attempted on the car. Plan (docs/TELEMETRY_CANDIDATES.md,
+    "Transmission"): a drive with steady cruise in a locked-up gear,
+    `tools/validate_candidate.py sweep <this file> --all --seconds 300`
+    with the DDE run stopped (one HSFZ client). Pass = one DA2A field
+    equals the DDE's verified turbine speed (0x46ED, read in the same
+    sweep via d72n47a0_gearbox.yaml) within 1 % at cruise and equals
+    engine rpm (PID 0x0C) within 3 % when locked up, the other field is
+    proportional to road speed (PID 0x0D) with a constant ratio across
+    gears (= final drive x tyre), and DA12 tracks 0x46F0 by an affine
+    relation with r^2 > 0.99 across the warm-up; fail = both fields
+    tracking rpm (no output-shaft), a field that does not move with
+    speed, or DA12 constant across a 20 degC warm-up.
+  vehicle: F10-520d-dev (VIN in local/VEHICLES.md)
+
+ecu:
+  family: transmission
+  target: 0x18
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    target: 0x18
+    timeout: 0.4
+
+# `egs` declared identically to f10_transmission.yaml (2 Hz; the planner
+# takes the last declaration). Physics: converter lock-up engages and
+# releases over ~0.5-1 s and slip during a shift lasts ~300 ms, so 2 Hz
+# resolves the STATE (locked / slipping / open) but not the transient -
+# the same trade already made for `gear`. ATF temperature has a time
+# constant of minutes: `egs_slow` at 1/10 s. The EGS is the ECU that
+# sleeps and answers a routing NACK when it does (see
+# f10_transmission.yaml), so every extra request here is a fault we may
+# provoke; 2 requests, not 4, for that reason.
+polling_classes:
+  egs: {seconds: 0.5, priority: 4}
+  egs_slow: {seconds: 10, priority: 6}
+
+requests:
+
+  egs.speeds.DA2A:
+    did: 0xDA2A
+    polling: {class: egs}
+    response: {data_length: 4}
+    signals:
+      # Field order unknown - named by offset until the drive assigns
+      # them. Signed per the source; negative would be reverse rotation
+      # (output shaft in R) which is itself a plausibility check.
+      egs_da2a_w0:
+        label: EGS DA2A word 0 (rpm, turbine or output?)
+        unit: rpm
+        display: {digits: 0, min: -1000, max: 7000}
+        decode: {type: int16_be, offset: 0, round: 0}
+      egs_da2a_w1:
+        label: EGS DA2A word 1 (rpm, turbine or output?)
+        unit: rpm
+        display: {digits: 0, min: -1000, max: 7000}
+        decode: {type: int16_be, offset: 2, round: 0}
+
+  egs.atf.DA12:
+    did: 0xDA12
+    polling: {class: egs_slow}
+    response: {data_length: 1}
+    signals:
+      # RAW. The source gives no scale; the DDE's verified received copy
+      # (0x46F0) is what this byte is compared against to find one.
+      egs_da12_raw:
+        label: EGS DA12 raw (ATF temp, undecoded)
+        unit: ""
+        display: {digits: 0, min: 0, max: 255}
+        decode: {type: uint8, offset: 0, round: 0}

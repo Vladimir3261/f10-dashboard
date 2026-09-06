@@ -1,0 +1,148 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# EGR valve requested vs actual POSITION, plus the EGR-rate setpoint, from
+# the DDE (0x12) via the proven F-series dynamic 0xF303 read path. NOT yet
+# read on F10-520d-dev - Tier B table claims (sgbd_derived) until a
+# supervised run says otherwise.
+#
+# Issue #15, domain 2. Today the EGR health model (docs/HEALTH_MODELS.md)
+# is "unavailable: requested/actual not yet mapped"; the only EGR channel
+# on the car is the mass-flow governor deviation (n47d_egr_deviation,
+# AirCtl_rGovDvtNrm 0x487A in d72n47a0_dpf_egr.yaml), which showed a 144 %
+# outlier nobody could attribute. Position setpoint vs sensed position is
+# the actuator-level tracking pair: a valve that lags or never reaches its
+# setpoint (sticking, sooted) is a different fault from a valve that
+# tracks perfectly while the AIR MASS still misses (flow path, cooler,
+# sensor) - and only the pair separates the two.
+#
+# Rows quoted from the pinned d72n47a0 SG_FUNKTIONEN table
+# (emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+# docs/sgbd/d72n47a0.md, sha256 161ec6ea...6a544b; re-fetched and
+# hash-checked 2026-09-06, source cache absent on this host). Every row
+# SG_ADR 12, SERVICE 22;2C, DATENTYP unsigned int (u16 BE).
+#
+#   EGRVlv_rDesEGR  0x4C93  %  x0.003052 -100   "AGR-Ventil - Sollposition"
+#   EGRVlv_rSens    0x4C97  %  x0.001526        "AGR-Ventil - Istposition
+#                                                aus Sensorkennlinie"
+#   AirCtl_rDesVal  0x487E  -  x0.01            "AGR-Rate - Sollwert"
+#
+# Note the two position rows use DIFFERENT scales (a signed-offset one
+# for the setpoint, an unsigned one for the sensed position) - both as
+# printed in the table, not harmonised. If on the car they disagree by
+# a constant factor of two, that is a table error to record, not a
+# mapping to "fix" by eye.
+#
+# Also in the table, documented but NOT requested (no hypothesis needs
+# them yet, and each F303 member costs rotation time):
+#   EGRVlv_rAct 0x4C8C (Tastverhaeltnis, x0.012207)  EGRVlv_r 0x4C8F
+#   (Solltastverhaeltnis, x0.003052)  IAAGR 0x4C8D (x0.001526)
+#   EGRVlv_uRaw 0x4C9A (mV, x0.228885 -5000)  EGRVlv_stMon 0x4C8B (u8
+#   monitor status, enum NOT stated - unknown stays unknown)
+#   EGRVlv_rOfsLrnLst 0x4C91 (learned offset, x0.003052 -100 - a good
+#   long-term drift channel for `dde_slow` once the pair is verified)
+#   AirCtl_rRatGovDvt 0x488C, AirCtl_mGovDvt 0x4876, SLMMG 0x4872.
+#
+# !! ONE REQUEST AT A TIME - all share dynamic DID 0xF303 !!
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-egr
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - EGR valve position setpoint vs sensed position (a
+    declared pair) and the EGR-rate setpoint, from the d72n47a0
+    SG_FUNKTIONEN table via 0xF303. Not yet read on F10-520d-dev.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Rows: EGRVlv_rDesEGR 0x4C93 (%, 0.003052/-100),
+    EGRVlv_rSens 0x4C97 (%, 0.001526), AirCtl_rDesVal 0x487E (-, 0.01).
+    All unsigned int, SG_ADR 12, SERVICE 22;2C. Tier B (sgbd_derived).
+
+verification:
+  status: candidate
+  method: >
+    Not yet attempted on the car. Plan (docs/TELEMETRY_CANDIDATES.md,
+    "EGR"): warm idle then a short drive, `tools/validate_candidate.py
+    sweep <this file> --all --seconds 120`; pass = both positions in
+    0..100 %, sensed tracks setpoint within ~5 % after a step, and both
+    go towards closed (the table does not say which end is 0 %) under
+    hard acceleration while the rate setpoint (0x487E) drops; fail = a
+    position outside 0..100, or the sensed value not moving while the
+    verified governor deviation (0x487A) does.
+  vehicle: F10-520d-dev (VIN in local/VEHICLES.md)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  sgbd: d72n47a0                # the table the rows came from - provenance
+  match:
+    capability:
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.4C93, n47.d72.dyn.4C97]
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+# Same `dde_dyn` rotation as the other verified d72 files (declared
+# identically; the planner takes the last declaration). Physics: the EGR
+# valve moves in ~100 ms and its setpoint changes with every load change,
+# so it belongs with boost/rail in the 0.5 s rotation, not in a slow
+# class. The setpoint/actual pair is declared as one slot so the two are
+# sampled in the same cycle - a tracking error is meaningless when the
+# two sides were read 10 s apart. COST: +3 requests (+2 slots) on the
+# verified 23-request, 21-slot rotation (~10.5 s -> ~11.5 s per slot)
+# when loaded beside it; the price of a tracking pair, paid only on a
+# run that opts in with --extra-mappings.
+polling_classes:
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
+
+requests:
+
+  n47.d72.dyn.4C93:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4C 93 01 02"]
+    polling: {class: dde_dyn, pair: egr_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_egr_pos_set:
+        label: EGR valve position (setpoint)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.003052, add: -100.0, round: 2}
+
+  n47.d72.dyn.4C97:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4C 97 01 02"]
+    polling: {class: dde_dyn, pair: egr_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_egr_pos_act:
+        label: EGR valve position (sensed)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.001526, round: 2}
+
+  # EGR-rate setpoint (dimensionless ratio, table unit "-", x0.01 so the
+  # decoded value is presumably 0..100 in percent-of-charge - "presumably"
+  # is the validation question, the display range is a guess to be
+  # corrected, not a fact).
+  n47.d72.dyn.487E:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 7E 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_egr_rate_set:
+        label: EGR rate (setpoint)
+        unit: ""
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.01, round: 2}

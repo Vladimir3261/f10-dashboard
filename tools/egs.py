@@ -45,6 +45,7 @@ _spec = importlib.util.spec_from_file_location(
 live = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(live)
 
+from bmwdiag import dtc as udsdtc                    # noqa: E402
 from bmwdiag.protocol.safety import UnsafePayload  # noqa: E402
 
 
@@ -203,32 +204,12 @@ def cmd_find(args) -> None:
 
 #
 # ISO 14229 DTC status bits. Without decoding these, a "not yet run"
-# monitor is indistinguishable from a live fault.
+# monitor is indistinguishable from a live fault. One definition, in
+# bmwdiag.dtc (tools/dtc.py is the artifact-writing readout; this
+# command stays as the quick console view).
 #
-STATUS_BITS = [
-    (0x01, "testFailed"),
-    (0x02, "failedThisCycle"),
-    (0x04, "pending"),
-    (0x08, "confirmed"),
-    (0x10, "notCompletedSinceClear"),
-    (0x20, "failedSinceClear"),
-    (0x40, "notCompletedThisCycle"),
-    (0x80, "warningIndicator"),
-]
-
-
-def dtc_severity(status: int) -> str:
-    if status & 0x01:
-        return "ACTIVE"
-    if status & 0x08:
-        return "stored"
-    if status & 0x04:
-        return "pending"
-    if status & 0x20:
-        return "historic"
-    if status & 0x50 == 0x50:
-        return "not-run"
-    return "-"
+STATUS_BITS = udsdtc.STATUS_BITS
+dtc_severity = udsdtc.severity
 
 
 def cmd_dtc(args) -> None:
