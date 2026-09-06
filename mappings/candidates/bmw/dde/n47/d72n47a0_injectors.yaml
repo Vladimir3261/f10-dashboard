@@ -46,7 +46,8 @@ schema_version: 1
 #        drive cycle (resets with the cycle; treat as a per-run counter).
 #
 # CROSS-VARIANT NOTE (recorded, not merged). The d73n47a0 records in
-# research/normalized/n47/signals.jsonl (morguux-d73n47a0, Tier B) carry
+# research/normalized/n47/signals.jsonl (a gitignored build output of
+# research.build; morguux-d73n47a0, Tier B) carry
 # FBC_qDvtCylPhys_0 as x0.156863 -20 (a byte-wide -20..+20 mg/hub
 # scale), while the d72 table says x0.003052 -100 over 16 bits. Every
 # other row in this file agrees between the two variants to the last

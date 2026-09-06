@@ -267,8 +267,10 @@ then flip the file to `verified` (version 2, artifact named in
    a known load step (dipped beam ~8–9 A, rear defroster ~15–20 A), then
    `run --all`. Pass: the step reproduces within 2×, IBS voltage within
    0.3 V of PID 0x42.
-5. **EGS speeds** (`egs/f10_transmission_speeds.yaml`, `--ecu 0x18`) —
-   300 s sweep then a drive under `--extra-mappings` with locked-up
+5. **EGS speeds** (`egs/f10_transmission_speeds.yaml`) — 300 s sweep
+   (no `--ecu`: the sweep now routes each request to the file's fixed
+   `target: 0x18`; the EGS answers no OBD PID and cannot be *discovered*)
+   then a drive under `--extra-mappings` with locked-up
    cruise. The drive **assigns** the two `DA2A` words (turbine vs
    output shaft, by ratio against `0x46ED` and road speed per gear) and
    fits `DA12` against `0x46F0` — the file names nothing until then.
@@ -278,7 +280,8 @@ then flip the file to `verified` (version 2, artifact named in
    to be mined first — see the doc for what to look for (≥2-byte 0x63
    DIDs that move with fuel level, a left/right pair, vs `IFTNK`).
 7. **DTC readout** — `python3 tools/dtc.py --count --detail` once per
-   ECU (0x12, then `--ecu 0x18`), the first `validation-runs/*-dtc/`
+   ECU (0x12, then `--ecu 0x18` — the read address only; discovery
+   still finds the engine by capability), the first `validation-runs/*-dtc/`
    artifact. Read-only by construction (0x19 only; 0x14 has no code
    path). The count must agree with PID 0x01 (next item).
 8. **SAE extras** (`obd/engine_sae_extra.yaml`) — 60 s sweep at idle
@@ -288,7 +291,9 @@ then flip the file to `verified` (version 2, artifact named in
    the reasons in the doc.
 
 Rotation cost if *all* were loaded: `dde_dyn` 23 → 34 requests
-(~14 s per member) plus a new `dde_slow` rotation of 15. Validate one
+(~14 s per member) plus a new `dde_slow` rotation of 15. `dde_slow` and
+`egs_slow` are not named in `config/modes.yaml`: every mode scales them
+×1.0 and `sampling` does not exempt them (see the doc). Validate one
 file at a time; what enters `run_car.sh` afterwards is a separate
 decision per file.
 
