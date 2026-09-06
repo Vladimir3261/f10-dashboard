@@ -1,0 +1,138 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Two standard SAE J1979 Mode 01 PIDs this DDE ADVERTISES but the
+# production set (mappings/obd/engine.yaml) does not poll, held out of
+# the production set until a drive shows they earn their place. Standard
+# published definitions only (Tier A for the format; no BMW knowledge).
+#
+# Issue #15, domain 8. The 2026-08-25 capability scan
+# (validation-runs/20260825T191658Z-identify) advertises
+#   01 04 05 0B 0C 0D 0F 10 11 13 1C 1F 20 21 23 24 2C 2D 30 31 33 3C 40
+#   41 42 45 46 49 4A 4C
+# and engine.yaml v5 polls 04 05 0B 0C 0D 0F 10 11 1F 23 24 2C 2D 31 33
+# 3C 42 45 46 49 (plus 2F 5C 5E 62, which are NOT advertised and resolve
+# to nothing on this car). Advertised and unpolled: 01 13 1C 20 21 30 40
+# 41 4A 4C. Of those, two carry a hypothesis; the rest are explained
+# away in docs/TELEMETRY_CANDIDATES.md ("Remaining SAE PIDs") and are
+# deliberately absent here:
+#   13/1C/20/40 are capability/sensor-layout words (constants),
+#   21 (distance with MIL on) and 30 (warm-ups since DTCs cleared) only
+#   move while a fault is stored - the on-demand DTC readout covers
+#   that context better, 41 is the drive-cycle monitor status (a
+#   per-cycle readiness word, no trend), 4A is accelerator pedal E -
+#   the second track of the pedal already polled as 0x49; a second
+#   copy of the same pedal is a sensor-plausibility check the ECU
+#   already performs, not a health signal.
+#
+#   0x01  Monitor status since DTCs cleared. 4 bytes: byte A bit 7 = MIL
+#         commanded on, bits 0-6 = number of confirmed DTCs. Bytes B-D
+#         are readiness bits, ignored here.
+#         Hypothesis: every condition-normalised baseline
+#         (docs/HEALTH_MODELS.md) must EXCLUDE samples taken while a
+#         fault is stored, or the baseline learns the fault. Today no
+#         polled channel says whether that was the case; this makes it
+#         a per-run flag rather than a separate DTC read.
+#   0x4C  Commanded throttle actuator, 1 byte, A*100/255 %.
+#         Hypothesis: engine.yaml polls 0x11 (throttle position, the
+#         standard-set actuator reading). Commanded vs position is the
+#         same setpoint/actual pair the proprietary air-path file
+#         (d72n47a0_airpath.yaml, ThrVlv_rDesVal/rAct) builds, from the
+#         STANDARD set - it needs no BMW data, so if it tracks it is the
+#         one intake-throttle pair that could ever enter the production
+#         set. On a diesel the throttle is nearly always open; the
+#         interesting cases are shutdown (closes to stop shudder) and
+#         EGR-assist at low load.
+#
+# Promotion path: after a drive confirms both, they move into
+# engine.yaml as v6 with the byte-pin test re-based and a note saying
+# why; until then this file is a validation-only load and the production
+# set is byte-identical to master.
+# ======================================================================
+
+mapping:
+  id: candidate-sae-obd-engine-extra
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - two advertised-but-unpolled SAE Mode 01 PIDs (0x01 MIL/
+    DTC count, 0x4C commanded throttle) held out of the production set
+    until a drive shows they earn their place.
+
+source:
+  type: obd_standard
+  file: SAE J1979 / ISO 15031-5, service 01 (current data)
+  notes: >
+    Standard published PID definitions. No BMW proprietary diagnostic
+    knowledge is used, claimed or implied by this file. Advertisement
+    on this car per validation-runs/20260825T191658Z-identify.
+
+verification:
+  status: candidate
+  method: >
+    Not yet polled. Plan (docs/TELEMETRY_CANDIDATES.md, "Remaining SAE
+    PIDs"): `tools/validate_candidate.py sweep <this file> --all
+    --seconds 60` at idle; pass = 0x01 DTC count equals the number of
+    confirmed codes the on-demand `tools/dtc.py` readout (19 02 with the
+    confirmed bit) returns in the same session and MIL bit matches the
+    cluster lamp; 0x4C tracks 0x11 (both near open at idle, both drop
+    at key-off) within 10 %; fail = a count that disagrees with the
+    0x19 readout, or 0x4C constant while 0x11 moves.
+  vehicle: F10-520d-dev (BMW F10 520d, N47 diesel)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  match:
+    capability:
+      obd_mode01_pid: 0x0C
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: obd
+    service: 0x01
+    target: discovered_engine
+
+# Classes declared identically to engine.yaml (the planner takes the
+# last declaration; requests in one OBD class are batched into one
+# exchange, so 0x4C rides in the existing `context` batch for free and
+# 0x01 in the `rare` one).
+#   0x01 on `rare` (1/60 s): a stored-DTC count changes at most a few
+#        times per drive; what matters is that every minute of a run is
+#        labelled, not the second the lamp came on.
+#   0x4C on `context` (1/10 s): the same class as its partner 0x11, so
+#        the pair is batched into ONE exchange and sampled together.
+polling_classes:
+  context: {seconds: 10, priority: 1}
+  rare:    {seconds: 60, priority: 3}
+
+requests:
+
+  obd.mode01.01:
+    pid: 0x01
+    polling: {class: rare}
+    response: {data_length: 4}
+    signals:
+      mil:
+        label: MIL commanded on
+        unit: ""
+        display: {digits: 0, min: 0, max: 1}
+        decode: {type: bit, offset: 0, length: 1, bit: 7}
+      dtc_count:
+        label: Confirmed DTC count
+        unit: ""
+        display: {digits: 0, min: 0, max: 127}
+        decode: {type: bitfield, offset: 0, length: 1, mask: 0x7F}
+
+  obd.mode01.4C:
+    pid: 0x4C
+    polling: {class: context}
+    response: {data_length: 1}
+    signals:
+      throttle_cmd:
+        label: Throttle (commanded)
+        unit: "%"
+        display: {digits: 0, min: 0, max: 100}
+        decode: {type: uint8, scale: 100.0, divide: 255.0}

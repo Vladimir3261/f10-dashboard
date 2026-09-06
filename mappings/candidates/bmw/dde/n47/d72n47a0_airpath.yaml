@@ -1,0 +1,210 @@
+schema_version: 1
+
+# ============================================================ CANDIDATE
+#
+# Air-path ACTUATORS from the DDE (0x12) via the proven F-series dynamic
+# 0xF303 read path: the turbo (VNT) actuator setpoint vs corrected
+# position, the boost governor's pressure deviation, the swirl-flap
+# setpoint vs position and the intake throttle setpoint vs position. NOT
+# yet read on F10-520d-dev - Tier B table claims (sgbd_derived).
+#
+# Issue #15, domain 3. The verified boost-tracking model
+# (docs/HEALTH_MODELS.md) sees setpoint vs actual PRESSURE (0x42C8 /
+# 0x4841) and can say "boost is 0.18 bar under setpoint at this load" -
+# but not WHY. The VNT pair says whether the vane actuator is asked for
+# more and delivers it (then the problem is downstream: leak, restricted
+# intake, turbine) or asked for more and does not follow (actuator/vane
+# sticking - the N47's own classic). The governor deviation (0x42CD) is
+# the ECU's own view of the same tracking error, a cross-check of the
+# analysis-layer subtraction against the ECU's internal number.
+#
+# Rows quoted from the pinned d72n47a0 SG_FUNKTIONEN table
+# (emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+# docs/sgbd/d72n47a0.md, sha256 161ec6ea...6a544b; re-fetched and
+# hash-checked 2026-09-06, source cache absent on this host). Every row
+# SG_ADR 12, SERVICE 22;2C, DATENTYP unsigned int (u16 BE).
+#
+#   TrbCh_rDes      0x4CC9  %    x0.01              "gefordertes Turbolader-
+#                                                    Tastverhaeltnis"
+#   TrbCh_rAct      0x4CC4  %    x0.001526          "Ladedrucksteller -
+#                                                    Istposition korrigiert"
+#   PCR_pGovDvt     0x42CD  hPa  x0.999985 -32767   "Regelabweichung des
+#                                                    Ladedruckreglers"
+#   VSwVlv_r        0x48D9  %    x0.001526          "Drallklappe - Sollposition"
+#   VSwVlv_rAct     0x48D7  %    x0.012207          "Drallklappe - Istposition
+#                                                    korrigiert"
+#   ThrVlv_rDesVal  0x4BFB  %    x0.003052 -100     "Drosselklappe - Sollposition"
+#   ThrVlv_rAct     0x4BF8  %    x0.01              "Drosselklappe - Istposition
+#                                                    korrigiert"
+#
+# VARIANT CAUTION. The d72 table also carries a two-stage-charging set
+# (TrbChVNT_rAct 0x4CE5 / TrbChVNT_rDes 0x4CE7 x0.01, TrbChLP_*,
+# PCR_pGovDvtLP 0x42CE): the N47 in a 520d is single-stage, so the plain
+# TrbCh_* rows are nominated and the VNT/LP rows are NOT. If the plain
+# rows answer with a constant while the *VNT rows move, that is the
+# finding to record - it would mean this DDE's software is the two-stage
+# build - and the file would be re-pointed, with a version bump. Note the
+# setpoint is a DUTY CYCLE ("Tastverhaeltnis") and the actual a
+# POSITION: they need not be numerically equal even when tracking is
+# perfect. The tracking test is therefore "monotonic, no lag, no
+# saturation", not "equal".
+#
+# Not requested (documented): TrbCh_rGovDvt 0x4CCE (actuator governor
+# deviation, x0.006104 -200), TrbCh_rSens 0x4CC6, TrbCh_r 0x4CBE,
+# TrbCh_uRaw 0x4CCC (mV), TrbCh_stMon 0x4CCB (u16 status, enum not
+# stated), ASMod_nTrbCh 0x4D67 (MODELLED turbo speed, x3.814755 rpm - a
+# model output, not a sensor; the N47 has no turbo speed sensor), VSwVlv_
+# rSens 0x48DA, ThrVlv_rSens 0x4BF4, ThrVlv_stMon 0x4BFA, and the OBD
+# mirrors OBD_PID11/45/4C_ThrVlv_* 0x5211/0x5245/0x524C (u8 x0.392157).
+#
+# !! ONE REQUEST AT A TIME - all share dynamic DID 0xF303 !!
+# ======================================================================
+
+mapping:
+  id: candidate-n47-d72-airpath
+  version: 1
+  production: false
+  description: >
+    CANDIDATE - VNT actuator setpoint vs position, boost governor
+    deviation, swirl-flap and intake-throttle setpoint vs position (three
+    declared pairs) from the d72n47a0 SG_FUNKTIONEN table via 0xF303.
+    Not yet read on F10-520d-dev.
+
+source:
+  type: ediabas
+  file: d72n47a0 SG_FUNKTIONEN (ediabasx-docs-sgbd export)
+  notes: >
+    emdzej/ediabasx-docs-sgbd @ b644de8fbfbb4b207f57794e3c7894dc1dc58627,
+    docs/sgbd/d72n47a0.md. Rows: TrbCh_rDes 0x4CC9 (%, 0.01), TrbCh_rAct
+    0x4CC4 (%, 0.001526), PCR_pGovDvt 0x42CD (hPa, 0.999985/-32767),
+    VSwVlv_r 0x48D9 (%, 0.001526), VSwVlv_rAct 0x48D7 (%, 0.012207),
+    ThrVlv_rDesVal 0x4BFB (%, 0.003052/-100), ThrVlv_rAct 0x4BF8 (%,
+    0.01). All unsigned int, SG_ADR 12, SERVICE 22;2C. Tier B.
+
+verification:
+  status: candidate
+  method: >
+    Not yet attempted on the car. Plan (docs/TELEMETRY_CANDIDATES.md,
+    "VNT / air-path actuators"): a drive with several full-throttle
+    pulls in 3rd/4th, `tools/validate_candidate.py sweep <this file>
+    --all --seconds 180`; pass = VNT setpoint and position both in
+    0..100 and moving together with the verified boost setpoint (0x42C8),
+    governor deviation ~0 hPa at steady cruise and matching the sign and
+    magnitude of (boost_set - boost_act) from the verified pair within
+    ~50 hPa, swirl flaps moving at low rpm/load only, throttle ~fully
+    open except at idle/overrun/shutdown; fail = any position outside
+    0..100, a pair whose members never move together, or a governor
+    deviation that disagrees in sign with the verified pressure pair.
+  vehicle: F10-520d-dev (VIN in local/VEHICLES.md)
+
+ecu:
+  family: engine
+  target: discovered_engine
+  sgbd: d72n47a0                # the table the rows came from - provenance
+  match:
+    capability:
+      diagnostic_profile: fseries-f303-d72-compatible
+    probe: [n47.d72.dyn.4CC9, n47.d72.dyn.4CC4]
+
+defaults:
+  request:
+    transport: diagnostic
+    protocol: uds
+    service: 0x22
+    did: 0xF303
+    target: discovered_engine
+
+# `dde_dyn` (declared identically to the verified files). Physics: the
+# VNT actuator and throttle move in ~100-200 ms with every load change,
+# and their setpoints are recomputed every engine cycle; the interesting
+# events (a pull, an overrun) last a few seconds. 0.5 s rotation slots,
+# with each setpoint/actual pair in ONE slot so both sides come from the
+# same cycle. COST: +7 requests (+4 slots) on the verified 23-request,
+# 21-slot rotation (~10.5 s -> ~12.5 s per slot; all five candidate DDE
+# files together make it 28 slots, 14 s) - a lot, which is why the "not
+# requested" list above is long. A validation load only.
+polling_classes:
+  dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
+
+requests:
+
+  n47.d72.dyn.4CC9:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4C C9 01 02"]
+    polling: {class: dde_dyn, pair: vnt_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_vnt_set:
+        label: VNT actuator (setpoint duty)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.01, round: 2}
+
+  n47.d72.dyn.4CC4:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4C C4 01 02"]
+    polling: {class: dde_dyn, pair: vnt_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_vnt_act:
+        label: VNT actuator (position)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.001526, round: 2}
+
+  # The ECU's own boost tracking error. Offset -32767 with a 0.999985
+  # multiplier as printed - i.e. raw 32767 ~ 0 hPa. Not rounded to the
+  # table's whole hPa here: `round: 2` keeps the bit-exact contract and
+  # the analysis layer can round.
+  n47.d72.dyn.42CD:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 42 CD 01 02"]
+    polling: {class: dde_dyn}
+    response: {data_length: 2}
+    signals:
+      n47d_boost_gov_dev:
+        label: Boost governor deviation
+        unit: hPa
+        display: {digits: 0, min: -1000, max: 1000}
+        decode: {type: uint16_be, scale: 0.999985, add: -32767.0, round: 2}
+
+  n47.d72.dyn.48D9:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 D9 01 02"]
+    polling: {class: dde_dyn, pair: swirl_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_swirl_set:
+        label: Swirl flaps (setpoint)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.001526, round: 2}
+
+  n47.d72.dyn.48D7:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 48 D7 01 02"]
+    polling: {class: dde_dyn, pair: swirl_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_swirl_act:
+        label: Swirl flaps (position)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.012207, round: 2}
+
+  n47.d72.dyn.4BFB:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4B FB 01 02"]
+    polling: {class: dde_dyn, pair: throttle_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_throttle_set:
+        label: Intake throttle (setpoint)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.003052, add: -100.0, round: 2}
+
+  n47.d72.dyn.4BF8:
+    setup: ["2C 03 F3 03", "2C 01 F3 03 4B F8 01 02"]
+    polling: {class: dde_dyn, pair: throttle_pos}
+    response: {data_length: 2}
+    signals:
+      n47d_throttle_act:
+        label: Intake throttle (position)
+        unit: "%"
+        display: {digits: 1, min: 0, max: 100}
+        decode: {type: uint16_be, scale: 0.01, round: 2}
