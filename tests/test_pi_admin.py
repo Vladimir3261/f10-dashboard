@@ -458,7 +458,9 @@ class BindRefusesWildcard(unittest.TestCase):
             example = json.load(fh)
 
         self.assertEqual(example["password"], "CHANGE-ME")
-        self.assertNotIn(example["bind"], ("0.0.0.0", "::"))
+
+        for address in admin.listen_addresses(example["bind"]):
+            self.assertNotIn(address, ("0.0.0.0", "::"))
 
 
 class ActionsReportBack(AdminCase):
@@ -975,7 +977,14 @@ class ClaudeDisabled(AdminCase):
 
 
 class DiagnosticsProxy(AdminCase):
-    config = {"diagnostics_url": "http://127.0.0.1:9/nope"}
+    """
+    /api/diagnostics is live.py's, reverse-proxied like the rest of the
+    owner API (#40); the panel no longer fetches and re-serves it. The
+    upstream here is a closed port, so every answer is the proxy's
+    "runtime not running" mapping.
+    """
+
+    config = {"dashboard_url": "http://127.0.0.1:9"}
 
     def test_it_is_a_separate_endpoint_not_part_of_status(self):
         """
@@ -988,11 +997,22 @@ class DiagnosticsProxy(AdminCase):
         self.assertNotIn("requests", body)
         self.assertNotIn("dropped", body)
 
-    def test_an_unreachable_runtime_is_reported_not_a_500(self):
-        body = json.loads(self.get("/api/diagnostics").read())
+    def test_an_unreachable_runtime_is_a_503_the_tab_can_read(self):
+        """
+        503, not 200: the page must be able to tell "no data" from
+        "no runtime". The body still carries ready:false and a detail
+        line, which is exactly what the Car link tab renders as
+        "needs the car" - so the tab is not an error page either.
+        """
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/diagnostics")
+
+        self.assertEqual(caught.exception.code, 503)
+        body = json.loads(caught.exception.read())
 
         self.assertFalse(body["ready"])
         self.assertIn("not answering", body["detail"])
+        self.assertEqual(body["error"], "runtime not running")
 
     def test_it_needs_credentials(self):
         self.assert_status(401, self.get, "/api/diagnostics", headers={})

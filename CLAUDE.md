@@ -167,8 +167,13 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   the VPS `.env` (gitignored); the VPS IP + Grafana password are in the
   owner's notes, not git. `analysis/clickhouse/insights.sql` is the query
   battery.
-- **The Pi admin panel** (`hardware/raspberry-pi/admin/`): a phone-sized
-  page on `:8088`, three tabs. *System* — health
+- **The Pi admin panel** (`hardware/raspberry-pi/admin/`): the **single
+  front door** — a phone-sized page on `:8088` (LAN + wg0 listeners),
+  six tabs. *Drive / Detail / All-data* — the `dashboard/` telemetry UI
+  framed unchanged, its API reverse-proxied to `live.py` (which the Pi
+  unit binds to the loopback) behind the panel's auth; share links
+  (`/s/*`) pass through with `live.py`'s own token check and can reach
+  nothing of the panel. *System* — health
   (temp/throttle/disk/Wi-Fi/**clock**), recording truth (samples/min, not
   just "service active"), drive files with delete-if-synced, services,
   logs incl. previous boot, `git pull` (ff-only, pinned remote), reboot,

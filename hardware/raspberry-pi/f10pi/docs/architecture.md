@@ -18,8 +18,11 @@ network interfaces, each with one job, kept strictly separate:
                        └────────────────────────────────────────┘
                                         │
                                    live.py + bmwdiag
-                                   (:8080 dashboard, SQLite log)
+                                   (:8080 on the loopback, SQLite log)
                                         │
+                     f10-admin :8088 ───┤  the front door: telemetry
+                     (LAN + wg0)        │  views + API proxied, System/
+                                        │  Car link/Claude tabs
                                    sync agent ──► lake (over wlan0)
 ```
 
@@ -40,8 +43,14 @@ isolated link; all real Internet traffic goes out `wlan0`.
 
 - **`live.py` + `bmwdiag`** — stdlib-only Python. Discovers the BMW
   gateway on `eth0` by UDP broadcast, speaks HSFZ, polls read-only, logs
-  to SQLite, and serves the dashboard on `:8080`. Launched via
-  `run_car.sh` (loads every verified channel) by `f10-dashboard.service`.
+  to SQLite, and serves the dashboard on `:8080` — on the loopback
+  only (`--host 127.0.0.1`); the phone reaches it through the admin
+  panel. Launched via `run_car.sh` (loads every verified channel) by
+  `f10-dashboard.service`.
+- **f10-admin** (`hardware/raspberry-pi/admin/`) — the front door on
+  `:8088`, bound to the LAN and `wg0` addresses: the telemetry views
+  and their API reverse-proxied behind Basic auth, share links passed
+  through to `live.py`, and the System / Car link / Claude tabs.
 - **sync agent** (`infra/sync/agent.py`) — reads the SQLite logs
   read-only and ships drives to the ingest server over the `wg0` tunnel.
   It never talks to ClickHouse directly: ClickHouse publishes no host port,
