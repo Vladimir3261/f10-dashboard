@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -890,6 +891,39 @@ class RuntimeDown(ProxyCase):
         self.assertEqual(code, 503)
         self.assertEqual(body["error"], "runtime not running")
 
+    def test_a_share_viewer_learns_nothing_about_the_box(self):
+        """
+        The public prefix. The owner's 503 names the upstream and the
+        errno - useful on the Car link tab, and the loopback URL is in
+        the docs anyway. A viewer who was handed a link gets neither:
+        a browser gets a small page saying the car is unreachable, a
+        script the same JSON shape without `upstream` or an address.
+        """
+        upstream = self.cfg["dashboard_url"]
+
+        code, headers, body = self.json("/s/?t=abc", authed=False)
+        self.assertEqual(code, 503)
+        self.assertEqual(headers.get("Retry-After"), "5")
+        self.assertFalse(body["ready"])
+        self.assertNotIn("upstream", body)
+        self.assertNotIn(upstream, json.dumps(body))
+        self.assertNotRegex(json.dumps(body), r"\d+\.\d+\.\d+\.\d+|:\d{4}")
+
+        code, headers, raw = self.request(
+            "/s/?t=abc", authed=False, headers={"Accept": "text/html,*/*"})
+        page = raw.decode("utf-8")
+        self.assertEqual(code, 503)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertEqual(headers.get("Retry-After"), "5")
+        self.assertIn("unreachable", page.lower())
+        self.assertNotIn(upstream, page)
+        self.assertNotRegex(page, r"\d+\.\d+\.\d+\.\d+|:\d{4}|refused|errno")
+        self.assertNotRegex(page, r'(?i)<(link|script)[^>]*\b(href|src)=')
+
+        #: The owner still gets the detailed body.
+        code, headers, body = self.json("/api/meta")
+        self.assertEqual(body["upstream"], upstream)
+
     def test_the_page_and_the_telemetry_files_still_load(self):
         for path in ("/", "/dashboard/", "/dashboard/style.css",
                      "/dashboard/app.js"):
@@ -1390,6 +1424,79 @@ class DeploymentShape(unittest.TestCase):
         self.assertIn('[[ -n "$WG_IP" ]] && PROXY_IP="$WG_SERVER_IP"', script)
         self.assertIn('"trusted_proxies": [proxy] if proxy else []', script)
         self.assertIn("DASHBOARD_AUTH_PASSWORD", script)
+
+    def test_the_installers_config_block_survives_no_wg0_and_no_local_env(self):
+        """
+        The config block, run verbatim under the script's own
+        `set -euo pipefail` with a fake `ip` on PATH. Before the fix
+        `ip ... dev wg0` exiting 1 (no such device) or `sed` on an
+        absent local.env (gitignored: every Pi not provisioned through
+        f10pi) failed the pipeline and ended the script silently -
+        before config.json, sudoers or the unit were written.
+        """
+        script = self._read(self.ADMIN, "install.sh")
+        start = script.index("# ------")
+        start = script.index("config", start)
+        start = script.rindex("\n", 0, start) + 1
+        end = script.index("# ------", script.index("MERGE\n", start))
+        block = script[start:end]
+
+        cases = {
+            #: (wg0 present, local.env content or None) -> expected list
+            "wg0+local.env": (True, "WG_SERVER_IP=10.77.0.77\n", ["10.77.0.77"]),
+            "wg0, no local.env": (True, None, ["10.77.0.1"]),
+            "no wg0, no local.env": (False, None, []),
+            "no wg0, local.env": (False, "WG_SERVER_IP=10.77.0.77\n", []),
+        }
+
+        for label, (has_wg0, local_env, expected) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                repo = os.path.join(tmp, "repo")
+                cfg_dir = os.path.join(repo, "hardware", "raspberry-pi", "f10pi",
+                                       "config")
+                os.makedirs(cfg_dir)
+                if local_env is not None:
+                    with open(os.path.join(cfg_dir, "local.env"), "w") as fh:
+                        fh.write(local_env)
+
+                fake_bin = os.path.join(tmp, "bin")
+                os.makedirs(fake_bin)
+                lines = ["#!/bin/sh"]
+                if has_wg0:
+                    lines.append('case "$*" in *"dev wg0"*) '
+                                 'echo "3: wg0 inet 10.77.0.10/24 scope global wg0";; '
+                                 '*) echo "2: wlan0 inet 192.168.4.23/24 brd scope global wlan0"; '
+                                 'echo "3: wg0 inet 10.77.0.10/24 scope global wg0";; esac')
+                else:
+                    lines.append('case "$*" in *"dev wg0"*) '
+                                 'echo "Device \\"wg0\\" does not exist." >&2; exit 1;; '
+                                 '*) echo "2: wlan0 inet 192.168.4.23/24 brd scope global wlan0";; esac')
+                for name, body in (("ip", "\n".join(lines)),
+                                   ("sudo", "#!/bin/sh\necho git@example:o/r.git"),
+                                   ("chown", "#!/bin/sh\nexit 0")):
+                    path = os.path.join(fake_bin, name)
+                    with open(path, "w") as fh:
+                        fh.write(body + "\n")
+                    os.chmod(path, 0o755)
+
+                harness = os.path.join(tmp, "config-block.sh")
+                with open(harness, "w") as fh:
+                    fh.write("set -euo pipefail\n"
+                             f"HERE={tmp!r}\nREPO_DIR={repo!r}\nPI_USER=f10\n"
+                             + block)
+
+                env = dict(os.environ, PATH=fake_bin + os.pathsep + os.environ["PATH"])
+                run = subprocess.run(["bash", harness], env=env,
+                                     capture_output=True, text=True, timeout=30)
+
+                self.assertEqual(run.returncode, 0,
+                                 f"{label}: exit {run.returncode}\n{run.stderr}")
+                with open(os.path.join(tmp, "config.json")) as fh:
+                    written = json.load(fh)
+                self.assertEqual(written["trusted_proxies"], expected)
+                self.assertEqual(written["bind"],
+                                 ["192.168.4.23"] + (["10.77.0.10"] if has_wg0 else []))
+                self.assertNotIn("10.77.0.77", run.stdout + run.stderr)
 
     def test_no_new_action_and_the_sudoers_grant_is_unchanged(self):
         """#40 adds a proxy, not a privilege."""

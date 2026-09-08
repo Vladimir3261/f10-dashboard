@@ -78,6 +78,21 @@
         quiet: true
       when: dashboard_domain | length > 0
 
+    # The vhost proxies to the panel (:8088). A .env written before the
+    # panel existed still names live.py's 8080 - now on the Pi's loopback,
+    # so every request would 502 into the offline page with no hint why.
+    - name: Refuse the pre-panel dashboard port
+      ansible.builtin.assert:
+        that:
+          - pi_dashboard_port | string != '8080'
+        fail_msg: >-
+          PI_DASHBOARD_PORT=8080 in infra/.env: that is live.py on the Pi's
+          loopback, which nginx cannot reach. The vhost proxies to the Pi's
+          admin panel - set PI_DASHBOARD_PORT=8088 or drop the line (8088 is
+          the default).
+        quiet: true
+      when: dashboard_domain | length > 0
+
     # A wrong A record is the usual cause of a cryptic certbot failure, and
     # repeated failures burn the Let's Encrypt rate limit. Check first.
     - name: Resolve each domain

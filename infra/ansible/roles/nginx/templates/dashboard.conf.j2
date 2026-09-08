@@ -47,6 +47,9 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/{{ dashboard_domain }}/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
+    # Repeated in every location that has an add_header of its own:
+    # nginx inherits add_header only into a block that declares none,
+    # and a share viewer never hits a location without one.
     add_header Strict-Transport-Security "max-age=31536000" always;
 
     auth_basic           "F10 dashboard";
@@ -62,8 +65,14 @@ server {
     error_page 502 503 504 /__offline.html;
     location = /__offline.html {
         root /var/www/f10-offline;
+        # error_page is an internal redirect that re-runs the access
+        # phase HERE: without this a share viewer (no credential) gets
+        # nginx's 401 instead of the page. `internal` still keeps a
+        # direct GET of this path at 404, credential or not.
+        auth_basic off;
         internal;
         add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
     }
 
     # The panel: its page, the telemetry views and their API, and the
@@ -101,6 +110,7 @@ server {
 
         # A shared link is not something to leave in a search index.
         add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
     }
 
     # The dashboard streams telemetry over Server-Sent Events; buffering
@@ -126,6 +136,7 @@ server {
         chunked_transfer_encoding off;
 
         add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
     }
 
     location /api/stream {
