@@ -93,6 +93,7 @@ for key, value in (
     ("sync_control_url", "http://127.0.0.1:8091"),
     ("dashboard_status_url", "http://127.0.0.1:8080/api/snapshot"),
     ("dashboard_url", "http://127.0.0.1:8080"),
+    ("trusted_proxies", []),
     ("recording_window_s", 60),
 ):
     if key not in cfg:

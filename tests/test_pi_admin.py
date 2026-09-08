@@ -422,14 +422,25 @@ class BindRefusesWildcard(unittest.TestCase):
     """
 
     def _main(self, bind):
+        """serve() is stubbed: a bind that gets past the refusal returns
+        0 from the stub, and the assertion fails - the suite must never
+        hang on a regression here."""
         import io
         import contextlib
+        from unittest import mock
 
         cfg = os.path.join(support.ROOT, "hardware", "raspberry-pi",
                            "admin", "config.example.json")
         err = io.StringIO()
 
-        with contextlib.redirect_stderr(err):
+        def stub_serve(servers, pending, port, handler, **kwargs):
+            for server in servers:
+                server.server_close()
+
+            return 0
+
+        with mock.patch.object(admin, "serve", stub_serve), \
+                contextlib.redirect_stderr(err):
             code = admin.main(["--config", cfg, "--bind", bind])
 
         return code, err.getvalue()

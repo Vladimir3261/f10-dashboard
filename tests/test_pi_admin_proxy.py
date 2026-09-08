@@ -19,6 +19,7 @@ import io
 import json
 import os
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -26,6 +27,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tests import support  # noqa: F401
@@ -71,6 +73,10 @@ class FakeRuntime:
         self.release = threading.Event()
         self.client_gone = threading.Event()
         self.stream_started = threading.Event()
+        self.slow_started = threading.Event()
+        self.slow_release = threading.Event()
+        #: Connections open right now - what the panel is holding.
+        self.open_connections = 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -79,12 +85,29 @@ class FakeRuntime:
             def log_message(self, *args):
                 pass
 
+            def setup(self):
+                super().setup()
+
+                with fake.lock:
+                    fake.open_connections += 1
+
+            def finish(self):
+                with fake.lock:
+                    fake.open_connections -= 1
+
+                super().finish()
+
             def _record(self, body=b""):
                 with fake.lock:
                     fake.requests.append({
                         "method": self.command,
                         "path": self.path,
                         "headers": {k: v for k, v in self.headers.items()},
+                        #: Every copy of a header, in order - a dict
+                        #: would hide a duplicate, and duplicates are
+                        #: the point of the X-Forwarded-* tests.
+                        "all": {k: self.headers.get_all(k)
+                                for k in set(self.headers.keys())},
                         "body": body,
                     })
 
@@ -114,6 +137,32 @@ class FakeRuntime:
                     self.send_header("Content-Length", str(len(raw)))
                     self.end_headers()
                     self.wfile.write(raw)
+                    return
+
+                if self.path == "/api/modes?hop=1":
+                    #: Every hop-by-hop header, plus the two the panel
+                    #: sets itself, on an otherwise ordinary answer (an
+                    #: owner path - the panel proxies no other).
+                    raw = b'{"answered_by": "runtime"}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Keep-Alive", "timeout=5, max=100")
+                    self.send_header("Upgrade", "h2c")
+                    self.send_header("Proxy-Authenticate", "Basic")
+                    self.send_header("Trailer", "Expires")
+                    self.send_header("Server", "fake-runtime/0")
+                    self.send_header("X-Fake-Runtime", "yes")
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+
+                if self.path == "/api/sync?slow=1":
+                    #: A runtime that accepted the connection and is
+                    #: stuck: nothing comes back until released.
+                    fake.slow_started.set()
+                    fake.slow_release.wait(10.0)
+                    self._json(200, {"answered_by": "runtime", "late": True})
                     return
 
                 if path == "/api/meta":
@@ -216,7 +265,7 @@ class ProxyCase(unittest.TestCase):
             upstream = self.runtime.url
         else:
             self.runtime = None
-            upstream = f"http://127.0.0.1:{closed_port()}"
+            upstream = self.down_upstream()
 
         cfg = dict(admin.DEFAULTS)
         cfg.update({
@@ -251,6 +300,10 @@ class ProxyCase(unittest.TestCase):
         self.calls.append(list(argv))
 
         return 0, ""
+
+    def down_upstream(self):
+        """Where live.py is not: a closed port, unless a case says."""
+        return f"http://127.0.0.1:{closed_port()}"
 
     # -- helpers ----------------------------------------------------
 
@@ -373,6 +426,50 @@ class HeadersAcrossTheProxy(ProxyCase):
         #: live.py builds share links from it.
         self.assertEqual(forwarded["Host"], f"127.0.0.1:{self.port}")
 
+    def test_a_clients_forwarded_headers_are_replaced_not_prepended(self):
+        """
+        live.py takes the FIRST X-Forwarded-Proto / -Host and builds
+        the share link it mints from them. The panel is the edge here:
+        what the client claims about the hop before it is nothing, and
+        is replaced - not forwarded ahead of the panel's own copy.
+        """
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "1.2.3.4",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "spoof.example",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+        self.assertIsNone(forwarded.get("X-Forwarded-Host"))
+
+    def test_the_same_holds_for_a_share_viewer(self):
+        """The unauthenticated surface is where it matters most: a
+        viewer must not be able to have `Secure` put on their cookie."""
+        self.request("/s/api/snapshot", authed=False,
+                     headers={"X-Forwarded-Proto": "https"})
+        forwarded = self.runtime.last("/s/api/snapshot")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+
+    def test_the_response_hop_by_hop_and_identity_headers_are_stripped(self):
+        code, headers, body = self.json("/api/modes?hop=1")
+        lower = {k.lower(): v for k, v in headers.items()}
+
+        self.assertEqual(code, 200)
+        self.assertEqual(body["answered_by"], "runtime")
+        #: The runtime's own header proves this is the ?hop=1 answer.
+        self.assertEqual(lower.get("x-fake-runtime"), "yes")
+
+        for name in ("keep-alive", "upgrade", "proxy-authenticate",
+                     "trailer", "transfer-encoding"):
+            self.assertNotIn(name, lower, name)
+
+        #: The panel's Server, not the runtime's - and no interpreter
+        #: version on it: the share prefix is public once published.
+        self.assertEqual(lower.get("server"), "f10-admin")
+
     def test_the_share_cookie_is_forwarded(self):
         """A share viewer's token cookie is live.py's to check."""
         self.request("/s/api/snapshot", authed=False,
@@ -420,6 +517,160 @@ class HeadersAcrossTheProxy(ProxyCase):
 
         self.assertEqual(code, 403)
         self.assertIsNone(self.runtime.last("/api/mode"))
+
+    def test_a_body_over_the_cap_is_refused_before_the_runtime_sees_it(self):
+        big = b'{"mode": "' + b"x" * admin.MAX_PROXY_BODY + b'"}'
+        code, headers, body = self.json("/api/mode", method="POST", body=big)
+
+        self.assertEqual(code, 413)
+        self.assertIsNone(self.runtime.last("/api/mode"))
+
+        #: One byte under the cap goes through.
+        fits = b'{"mode": "' + b"x" * (admin.MAX_PROXY_BODY - 13) + b'"}'
+        self.assertLessEqual(len(fits), admin.MAX_PROXY_BODY)
+        code, headers, body = self.json("/api/mode", method="POST", body=fits)
+
+        self.assertEqual(code, 200)
+        self.assertEqual(len(self.runtime.last("/api/mode")["body"]), len(fits))
+
+
+class BehindATrustedProxy(ProxyCase):
+    """
+    #41 puts nginx in front of the panel. Its X-Forwarded-* are the
+    truth about the hop before it - kept, for a request that arrived
+    from its address; the panel only fills in what it did not set.
+    """
+
+    config = {"trusted_proxies": ["127.0.0.1"]}
+
+    def test_the_proxys_headers_pass_through(self):
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "203.0.113.9",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "f10.example",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["203.0.113.9"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["https"])
+        self.assertEqual(forwarded.get("X-Forwarded-Host"), ["f10.example"])
+
+    def test_what_the_proxy_did_not_set_the_panel_sets(self):
+        self.request("/api/meta")
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+
+    def test_the_default_trusts_nobody(self):
+        self.assertEqual(admin.DEFAULTS["trusted_proxies"], [])
+
+
+class ReadDeadline(ProxyCase):
+    """
+    A runtime that accepts and never answers (the process is there, its
+    loop is stuck) must cost a panel thread for seconds, not for ever -
+    except on a stream, where silence is the car being quiet.
+    """
+
+    def test_a_wedged_runtime_is_503_at_the_deadline(self):
+        with mock.patch.object(admin, "READ_TIMEOUT_S", 0.3):
+            started = time.monotonic()
+            code, headers, body = self.json("/api/sync?slow=1")
+            elapsed = time.monotonic() - started
+
+        self.assertTrue(self.runtime.slow_started.is_set())
+        self.assertEqual(code, 503)
+        self.assertEqual(body["error"], "runtime not running")
+        self.assertIn("timed out", body["detail"])
+        self.assertLess(elapsed, 3.0)
+        self.runtime.slow_release.set()
+
+    def test_a_phone_that_left_before_the_deadline_leaves_no_traceback(self):
+        """
+        The 503 is written at the deadline, long after a browser gives
+        up. A phone that reset its connection by then must not put a
+        BrokenPipeError traceback in the journal for every abandoned
+        refresh - the write is guarded, the handler just ends.
+        """
+        err = io.StringIO()
+
+        with mock.patch.object(admin, "READ_TIMEOUT_S", 0.3), \
+                contextlib.redirect_stderr(err):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            head = (f"GET /api/sync?slow=1 HTTP/1.1\r\nHost: x\r\n"
+                    f"Authorization: {auth_header()['Authorization']}\r\n\r\n")
+            sock.sendall(head.encode())
+            self.assertTrue(self.runtime.slow_started.wait(5.0))
+            #: Reset, not close: the panel's next write fails outright.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                            struct.pack("ii", 1, 0))
+            sock.close()
+            time.sleep(1.0)
+
+        self.runtime.slow_release.set()
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertNotIn("BrokenPipe", err.getvalue())
+        self.assertNotIn("ConnectionReset", err.getvalue())
+
+    def test_the_stream_has_no_deadline(self):
+        """Patched to well under the quiet gap the stream test waits
+        through: a deadline applied to streams would end it."""
+        with mock.patch.object(admin, "READ_TIMEOUT_S", 0.1):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            self.addCleanup(sock.close)
+            head = (f"GET /api/stream HTTP/1.1\r\nHost: x\r\n"
+                    f"Authorization: {auth_header()['Authorization']}\r\n\r\n")
+            sock.sendall(head.encode())
+            reader = StreamRelay.Lines(sock)
+
+            while reader.readline() not in (b"\r\n", b""):
+                pass
+
+            self.assertEqual(reader.readline(), b"data: one\n")
+            self.assertEqual(reader.readline(), b"\n")
+            time.sleep(0.5)
+            self.runtime.release.set()
+
+            #: Still open, still relaying, half a second after the
+            #: patched deadline would have cut it.
+            self.assertEqual(reader.readline(), b"data: two\n")
+
+
+class StalledConnect(ProxyCase):
+    """
+    The connect timeout is what bounds "not at all": an upstream whose
+    accept queue is full never completes the handshake, and without
+    the timeout the request would wait for the kernel's SYN retries
+    (minutes).
+    """
+
+    runtime_up = False
+
+    def down_upstream(self):
+        #: listen(0) and never accept: the first connection fills the
+        #: queue, every later SYN is dropped on the floor.
+        self.plug = socket.socket()
+        self.plug.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.plug.bind(("127.0.0.1", 0))
+        self.plug.listen(0)
+        self.addCleanup(self.plug.close)
+        self.filler = socket.create_connection(self.plug.getsockname(),
+                                               timeout=1)
+        self.addCleanup(self.filler.close)
+
+        return "http://127.0.0.1:%d" % self.plug.getsockname()[1]
+
+    def test_a_stalled_connect_is_503_at_the_connect_timeout(self):
+        with mock.patch.object(admin, "CONNECT_TIMEOUT_S", 0.3):
+            started = time.monotonic()
+            code, headers, body = self.json("/api/meta")
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(code, 503)
+        self.assertEqual(body["error"], "runtime not running")
+        self.assertIn("timed out", body["detail"])
+        self.assertLess(elapsed, 3.0)
 
 
 class StreamRelay(ProxyCase):
@@ -513,6 +764,43 @@ class StreamRelay(ProxyCase):
             self.runtime.client_gone.wait(5.0),
             "the panel kept the upstream stream open after its client left",
         )
+
+    def test_every_aborted_stream_releases_its_upstream_connection(self):
+        """
+        The guarantee the docstring sells: the upstream connection is
+        closed as soon as the phone goes. Twenty streams opened and
+        dropped must leave the runtime with none of them.
+        """
+        self.runtime.release.set()
+        socks = []
+
+        for _ in range(20):
+            sock, reader, status, headers = self._open_stream()
+            self.assertEqual(reader.readline(), b"data: one\n")
+            socks.append(sock)
+
+        with self.runtime.lock:
+            held = self.runtime.open_connections
+
+        self.assertGreaterEqual(held, 20)
+
+        for sock in socks:
+            sock.close()
+
+        deadline = time.monotonic() + 5.0
+
+        while time.monotonic() < deadline:
+            with self.runtime.lock:
+                if self.runtime.open_connections == 0:
+                    break
+
+            time.sleep(0.02)
+
+        with self.runtime.lock:
+            left = self.runtime.open_connections
+
+        self.assertEqual(left, 0, "upstream connections still open after "
+                                  "every client left")
 
     def test_the_stream_is_owner_only(self):
         code, headers, body = self.json("/api/stream", authed=False)
@@ -622,6 +910,27 @@ class AuthBoundary(ProxyCase):
 
         self.assertEqual(code, 401)
         self.assertIsNone(self.runtime.last("/api/meta"))
+
+
+class ThePrefixIsAPathSegment(ProxyCase):
+    """`/s` and `/s/...` are the share surface; `/sx` is not."""
+
+    def test_under_share_is_a_segment_match(self):
+        for path, expected in (("/s", True), ("/s/", True),
+                               ("/s/api/stream", True), ("/s?t=1", False),
+                               ("/sx", False), ("/sx/", False),
+                               ("/share", False), ("/ss/api/status", False),
+                               ("/", False), ("", False)):
+            with self.subTest(path=path):
+                self.assertIs(admin.under_share(path), expected)
+
+    def test_a_lookalike_path_is_not_open(self):
+        for path in ("/sx", "/sx/api/snapshot", "/share/api/snapshot"):
+            with self.subTest(path=path):
+                code, headers, body = self.request(path, authed=False)
+
+                self.assertEqual(code, 401)
+                self.assertIsNone(self.runtime.last(path))
 
 
 class NothingOfThePanelUnderTheSharePrefix(ProxyCase):
@@ -799,6 +1108,12 @@ class ListenerList(unittest.TestCase):
                          ["127.0.0.1", "127.0.0.2"])
 
     def _main_with(self, bind):
+        """
+        main() with serve() stubbed: a bind that is NOT refused reaches
+        the stub, which closes the listeners and returns 0 - so a
+        regression in the refusal fails the assertion on the return
+        code instead of serving for ever and hanging the suite.
+        """
         path = os.path.join(tempfile.mkdtemp(), "config.json")
 
         with open(path, "w", encoding="utf-8") as fh:
@@ -806,22 +1121,75 @@ class ListenerList(unittest.TestCase):
                        "password": PASSWORD}, fh)
 
         err = io.StringIO()
+        reached = []
 
-        with contextlib.redirect_stderr(err):
+        def stub_serve(servers, pending, port, handler, **kwargs):
+            reached.append([s.server_address for s in servers])
+
+            for server in servers:
+                server.server_close()
+
+            return 0
+
+        with mock.patch.object(admin, "serve", stub_serve), \
+                contextlib.redirect_stderr(err):
             code = admin.main(["--config", path])
 
-        return code, err.getvalue()
+        return code, err.getvalue(), reached
 
     def test_a_wildcard_anywhere_in_the_list_is_refused(self):
         for bind in (["0.0.0.0"], ["127.0.0.1", "0.0.0.0"],
                      ["::", "127.0.0.1"], "127.0.0.1,0.0.0.0"):
             with self.subTest(bind=bind):
-                code, err = self._main_with(bind)
+                code, err, reached = self._main_with(bind)
                 self.assertEqual(code, 2)
                 self.assertIn("refusing to bind", err)
+                self.assertEqual(reached, [])
+
+    def test_every_spelling_of_every_interface_is_refused(self):
+        """
+        The kernel binds INADDR_ANY for all of these; a string match on
+        "0.0.0.0" / "::" saw none of them. `[::]` is the other failure:
+        it never binds, and would have sat in the retry loop for ever.
+        """
+        for bind in ("0", "0.0", "00.0.0.0", "::0", "0::0",
+                     "::ffff:0.0.0.0", "[::]", "127.0.0.1, 0",
+                     ["127.0.0.1", "::0"], "0000::", "::ffff:0:0",
+                     "localhost", "any"):
+            with self.subTest(bind=bind):
+                code, err, reached = self._main_with(bind)
+                self.assertEqual(code, 2, err)
+                self.assertIn("refusing to bind", err)
+                self.assertEqual(reached, [])
+
+    def test_a_named_address_is_bound_and_served(self):
+        """The control for the stub: a loopback literal gets through
+        to serve() with one listener on it."""
+        for bind in ("127.0.0.1", ["127.0.0.1", "::1"]):
+            with self.subTest(bind=bind):
+                code, err, reached = self._main_with(bind)
+
+                if code != 0 and "::1" in str(bind) and "cannot listen" in err:
+                    self.skipTest("no IPv6 loopback on this host")
+
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(reached), 1)
+                self.assertEqual(len(reached[0]),
+                                 len(admin.listen_addresses(bind)))
+
+    def test_bind_refusal_is_semantic(self):
+        self.assertIsNone(admin.bind_refusal("127.0.0.1"))
+        self.assertIsNone(admin.bind_refusal("10.77.0.10"))
+        self.assertIsNone(admin.bind_refusal("::1"))
+        self.assertIsNone(admin.bind_refusal("::ffff:192.168.1.50"))
+        self.assertIn("wildcard", admin.bind_refusal("0.0.0.0"))
+        self.assertIn("wildcard", admin.bind_refusal("::"))
+        self.assertIn("wildcard", admin.bind_refusal("::ffff:0.0.0.0"))
+        self.assertIn("not an IP", admin.bind_refusal("[::]"))
+        self.assertIn("not an IP", admin.bind_refusal("pi.local"))
 
     def test_an_empty_list_is_refused(self):
-        code, err = self._main_with([])
+        code, err, reached = self._main_with([])
 
         self.assertEqual(code, 2)
         self.assertIn("empty", err)
@@ -938,6 +1306,7 @@ class DeploymentShape(unittest.TestCase):
 
         self.assertEqual(example["dashboard_url"], "http://127.0.0.1:8080")
         self.assertNotIn("diagnostics_url", example)
+        self.assertEqual(example["trusted_proxies"], [])
 
     def test_the_installer_detects_both_addresses(self):
         script = self._read(self.ADMIN, "install.sh")
