@@ -565,6 +565,60 @@ class BehindATrustedProxy(ProxyCase):
     def test_the_default_trusts_nobody(self):
         self.assertEqual(admin.DEFAULTS["trusted_proxies"], [])
 
+    def test_an_empty_value_from_the_proxy_is_absent(self):
+        """
+        nginx sends `X-Forwarded-Host: ` for an empty variable. That is
+        not a first value for the panel's own to be appended after: the
+        empty header is dropped and the panel fills in as if it were
+        never sent - one value upstream, not "" then ours.
+        """
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "",
+            "X-Forwarded-Proto": " ",
+            "X-Forwarded-Host": "",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+        self.assertNotIn("X-Forwarded-Host", forwarded)
+
+
+class TrustedProxiesGivenAsAString(ProxyCase):
+    """
+    `F10_ADMIN_TRUSTED_PROXIES` is one string. "127.0.0.10,10.77.0.1"
+    CONTAINS "127.0.0.1"; it must not trust it. The list goes through
+    the same parser as `bind`, so the test is on addresses.
+    """
+
+    config = {"trusted_proxies": "127.0.0.10,10.77.0.1"}
+
+    def test_a_substring_of_the_list_is_not_trusted(self):
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "203.0.113.9",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "f10.example",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+        self.assertNotIn("X-Forwarded-Host", forwarded)
+
+    def test_load_config_normalises_the_environment_form(self):
+        os.environ["F10_ADMIN_TRUSTED_PROXIES"] = "127.0.0.10, 10.77.0.1"
+        self.addCleanup(os.environ.pop, "F10_ADMIN_TRUSTED_PROXIES", None)
+
+        cfg = admin.load_config(None)
+
+        self.assertEqual(cfg["trusted_proxies"], ["127.0.0.10", "10.77.0.1"])
+        self.assertNotIn("127.0.0.1", cfg["trusted_proxies"])
+
+    def test_load_config_keeps_the_list_form(self):
+        cfg = admin.load_config(None)
+
+        self.assertEqual(cfg["trusted_proxies"], [])
+
 
 class ReadDeadline(ProxyCase):
     """
@@ -1306,13 +1360,36 @@ class DeploymentShape(unittest.TestCase):
 
         self.assertEqual(example["dashboard_url"], "http://127.0.0.1:8080")
         self.assertNotIn("diagnostics_url", example)
-        self.assertEqual(example["trusted_proxies"], [])
+
+    def test_the_example_trusts_the_vps_over_the_tunnel_and_nothing_else(self):
+        """
+        #41: the VPS's nginx reaches the panel from its wg0 address,
+        10.77.0.1. That is the one hop whose X-Forwarded-* are believed;
+        never a LAN address, never one of the panel's own.
+        """
+        example = json.loads(self._read(self.ADMIN, "config.example.json"))
+
+        self.assertEqual(example["trusted_proxies"], ["10.77.0.1"])
+        self.assertFalse(set(example["trusted_proxies"]) & set(example["bind"]))
 
     def test_the_installer_detects_both_addresses(self):
         script = self._read(self.ADMIN, "install.sh")
 
         self.assertIn("wg0", script)
         self.assertIn("dashboard_url", script)
+
+    def test_the_installer_trusts_the_vps_only_when_the_tunnel_exists(self):
+        """
+        A new config on a Pi with wg0 trusts the server's tunnel address
+        (the f10pi local.env's WG_SERVER_IP, else 10.77.0.1); without
+        the tunnel the list stays empty - nothing on a LAN is a proxy.
+        """
+        script = self._read(self.ADMIN, "install.sh")
+
+        self.assertIn('WG_SERVER_IP="${WG_SERVER_IP:-10.77.0.1}"', script)
+        self.assertIn('[[ -n "$WG_IP" ]] && PROXY_IP="$WG_SERVER_IP"', script)
+        self.assertIn('"trusted_proxies": [proxy] if proxy else []', script)
+        self.assertIn("DASHBOARD_AUTH_PASSWORD", script)
 
     def test_no_new_action_and_the_sudoers_grant_is_unchanged(self):
         """#40 adds a proxy, not a privilege."""
@@ -1333,7 +1410,9 @@ class DeploymentShape(unittest.TestCase):
 
         self.assertIn("/s/", readme)
         self.assertIn("dashboard_url", readme)
-        self.assertIn("#41", readme)
+        self.assertIn("trusted_proxies", readme)
+        self.assertIn("10.77.0.1", readme)
+        self.assertIn("DASHBOARD_AUTH_PASSWORD", readme)
 
 
 if __name__ == "__main__":

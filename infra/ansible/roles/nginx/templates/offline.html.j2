@@ -1,14 +1,15 @@
 {#
-  Shown instead of a raw 502 when the Pi is not reachable through the tunnel.
-  Served only inside the authenticated vhost, so it is never public, and it
-  deliberately mentions no addresses, keys or vehicle identifiers.
+  Shown instead of a raw 502 when the Pi is not reachable through the tunnel:
+  the box is off, has no internet, or its panel is not up. The share prefix
+  reaches it without a login, so it is public in effect, and it deliberately
+  mentions no addresses, keys or vehicle identifiers.
   Self-contained: no external CSS, fonts or scripts.
 #}<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Car offline</title>
+<title>Car unreachable</title>
 <style>
   :root {
     --bg: #0e1013; --panel: #16191e; --line: #23272e;
@@ -51,15 +52,15 @@
 </head>
 <body>
   <div class="card">
-    <h1><span class="dot"></span>Car is offline</h1>
+    <h1><span class="dot"></span>The car is unreachable</h1>
     <p>
-      The dashboard is not reachable right now. This is normal when the car
-      is parked — the logger only runs with the ignition on.
+      The computer in the car is not answering right now. This is normal
+      when the car is parked with its power off, or has no signal.
     </p>
     <ul>
-      <li>Ignition off, or the logger is not running</li>
+      <li>The car's computer is powered off or still starting up</li>
       <li>No mobile signal where the car is parked</li>
-      <li>The diagnostic cable is unplugged</li>
+      <li>Its connection to this server has not come up yet</li>
     </ul>
     <div class="row">
       <span class="muted">Retrying in <span id="t">30</span>s</span>
@@ -67,8 +68,8 @@
     </div>
   </div>
 <script>
-  // Poll rather than hard-reloading on a timer, so the page comes back by
-  // itself the moment the car is up again.
+  // Reload on a timer, so the page comes back by itself once the car's
+  // computer answers again.
   var left = 30, out = document.getElementById('t');
   function retry() { location.reload(); }
   document.getElementById('retry').addEventListener('click', retry);
