@@ -206,7 +206,9 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
 ## Repo map
 
 ```
-live.py                     transport, discovery, recorder, HTTP/SSE, dashboard
+live.py                     transport, discovery, recorder, HTTP/SSE; serves dashboard/
+dashboard/                  the telemetry UI as plain files (index.html, style.css,
+                            app.js) - one source of truth, no build step
 bmwdiag/                    the mapping engine (stdlib only, opens no sockets)
   mapping/                  model, loader, decoder, derive, polling, execute, registry
   protocol/ obd/ variant.py transport seam; OBD capability; profile/identity
