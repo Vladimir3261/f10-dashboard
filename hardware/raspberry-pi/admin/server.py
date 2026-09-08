@@ -44,11 +44,27 @@ flaw, but it sets the bar for everything else:
     the configured URL and refuses otherwise, so the update channel
     cannot be repointed at another repository.
 
+THE FRONT DOOR
+--------------
+Since #40 this is the one page the owner opens. The telemetry views
+(Drive / Detail / All-data) are the `dashboard/` files live.py serves,
+shown here unchanged in a frame, and the runtime's API is reached
+through this process: an allowlist of owner paths plus the whole
+share prefix are reverse-proxied to live.py (`dashboard_url`), so the
+phone talks to one origin, behind one login. live.py keeps binding its
+own port; the service unit now holds it on the loopback so the panel is
+the only way in from the network. The panel's credentials stop here -
+they are never forwarded - and under `/s/` live.py stays the authority:
+the panel adds no login there and dispatches none of its own routes
+for that prefix, so nothing management-shaped is reachable through it.
+
 Stdlib only, like the rest of the runtime.
 """
 
 import argparse
 import hmac
+import http.client
+import ipaddress
 import json
 import os
 import shutil
@@ -56,10 +72,12 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from base64 import b64decode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -75,9 +93,127 @@ os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 #: header a cross-origin form post cannot set. See the note above.
 CSRF_HEADER = "X-F10-Admin"
 
+#
+# The telemetry UI: the same three files live.py serves, read from the
+# checkout this panel runs from - not a copy, not a fork. `/dashboard/`
+# is the frame document the Drive / Detail / All-data tabs show; the
+# relative `style.css` / `app.js` it references resolve beside it.
+#
+DASHBOARD_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "..", "dashboard"))
+
+TELEMETRY_FILES: Dict[str, Tuple[str, str]] = {
+    "/dashboard/": ("index.html", "text/html; charset=utf-8"),
+    "/dashboard/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/dashboard/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+
+#: What the panel's own page may do. Frames are for the telemetry
+#: document, which is same-origin.
+PANEL_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
+             "script-src 'unsafe-inline'; connect-src 'self'; "
+             "frame-src 'self'")
+
+#: The framed telemetry document: its own files, its API through this
+#: origin, and the sync agent's pause/resume on :8091 (app.js talks to
+#: the agent directly, by design - see the comment there).
+TELEMETRY_CSP = ("default-src 'none'; style-src 'self' 'unsafe-inline'; "
+                 "script-src 'self'; img-src 'self' data:; "
+                 "connect-src 'self' http://*:8091; frame-ancestors 'self'")
+
+#: live.py's share surface. Everything at or below it is live.py's to
+#: answer, unauthenticated - the token in the link is the credential
+#: there, and live.py is the authority on it.
+SHARE_PREFIX = "/s"
+
+#
+# The owner-side paths live.py answers, reached through this panel. An
+# allowlist rather than "everything else under /api/": the panel's own
+# /api/status and /api/action/* must never be shadowed by, or confused
+# with, something the runtime serves.
+#
+PROXY_GET = frozenset({
+    "/api/snapshot", "/api/stream", "/api/meta", "/api/runs",
+    "/api/history", "/api/sync", "/api/diagnostics", "/api/modes",
+    "/api/share",
+})
+PROXY_POST = frozenset({"/api/mode", "/api/share", "/api/share/revoke"})
+
+#: Never relayed in either direction (RFC 7230 hop-by-hop), plus what
+#: this end sets itself.
+HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate",
+    "proxy-authorization", "te", "trailer", "transfer-encoding",
+    "upgrade",
+})
+#: Request headers that stop at the panel: its own login (live.py has no
+#: use for it and must never see it), the Host it rewrites, and the
+#: body length it restates.
+DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"authorization", "host",
+                                        "content-length"}
+#: What live.py believes about the client - the address, the scheme and
+#: the public name a share link is minted against. This panel SETS
+#: them; a copy the client sent is replaced, never forwarded ahead of
+#: ours (live.py takes the first value). The one exception is a request
+#: that arrived from a `trusted_proxies` address - the VPS-side nginx
+#: of #41 - whose values are the truth about the hop before it.
+FORWARDED_HEADERS = frozenset({"x-forwarded-for", "x-forwarded-proto",
+                               "x-forwarded-host"})
+#: Response headers this server adds itself; a second copy from
+#: upstream would be a duplicate.
+DROPPED_RESPONSE_HEADERS = HOP_BY_HOP | {"server", "date"}
+
+#: Connecting to live.py on the loopback either works at once or not at
+#: all. This bounds "not at all"; it is NOT a read deadline - see
+#: _proxy.
+CONNECT_TIMEOUT_S = 3.0
+#: The read deadline for everything that is NOT a stream: a runtime
+#: that accepts the connection and never answers (the process exists,
+#: its loop is stuck) would otherwise pin one panel thread per phone
+#: refresh, for good. A JSON answer takes milliseconds; a stream is
+#: silent for as long as the car is, and gets no deadline at all.
+READ_TIMEOUT_S = 15.0
+#: The paths that are streams - the owner's and the share viewer's.
+STREAM_PATHS = frozenset({"/api/stream", SHARE_PREFIX + "/api/stream"})
+#: The largest body a proxied POST may carry. live.py reads 4 KiB.
+MAX_PROXY_BODY = 16384
+#: A listen address that is not there yet (wg0 comes up after the
+#: panel) is retried this often.
+BIND_RETRY_S = 15.0
+
+
+def under_share(path: str) -> bool:
+    """True for the share prefix itself and everything below it."""
+    return path == SHARE_PREFIX or path.startswith(SHARE_PREFIX + "/")
+
+
+def bind_refusal(address: str) -> Optional[str]:
+    """
+    Why this listen address is refused, or None if it may be bound.
+
+    Semantic, not lexical: the kernel accepts `0`, `0.0`, `00.0.0.0`,
+    `::0`, `0::0` and `::ffff:0.0.0.0` as "every interface" just as it
+    accepts `0.0.0.0`, and a one-character F10_ADMIN_BIND typo must not
+    open the panel to the segment. Anything that is not an IP literal
+    is refused too - `[::]` or a host name would never bind and would
+    otherwise sit in the retry loop for ever, silently.
+    """
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return "not an IP address literal"
+
+    mapped = getattr(ip, "ipv4_mapped", None)
+
+    if ip.is_unspecified or (mapped is not None and mapped.is_unspecified):
+        return "a wildcard address (every interface)"
+
+    return None
+
 DEFAULTS: Dict[str, Any] = {
     #: Loopback by default: a deployment that forgets to set this is
     #: useless rather than exposed. setup writes the LAN address here.
+    #: One address, or a list of them (the LAN address and the
+    #: WireGuard one) - one listening socket each. Never a wildcard.
     "bind": "127.0.0.1",
     "port": 8088,
     "username": "",
@@ -98,10 +234,16 @@ DEFAULTS: Dict[str, Any] = {
     #: The runtime's own snapshot. "Is the service up?" and "is data
     #: landing?" are different questions; this answers the second.
     "dashboard_status_url": "http://127.0.0.1:8080/api/snapshot",
-    #: The runtime's full car-communication picture. Fetched only while
-    #: its tab is open - it is a much larger payload than the status
-    #: poll and nothing about it changes second to second.
-    "diagnostics_url": "http://127.0.0.1:8080/api/diagnostics",
+    #: live.py, as this panel reaches it. The telemetry views' API and
+    #: the whole share prefix are forwarded here; the Car link tab's
+    #: diagnostics too (an older config's `diagnostics_url` is ignored).
+    "dashboard_url": "http://127.0.0.1:8080",
+    #: Addresses whose X-Forwarded-* headers are believed - the reverse
+    #: proxy in front of this panel (#41: nginx on the VPS, over wg0),
+    #: by its address as this panel sees it. Empty means the panel is
+    #: the edge: every client-sent X-Forwarded-* is replaced with what
+    #: the panel itself knows.
+    "trusted_proxies": [],
     #: Per-drive databases, and the agent's watermark file. Empty by
     #: default and DERIVED from `repo_dir` - never a hardcoded
     #: /home/<guess>/ path. A config written by an older version of the
@@ -384,6 +526,10 @@ def read_recording(cfg: Dict[str, Any]) -> Dict[str, Any]:
     else:
         out["link"] = None
         out["status"] = "runtime not answering"
+
+    #: Distinct from `link`: the page banners the telemetry tabs on this,
+    #: and reloads the frame when it flips back to true.
+    out["up"] = snap is not None
 
     path = newest_session(cfg["sessions_dir"])
 
@@ -1033,6 +1179,13 @@ def make_handler(cfg: Dict[str, Any]):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "f10-admin"
+        #: No interpreter version on the wire - the share prefix is
+        #: public once #41 publishes it. (The base class would still
+        #: append a space after the name with sys_version empty.)
+        sys_version = ""
+
+        def version_string(self) -> str:
+            return self.server_version
 
         def log_message(self, *args):
             pass
@@ -1040,29 +1193,213 @@ def make_handler(cfg: Dict[str, Any]):
         # -- plumbing -----------------------------------------------
 
         def _send(self, code: int, ctype: str, payload: bytes,
-                  extra: Optional[Dict[str, str]] = None) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Cache-Control", "no-store")
-            #: Nothing here should ever be framed or sniffed.
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
-            self.send_header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; "
-                "script-src 'unsafe-inline'; connect-src 'self'",
-            )
+                  extra: Optional[Dict[str, Optional[str]]] = None) -> None:
+            headers: Dict[str, Optional[str]] = {
+                "Content-Type": ctype,
+                "Content-Length": str(len(payload)),
+                "Cache-Control": "no-store",
+                #: Nothing here should be sniffed, and nothing framed
+                #: except the telemetry document, by this page only.
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy": PANEL_CSP,
+            }
 
+            #: A caller's header replaces the default of the same name
+            #: rather than being sent beside it; None drops one.
             for key, value in (extra or {}).items():
-                self.send_header(key, value)
+                headers[key] = value
+
+            self.send_response(code)
+
+            for key, value in headers.items():
+                if value is not None:
+                    self.send_header(key, value)
 
             self.end_headers()
             self.wfile.write(payload)
 
-        def _json(self, code: int, payload: Dict[str, Any]) -> None:
+        def _json(self, code: int, payload: Dict[str, Any],
+                  extra: Optional[Dict[str, Optional[str]]] = None) -> None:
             self._send(code, "application/json",
-                       json.dumps(payload).encode("utf-8"))
+                       json.dumps(payload).encode("utf-8"), extra)
+
+        # -- the telemetry UI and the runtime behind it -------------
+
+        def _telemetry_file(self, path: str) -> None:
+            """
+            One of dashboard/'s three files, read from disk on every
+            request - so a `pull` that changes the UI shows without a
+            panel restart, and a checkout that lacks it says so instead
+            of answering a stale copy.
+            """
+            name, ctype = TELEMETRY_FILES[path]
+            full = os.path.join(DASHBOARD_DIR, name)
+
+            try:
+                with open(full, "rb") as fh:
+                    payload = fh.read()
+            except OSError as exc:
+                self._send(500, "text/plain; charset=utf-8",
+                           f"telemetry UI file missing: {full} "
+                           f"({exc.strerror})\n".encode("utf-8"))
+                return
+
+            extra: Dict[str, Optional[str]] = {}
+
+            if name == "index.html":
+                #: Framed by the panel page, and only by it.
+                extra = {"X-Frame-Options": "SAMEORIGIN",
+                         "Content-Security-Policy": TELEMETRY_CSP}
+
+            self._send(200, ctype, payload, extra)
+
+        def _runtime_down(self, exc: BaseException) -> None:
+            """
+            live.py is not answering.
+
+            503, with a body every consumer here understands: the panel
+            page shows its banner and reloads the frame once the status
+            poll sees the runtime back (that reload, not the browser's
+            EventSource retry, is what resyncs the views), the Car link
+            tab reads `ready` and `detail`, and a curl gets a sentence.
+
+            The phone that asked may itself be gone by now - a wedged
+            runtime is found out at the read deadline, long after a
+            browser gives up - so the write is guarded: no traceback in
+            the journal for every refresh that was abandoned.
+            """
+            why = (exc.strerror if isinstance(exc, OSError) and exc.strerror
+                   else str(exc) or type(exc).__name__)
+
+            try:
+                self._json(503, {
+                    "error": "runtime not running",
+                    "ready": False,
+                    "detail": "the runtime is not answering on "
+                              f"{cfg['dashboard_url']} ({why})",
+                    "upstream": cfg["dashboard_url"],
+                }, {"Retry-After": "5"})
+            except OSError:
+                self.close_connection = True
+
+        def _proxy(self, method: str) -> None:
+            """
+            Forward this request to live.py and relay the answer as it
+            arrives.
+
+            Byte-for-byte and chunk-by-chunk: an SSE stream reaches the
+            phone as each event reaches the panel, through an unbuffered
+            socket writer, with NO read deadline on the upstream socket
+            once connected - a stream is silent between events, and a
+            timeout there would end a drive's dashboard the first time
+            the car went quiet. Everything else gets READ_TIMEOUT_S, so
+            a runtime that accepts and never answers costs a thread for
+            seconds, not for ever. The upstream connection is closed as
+            soon as either side goes away. The panel's own credentials
+            stop here: live.py has no use for them, and a request log
+            on the wrong side of a share link must not carry them.
+            """
+            target = urlsplit(cfg["dashboard_url"])
+            host = target.hostname or "127.0.0.1"
+            port = target.port or 80
+            body = b""
+            is_stream = urlsplit(self.path).path in STREAM_PATHS
+            peer = self.client_address[0]
+            trusted = peer in (cfg.get("trusted_proxies") or ())
+
+            if method == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+
+                if length > MAX_PROXY_BODY:
+                    self._json(413, {"error": "body too large"})
+                    return
+
+                body = self.rfile.read(length) if length > 0 else b""
+
+            conn = http.client.HTTPConnection(host, port,
+                                              timeout=CONNECT_TIMEOUT_S)
+
+            try:
+                conn.connect()
+                #: Connected. From here a stream's socket waits as long
+                #: as the stream is quiet; any other answer is due.
+                conn.sock.settimeout(None if is_stream else READ_TIMEOUT_S)
+                conn.putrequest(method, self.path, skip_host=True,
+                                skip_accept_encoding=True)
+
+                for name, value in self.headers.items():
+                    lower = name.lower()
+
+                    if lower in DROPPED_REQUEST_HEADERS:
+                        continue
+
+                    if lower in FORWARDED_HEADERS and not trusted:
+                        #: The client's claim about itself: replaced
+                        #: below with what this panel knows.
+                        continue
+
+                    conn.putheader(name, value)
+
+                conn.putheader("Host", self.headers.get("Host")
+                               or f"{host}:{port}")
+
+                if not trusted or not self.headers.get("X-Forwarded-For"):
+                    conn.putheader("X-Forwarded-For", peer)
+
+                if not trusted or not self.headers.get("X-Forwarded-Proto"):
+                    conn.putheader("X-Forwarded-Proto", "http")
+
+                conn.putheader("Connection", "close")
+
+                if method == "POST":
+                    conn.putheader("Content-Length", str(len(body)))
+
+                conn.endheaders(body if method == "POST" else None)
+                resp = conn.getresponse()
+            except (OSError, http.client.HTTPException) as exc:
+                conn.close()
+                self._runtime_down(exc)
+                return
+
+            try:
+                self.send_response(resp.status, resp.reason)
+                #: A body of known length keeps the phone's connection;
+                #: a stream ends with the connection, on both sides.
+                sized = (resp.getheader("Content-Length") is not None
+                         or resp.status in (204, 304))
+
+                for name, value in resp.getheaders():
+                    if name.lower() not in DROPPED_RESPONSE_HEADERS:
+                        self.send_header(name, value)
+
+                self.send_header("X-Content-Type-Options", "nosniff")
+
+                if not sized:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+
+                self.end_headers()
+
+                while True:
+                    #: read1 returns as soon as ANY bytes arrive - one
+                    #: event at a time, never "wait for 64 KiB".
+                    chunk = resp.read1(65536)
+
+                    if not chunk:
+                        break
+
+                    self.wfile.write(chunk)
+            except OSError:
+                #: The phone went away, or live.py did mid-stream. Either
+                #: way this request is over; closing upstream tells the
+                #: other side.
+                self.close_connection = True
+            finally:
+                conn.close()
 
         def _unauthorized(self) -> None:
             self._send(
@@ -1113,6 +1450,18 @@ def make_handler(cfg: Dict[str, Any]):
                 self._send(200, "text/plain; charset=utf-8", b"ok\n")
                 return
 
+            #
+            # The share surface, before the login: a share link works
+            # exactly as it does on :8080, the token being the
+            # credential and live.py the judge of it. No panel route is
+            # dispatched for a path under the prefix, so nothing this
+            # panel does can be reached through it whatever live.py
+            # answers.
+            #
+            if under_share(path):
+                self._proxy("GET")
+                return
+
             if not self._authed():
                 self._unauthorized()
                 return
@@ -1121,35 +1470,51 @@ def make_handler(cfg: Dict[str, Any]):
                 self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
                 return
 
-            if path == "/api/status":
-                self._json(200, status(cfg))
+            if path in TELEMETRY_FILES:
+                self._telemetry_file(path)
                 return
 
-            if path == "/api/diagnostics":
-                #: Proxied rather than merged into /api/status: it is a
-                #: far bigger payload, it changes slowly, and only one
-                #: tab needs it.
-                data = _fetch_json(cfg["diagnostics_url"], timeout=5.0)
+            if path in PROXY_GET:
+                self._proxy("GET")
+                return
 
-                if data is None:
-                    self._json(200, {
-                        "ready": False,
-                        "detail": "the runtime is not answering on "
-                                  + cfg["diagnostics_url"],
-                    })
-                    return
-
-                self._json(200, data)
+            if path == "/api/status":
+                self._json(200, status(cfg))
                 return
 
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
 
         def do_POST(self):
+            path = self.path.split("?")[0]
+
+            if under_share(path):
+                #: live.py refuses every POST under the prefix itself.
+                #: Forwarded rather than answered here so that stays its
+                #: decision, and its answer.
+                self._proxy("POST")
+                return
+
             if not self._authed():
                 self._unauthorized()
                 return
 
-            path = self.path.split("?")[0]
+            if path in PROXY_POST:
+                #
+                # These change how the car is polled or mint a public
+                # link, and the browser attaches this panel's cached
+                # credentials to any POST here - including one a page
+                # from elsewhere triggers. The telemetry page always
+                # sends JSON; a cross-origin form cannot, and a fetch
+                # that does needs a preflight this server never answers.
+                #
+                ctype = self.headers.get("Content-Type", "")
+
+                if ctype.split(";")[0].strip().lower() != "application/json":
+                    self._json(403, {"error": "JSON body required"})
+                    return
+
+                self._proxy("POST")
+                return
 
             if not path.startswith("/api/action/"):
                 self._send(404, "text/plain; charset=utf-8", b"not found\n")
@@ -1210,12 +1575,113 @@ def make_handler(cfg: Dict[str, Any]):
     return Handler
 
 
+def listen_addresses(bind: Any) -> List[str]:
+    """
+    `bind` in every form a config may carry it: one address (the
+    original form, still valid), a list of them, or a comma-separated
+    string - which is what the F10_ADMIN_BIND environment override is,
+    since an environment variable is always a string.
+    """
+    if isinstance(bind, (list, tuple)):
+        parts = [str(item) for item in bind]
+    else:
+        parts = str(bind).split(",")
+
+    return [part.strip() for part in parts if part and part.strip()]
+
+
+class Listener(ThreadingHTTPServer):
+    """One listening socket; IPv6 when the address is."""
+
+    daemon_threads = True
+
+    def __init__(self, address: Tuple[str, int], handler) -> None:
+        self.address_family = (socket.AF_INET6 if ":" in address[0]
+                               else socket.AF_INET)
+        super().__init__(address, handler)
+
+    @property
+    def url(self) -> str:
+        host, port = self.server_address[:2]
+        return f"http://[{host}]:{port}/" if ":" in host else f"http://{host}:{port}/"
+
+
+def bind_all(addresses: List[str], port: int, handler
+             ) -> Tuple[List[Listener], List[Tuple[str, OSError]]]:
+    """Bind every address; report the ones that could not be, by name."""
+    bound: List[Listener] = []
+    failed: List[Tuple[str, OSError]] = []
+
+    for address in addresses:
+        try:
+            bound.append(Listener((address, port), handler))
+        except OSError as exc:
+            failed.append((address, exc))
+
+    return bound, failed
+
+
+def serve(servers: List[Listener], pending: List[str], port: int, handler,
+          retry_s: float = BIND_RETRY_S,
+          stop: Optional[threading.Event] = None) -> int:
+    """
+    Run every listener in its own thread until interrupted (or `stop`
+    is set - that is for tests; systemd sends SIGTERM).
+
+    An address that could not be bound at start is retried in the
+    background: the WireGuard interface comes up after this panel does,
+    and a Pi that reboots out of range would otherwise never listen on
+    it. The LAN listener is not held hostage to that. `servers` and
+    `pending` are updated in place as addresses come up.
+    """
+    stop = stop if stop is not None else threading.Event()
+
+    def start(server: Listener) -> None:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"[+] f10-admin on {server.url}", flush=True)
+
+    for server in servers:
+        start(server)
+
+    try:
+        while not stop.is_set():
+            if not pending:
+                stop.wait()
+                break
+
+            if stop.wait(retry_s):
+                break
+
+            still: List[str] = []
+
+            for address in pending:
+                try:
+                    server = Listener((address, port), handler)
+                except OSError:
+                    still.append(address)
+                    continue
+
+                servers.append(server)
+                start(server)
+
+            pending[:] = still
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--config",
                     default=os.path.join(HERE, "config.json"),
                     help="JSON config (default: config.json beside this file)")
-    ap.add_argument("--bind", default=None, help="override the listen address")
+    ap.add_argument("--bind", default=None,
+                    help="override the listen address(es), comma-separated")
     ap.add_argument("--port", type=int, default=None)
     args = ap.parse_args(argv)
 
@@ -1232,29 +1698,47 @@ def main(argv: Optional[List[str]] = None) -> int:
               "every request. Set them in the config file.", file=sys.stderr)
         return 2
 
-    if cfg["bind"] in ("0.0.0.0", "::"):
-        #
-        # Refused, not warned. This panel can reboot the host and make it
-        # execute new code; on a hotspot or a car-park AP, a wildcard
-        # bind offers that to everyone on the segment.
-        #
-        print("[!] refusing to bind 0.0.0.0 - name the LAN address "
-              "explicitly (see README).", file=sys.stderr)
+    addresses = listen_addresses(cfg["bind"])
+
+    if not addresses:
+        print("[!] bind is empty - name the LAN address (see README).",
+              file=sys.stderr)
         return 2
 
-    server = ThreadingHTTPServer((cfg["bind"], int(cfg["port"])), make_handler(cfg))
-    server.daemon_threads = True
+    for address in addresses:
+        refusal = bind_refusal(address)
 
-    print(f"[+] f10-admin on http://{cfg['bind']}:{cfg['port']}/", flush=True)
+        if refusal:
+            #
+            # Refused, not warned. This panel can reboot the host and make
+            # it execute new code; on a hotspot or a car-park AP, a
+            # wildcard bind offers that to everyone on the segment. One
+            # wildcard in a list is the same offer, in any spelling the
+            # kernel accepts.
+            #
+            print(f"[!] refusing to bind {address!r}: {refusal} - name the "
+                  "LAN address explicitly (see README).", file=sys.stderr)
+            return 2
+
+    port = int(cfg["port"])
+    handler = make_handler(cfg)
+    servers, failed = bind_all(addresses, port, handler)
+
+    for address, exc in failed:
+        print(f"[!] cannot listen on {address}:{port} - "
+              f"{exc.strerror or exc}; retrying every {BIND_RETRY_S:.0f} s",
+              file=sys.stderr, flush=True)
+
+    if not servers:
+        print("[!] none of the configured addresses could be bound.",
+              file=sys.stderr)
+        return 2
+
+    print(f"[+] runtime:  {cfg['dashboard_url']} (proxied)", flush=True)
     print(f"[+] repo:     {cfg['repo_dir']}", flush=True)
     print(f"[+] services: {', '.join(cfg['services'])}", flush=True)
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-
-    return 0
+    return serve(servers, [address for address, _ in failed], port, handler)
 
 
 PAGE = r"""<!doctype html>
@@ -1397,11 +1881,28 @@ PAGE = r"""<!doctype html>
            background:var(--card2); color:var(--muted); margin-left:6px; }
   .badge.extra { background:#2a2340; color:#c3b6f5; }
   .badge.rej { background:#3a1f1f; color:#ffb4b4; }
-  .tabs { display:flex; gap:6px; margin:0 0 14px; }
-  .tab { flex:1; background:none; border:1px solid var(--line);
-         color:var(--muted); font-size:13.5px; }
+  .tabs { display:flex; gap:5px; margin:0 0 14px; overflow-x:auto; }
+  .tab { flex:1 1 0; min-width:0; background:none; border:1px solid var(--line);
+         color:var(--muted); font-size:12.5px; padding:8px 4px;
+         white-space:nowrap; }
   .tab.on { background:var(--card2); color:var(--text);
             border-color:var(--accent); }
+  /* A thin gap between the car's tabs and the box's. */
+  .tabs .gap { flex:0 0 1px; background:var(--line); margin:7px 1px; }
+  /* The telemetry views: the dashboard/ page itself, framed. The frame
+     takes the rest of the viewport and scrolls inside (a phone's
+     browser sizes a frame to its content otherwise); the panel's own
+     title goes away so there is one header on screen - the car's. */
+  body.tele .head h1, body.tele .head .sub { display:none; }
+  body.tele .head { padding-bottom:0; }
+  #pane-tele .frame { overflow:auto; -webkit-overflow-scrolling:touch;
+                      background:#000; }
+  #pane-tele iframe { display:block; width:100%; height:100%; border:0;
+                      background:#000; }
+  .telewarn { max-width:640px; margin:0 auto 10px; padding:10px 14px;
+              border-radius:11px; background:#3a2a12; color:#e8c489;
+              border:1px solid #7a5a1c; font-size:13.5px; line-height:1.45; }
+  .telewarn a { color:inherit; font-weight:600; }
   .hint { font-size:12px; color:var(--muted); line-height:1.5;
           margin:12px 0 0; }
   .cl { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
@@ -1421,19 +1922,42 @@ PAGE = r"""<!doctype html>
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap head">
   <h1 id="host">F10 Pi</h1>
   <p class="sub" id="sub">connecting…</p>
 
-  <!-- The agent is a separate concern from the car: it does not matter
-       during a drive, and it is optional. Its own tab keeps the system
-       view uncluttered, and the tab hides itself where the unit is not
-       installed. -->
+  <!-- Six tabs, one page. The first three are the telemetry UI - the
+       dashboard/ files live.py serves, framed unchanged; its own mode
+       switch is hidden because these tabs are it. The agent is a
+       separate concern from the car: it does not matter during a drive,
+       and it is optional, so its tab hides itself where the unit is not
+       installed. The active tab is the URL fragment, so a bookmark or
+       the back button lands on a tab, not on "whatever was last". -->
   <nav class="tabs" id="tabs">
+    <button class="tab" data-tab="drive">Drive</button>
+    <button class="tab" data-tab="detail">Detail</button>
+    <button class="tab" data-tab="table">All data</button>
+    <span class="gap"></span>
     <button class="tab on" data-tab="system">System</button>
     <button class="tab" data-tab="car">Car link</button>
     <button class="tab" data-tab="claude" id="tab-claude" style="display:none">Claude</button>
   </nav>
+</div>
+
+<!-- Full width, outside .wrap: the Drive cluster is laid out for the
+     whole screen, and the frame's page brings its own header. -->
+<div id="pane-tele" style="display:none">
+  <div class="telewarn" id="telewarn" style="display:none">
+    <b>runtime not running</b> — live.py is not answering, so there is
+    nothing to show. The views come back on their own when it does;
+    the <a href="#system">System</a> tab can start it.
+  </div>
+  <div class="frame" id="teleframe">
+    <iframe id="tele" title="telemetry"></iframe>
+  </div>
+</div>
+
+<div class="wrap" id="mgmt">
 
   <div id="pane-system">
 
@@ -1576,8 +2100,8 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 
-  <!-- Power sits outside both panes: rebooting or halting the box is
-       relevant whichever tab you are on. -->
+  <!-- Power sits outside the management panes: rebooting or halting
+       the box is relevant whichever of them you are on. -->
   <div class="card">
     <h2>Power</h2>
     <div class="row">
@@ -1589,9 +2113,10 @@ PAGE = r"""<!doctype html>
       system risks corrupting the SD card.
     </p>
   </div>
+</div><!-- /mgmt -->
 
-  <div id="msg"></div>
-</div>
+<!-- Fixed to the viewport, so it is read on any tab. -->
+<div id="msg"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -1860,8 +2385,14 @@ async function loadCar(force) {
   if (carLoaded && !force) return;
 
   try {
-    renderCar(await api("/api/diagnostics"));
-    carLoaded = true;
+    /* Through the proxy: a runtime that is down is a 503 whose body
+       still carries ready:false and a detail line, which is exactly
+       the "needs the car" rendering below - not an error. */
+    const r = await fetch("/api/diagnostics", {cache: "no-store"});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok && d.ready !== false) throw new Error(d.error || `HTTP ${r.status}`);
+    renderCar(d);
+    carLoaded = r.ok;
   } catch (e) {
     $("carsession").innerHTML =
       `<div class="recwarn">${escape_(e.message)}</div>`;
@@ -2283,23 +2814,112 @@ async function refresh() {
   if (poller === null) return;          // host is rebooting or halting
 
   try {
-    render(await api("/api/status"));
+    const s = await api("/api/status");
+    render(s);
+    setRuntime(!!(s.recording && s.recording.up));
   } catch (e) {
     $("sub").textContent = "lost contact — " + e.message;
   }
 }
+
+/* ---- tabs -------------------------------------------------------- */
+
+const TELE_TABS = ["drive", "detail", "table"];
+const MGMT_TABS = ["system", "car", "claude"];
+let tab = null;
+
+function showTab(want) {
+  if (!TELE_TABS.includes(want) && !MGMT_TABS.includes(want)) want = "drive";
+  tab = want;
+  const tele = TELE_TABS.includes(want);
+
+  for (const t of document.querySelectorAll(".tab"))
+    t.classList.toggle("on", t.dataset.tab === want);
+
+  document.body.classList.toggle("tele", tele);
+  $("pane-tele").style.display = tele ? "" : "none";
+  $("mgmt").style.display = tele ? "none" : "";
+
+  for (const name of MGMT_TABS)
+    $("pane-" + name).style.display = name === want ? "" : "none";
+
+  if (want === "car") loadCar(true);
+
+  if (tele) {
+    openTelemetry();
+    teleMode(want);
+    window.scrollTo(0, 0);
+    fitFrame();
+  }
+
+  try { localStorage.setItem("f10tab", want); } catch (e) {}
+  if (location.hash !== "#" + want) history.replaceState(null, "", "#" + want);
+}
+
+function wantedTab() {
+  const fromHash = location.hash.replace(/^#/, "");
+  if (fromHash) return fromHash;
+  try { return localStorage.getItem("f10tab") || "drive"; }
+  catch (e) { return "drive"; }
+}
+
+/* ---- the telemetry frame ----------------------------------------- */
+
+/* The dashboard/ page, loaded the first time a telemetry tab opens -
+   not before, so a phone left on the System tab does not hold a stream
+   open. Same origin, so the tabs drive its mode switch directly and the
+   browser reuses this page's credentials for everything it fetches. */
+const tele = $("tele");
+let teleLoaded = false;
+let runtimeUp = null;
+
+function openTelemetry() {
+  if (!tele.getAttribute("src")) tele.src = "/dashboard/";
+}
+
+tele.addEventListener("load", () => {
+  const doc = tele.contentDocument;
+  if (!doc || !doc.getElementById("modeswitch")) return;   // about:blank
+  teleLoaded = true;
+  /* The panel's tabs are the mode switch now; two would disagree. */
+  doc.getElementById("modeswitch").style.display = "none";
+  if (TELE_TABS.includes(tab)) teleMode(tab);
+});
+
+function teleMode(mode) {
+  const doc = tele.contentDocument;
+  const btn = doc && doc.querySelector(`#modeswitch [data-mode="${mode}"]`);
+  if (btn) btn.click();
+}
+
+function fitFrame() {
+  const frame = $("teleframe");
+  const top = frame.getBoundingClientRect().top + window.scrollY;
+  frame.style.height = Math.max(320, window.innerHeight - top - 6) + "px";
+}
+
+/* The proxy answers 503 while live.py is down; the framed page's own
+   stream retries by itself, but its one-time loads (meta, run list)
+   gave up. So: a banner while it is down, and one reload of the frame
+   when it is back - the honest resync. */
+function setRuntime(up) {
+  $("telewarn").style.display = up ? "none" : "";
+  if (up && runtimeUp === false && teleLoaded) {
+    try { tele.contentWindow.location.reload(); } catch (e) {}
+  }
+  runtimeUp = up;
+}
+
+window.addEventListener("resize", fitFrame);
+window.addEventListener("hashchange", () =>
+  showTab(location.hash.replace(/^#/, "") || "drive"));
 
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button");
   if (!b) return;
 
   if (b.dataset.tab) {
-    const want = b.dataset.tab;
-    for (const t of document.querySelectorAll(".tab"))
-      t.classList.toggle("on", t === b);
-    for (const name of ["system", "car", "claude"])
-      $("pane-" + name).style.display = name === want ? "" : "none";
-    if (want === "car") loadCar(true);
+    showTab(b.dataset.tab);
     return;
   }
 
@@ -2439,6 +3059,7 @@ function stopPolling() {
   poller = null;
 }
 
+showTab(wantedTab());
 refresh();
 poller = setInterval(refresh, 5000);
 </script>

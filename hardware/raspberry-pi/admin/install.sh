@@ -11,7 +11,8 @@
 #     bad file can never lock you out of sudo)
 #   * installs and enables the systemd unit
 #   * creates config.json from the example if absent, with a generated
-#     password and the detected LAN address, and prints the credentials
+#     password and the detected LAN + WireGuard addresses, and prints
+#     the credentials
 #
 set -euo pipefail
 
@@ -32,20 +33,26 @@ echo "[+] user:  $PI_USER"
 CONFIG="$HERE/config.json"
 
 if [[ ! -f "$CONFIG" ]]; then
-  # First non-loopback IPv4 on the wireless interface; the phone reaches
-  # the Pi on this. Falls back to whatever the default route uses.
+  # The panel listens on a list of addresses, one listener each. The
+  # LAN address is the first non-loopback IPv4 that is not the tunnel's
+  # (the phone reaches the Pi on it); the WireGuard address is wg0's,
+  # if the tunnel is configured - it is what the VPS-side reverse proxy
+  # will reach the panel on (#41). An interface that is down right now
+  # is not a problem: the panel retries an address it cannot bind.
+  WG_IP="$(ip -4 -o addr show dev wg0 scope global 2>/dev/null \
+           | awk '{print $4}' | cut -d/ -f1 | head -1)"
   LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null \
-            | awk '{print $4}' | cut -d/ -f1 | head -1)"
+            | awk '$2 != "wg0" {print $4}' | cut -d/ -f1 | head -1)"
   LAN_IP="${LAN_IP:-127.0.0.1}"
   PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
   REMOTE="$(sudo -u "$PI_USER" git -C "$REPO_DIR" remote get-url origin \
             2>/dev/null || echo '')"
 
-  python3 - "$CONFIG" "$LAN_IP" "$PASSWORD" "$REPO_DIR" "$REMOTE" <<'PY'
+  python3 - "$CONFIG" "$LAN_IP" "$WG_IP" "$PASSWORD" "$REPO_DIR" "$REMOTE" <<'PY'
 import json, sys
-path, ip, password, repo, remote = sys.argv[1:6]
+path, lan, wg, password, repo, remote = sys.argv[1:7]
 json.dump({
-    "bind": ip,
+    "bind": [lan] + ([wg] if wg and wg != lan else []),
     "port": 8088,
     "username": "f10",
     "password": password,
@@ -54,6 +61,7 @@ json.dump({
     "git_branch": "master",
     "services": ["f10-dashboard", "f10-sync"],
     "sync_status_url": "http://127.0.0.1:8091/sync/status",
+    "dashboard_url": "http://127.0.0.1:8080",
     "log_lines": 200,
 }, open(path, "w"), indent=2)
 PY
@@ -84,7 +92,8 @@ added = []
 for key, value in (
     ("sync_control_url", "http://127.0.0.1:8091"),
     ("dashboard_status_url", "http://127.0.0.1:8080/api/snapshot"),
-    ("diagnostics_url", "http://127.0.0.1:8080/api/diagnostics"),
+    ("dashboard_url", "http://127.0.0.1:8080"),
+    ("trusted_proxies", []),
     ("recording_window_s", 60),
 ):
     if key not in cfg:
@@ -132,11 +141,17 @@ sleep 1
 systemctl is-active --quiet f10-admin \
   || { echo "[!] service did not start:"; journalctl -u f10-admin -n 20 --no-pager; exit 1; }
 
-BIND="$(python3 -c "import json;c=json.load(open('$CONFIG'));print(c['bind'])")"
-PORT="$(python3 -c "import json;c=json.load(open('$CONFIG'));print(c['port'])")"
-
+# One line per listener; `bind` is a list, or a string in an older config.
 echo
-echo "    http://$BIND:$PORT/"
+python3 - "$CONFIG" <<'URLS'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+bind = cfg["bind"]
+addresses = bind if isinstance(bind, list) else [a.strip() for a in str(bind).split(",")]
+for address in addresses:
+    if address:
+        print(f"    http://{address}:{cfg['port']}/")
+URLS
 
 if [[ "$NEW_CONFIG" == "1" ]]; then
   echo "    user: f10"
@@ -146,6 +161,6 @@ if [[ "$NEW_CONFIG" == "1" ]]; then
 fi
 
 echo
-echo "Reachable only from this Pi's LAN address. If the phone cannot"
-echo "connect, check \`bind\` in $CONFIG matches the address the Pi"
-echo "actually has on the network the phone is on."
+echo "Reachable only on the addresses listed in \`bind\`. If the phone"
+echo "cannot connect, check that list in $CONFIG holds the address the"
+echo "Pi actually has on the network the phone is on."

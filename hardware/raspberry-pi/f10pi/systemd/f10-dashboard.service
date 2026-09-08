@@ -22,7 +22,12 @@ Wants=time-sync.target
 Type=simple
 User=@PI_USER@
 WorkingDirectory=@REPO_DIR@
-ExecStart=@REPO_DIR@/run_car.sh
+# On the loopback only: the admin panel (f10-admin, :8088) is the front
+# door and reverse-proxies the telemetry views and API to this port, so
+# the runtime's own port is not a second, unauthenticated way in. The
+# `--host` goes through run_car.sh, which forwards its arguments to
+# live.py; live.py's own default stays 0.0.0.0 for a laptop run.
+ExecStart=@REPO_DIR@/run_car.sh --host 127.0.0.1
 Restart=on-failure
 RestartSec=5
 # stdlib-only runtime: no venv, just system python3

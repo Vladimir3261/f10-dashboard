@@ -3595,11 +3595,13 @@ def demo_loop(
 
 
 #: The telemetry UI lives in dashboard/ as plain files (issue #39): one
-#: source of truth that the Pi panel will serve too. They are read
+#: source of truth that the Pi panel serves too (#40). They are read
 #: relative to THIS file, never the working directory, so run_car.sh, a
 #: laptop launch and a systemd unit all find them - and read once at
 #: import, so the page a running process serves is the page that shipped
-#: with its API (the browser side is kept honest by Cache-Control).
+#: with its API (the browser side is kept honest by Cache-Control). A
+#: missing asset therefore fails at import, before any socket opens:
+#: fail-fast on purpose, so a broken checkout never comes up half-blind.
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
 #: Every asset the page references, by URL path -> content type. This is
