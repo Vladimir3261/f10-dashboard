@@ -236,6 +236,13 @@ port forwarding or tunnel of any other kind is involved. If the Pi is off
 or out of signal the vhost fails fast and serves a "car is unreachable"
 page that retries by itself, rather than hanging or showing a bare 502.
 
+**Upgrading a server that published the old `:8080`.** A `.env` written
+before the panel existed may still say `PI_DASHBOARD_PORT=8080`. That
+port is now `live.py` on the Pi's loopback, unreachable from the tunnel,
+so every request would 502 into the offline page. Set
+`PI_DASHBOARD_PORT=8088` or delete the line (8088 is the default) before
+`make deploy` — the playbook refuses `8080` with a message saying so.
+
 **One login.** The panel has its own Basic Auth, and nginx forwards the
 `Authorization` header to it, so `DASHBOARD_AUTH_USER` /
 `DASHBOARD_AUTH_PASSWORD` here must be the **same** user and password as

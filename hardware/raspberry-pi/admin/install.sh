@@ -47,18 +47,27 @@ if [[ ! -f "$CONFIG" ]]; then
   # if the tunnel is configured - it is what the VPS-side reverse proxy
   # reaches the panel on. An interface that is down right now
   # is not a problem: the panel retries an address it cannot bind.
+  #
+  # Under `set -euo pipefail` a pipeline whose first command fails ends
+  # the script - silently, with stderr discarded. `ip ... dev wg0` exits
+  # 1 when there is no wg0, and that is exactly the case these lines
+  # exist to handle: each is `|| true`, and "no address" is an empty
+  # string, never an abort.
   WG_IP="$(ip -4 -o addr show dev wg0 scope global 2>/dev/null \
-           | awk '{print $4}' | cut -d/ -f1 | head -1)"
+           | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
   LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null \
-            | awk '$2 != "wg0" {print $4}' | cut -d/ -f1 | head -1)"
+            | awk '$2 != "wg0" {print $4}' | cut -d/ -f1 | head -1 || true)"
   LAN_IP="${LAN_IP:-127.0.0.1}"
   # The VPS's address on the tunnel: the one hop whose X-Forwarded-* the
   # panel believes, and only when the tunnel exists. Nothing on the LAN
   # ever goes in that list. f10pi's local.env names the server if the
-  # Pi was provisioned from it; the subnet's .1 otherwise.
-  WG_SERVER_IP="$(sed -n 's/^WG_SERVER_IP=//p' \
-                  "$REPO_DIR/hardware/raspberry-pi/f10pi/config/local.env" \
-                  2>/dev/null | head -1)"
+  # Pi was provisioned from it (the file is gitignored, so it is absent
+  # on any other Pi - not an error); the subnet's .1 otherwise.
+  LOCAL_ENV="$REPO_DIR/hardware/raspberry-pi/f10pi/config/local.env"
+  WG_SERVER_IP=""
+  if [[ -f "$LOCAL_ENV" ]]; then
+    WG_SERVER_IP="$(sed -n 's/^WG_SERVER_IP=//p' "$LOCAL_ENV" | head -1 || true)"
+  fi
   WG_SERVER_IP="${WG_SERVER_IP:-10.77.0.1}"
   PROXY_IP=""; [[ -n "$WG_IP" ]] && PROXY_IP="$WG_SERVER_IP"
   PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"

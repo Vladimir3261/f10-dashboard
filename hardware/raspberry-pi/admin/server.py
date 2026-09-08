@@ -113,6 +113,30 @@ PANEL_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
              "script-src 'unsafe-inline'; connect-src 'self'; "
              "frame-src 'self'")
 
+#: What a share viewer's browser gets when the Pi is up and live.py is
+#: not: the public prefix, so nothing of the box - no address, no
+#: upstream, no reason - just that it is not running, and a retry.
+#: Self-contained; the same wording as the VPS's page for the Pi
+#: itself being unreachable.
+SHARE_DOWN_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>Car unreachable</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;
+justify-content:center;background:#0b0d10;color:#c9d1d9;
+font:16px/1.5 system-ui,sans-serif;text-align:center}
+main{max-width:22rem;padding:2rem}h1{font-size:1.3rem;margin:0 0 .5rem}
+p{margin:.4rem 0;color:#8b949e}
+</style></head><body><main>
+<h1>The car is unreachable</h1>
+<p>Its telemetry is not running right now. This is normal when the car
+is parked.</p>
+<p>This page retries by itself.</p>
+</main></body></html>
+"""
+
 #: The framed telemetry document: its own files, its API through this
 #: origin, and the sync agent's pause/resume on :8091 (app.js talks to
 #: the agent directly, by design - see the comment there).
@@ -1278,15 +1302,34 @@ def make_handler(cfg: Dict[str, Any]):
             """
             why = (exc.strerror if isinstance(exc, OSError) and exc.strerror
                    else str(exc) or type(exc).__name__)
+            retry = {"Retry-After": "5"}
 
             try:
+                if under_share(urlsplit(self.path).path):
+                    #: The public prefix: a viewer who was handed a
+                    #: link learns that the car is not answering, and
+                    #: nothing about the box - not the upstream, not
+                    #: its address, not the errno. A browser gets a
+                    #: page; anything else the same shape as the owner
+                    #: body, minus the internals.
+                    if "text/html" in (self.headers.get("Accept") or ""):
+                        self._send(503, "text/html; charset=utf-8",
+                                   SHARE_DOWN_HTML.encode("utf-8"), retry)
+                    else:
+                        self._json(503, {
+                            "error": "runtime not running",
+                            "ready": False,
+                            "detail": "the car's telemetry is not running",
+                        }, retry)
+                    return
+
                 self._json(503, {
                     "error": "runtime not running",
                     "ready": False,
                     "detail": "the runtime is not answering on "
                               f"{cfg['dashboard_url']} ({why})",
                     "upstream": cfg["dashboard_url"],
-                }, {"Retry-After": "5"})
+                }, retry)
             except OSError:
                 self.close_connection = True
 

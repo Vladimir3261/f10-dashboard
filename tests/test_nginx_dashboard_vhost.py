@@ -173,9 +173,16 @@ class TheRenderedVhost(unittest.TestCase):
         off = {path for path, block in self.locations.items()
                if "off" in directives(block, "auth_basic")}
 
-        self.assertEqual(off, {"/s/", "/s/api/stream"})
+        #: The offline page is in the off-set too: `error_page` is an
+        #: internal redirect and nginx re-runs the access phase in the
+        #: target location, so with the server's auth_basic inherited
+        #: there a share viewer got a 401 instead of the page when the
+        #: Pi was down (review of PR #44, reproduced with nginx 1.24).
+        #: `internal` keeps a direct GET of it at 404 regardless.
+        self.assertEqual(off, {"/s/", "/s/api/stream", "/__offline.html"})
+        self.assertIn("internal;", self.locations["/__offline.html"])
 
-        for path in ("/", "/api/stream", "/__offline.html"):
+        for path in ("/", "/api/stream"):
             self.assertNotIn("auth_basic", self.locations[path], path)
 
     def test_the_streams_keep_the_sse_treatment(self):
@@ -198,6 +205,23 @@ class TheRenderedVhost(unittest.TestCase):
         for path in ("/s/", "/s/api/stream"):
             self.assertIn('add_header X-Robots-Tag "noindex, nofollow" always;',
                           self.proxied[path])
+
+    def test_hsts_survives_every_location_that_adds_a_header(self):
+        """
+        nginx inherits `add_header` only into a block that declares
+        none. A block with its own X-Robots-Tag or Cache-Control loses
+        the server-level HSTS unless it repeats it - and a share viewer
+        only ever hits such blocks.
+        """
+        hsts = 'Strict-Transport-Security "max-age=31536000" always'
+        server_level = self.conf.split("location", 1)[0]
+
+        self.assertIn(hsts, directives(server_level, "add_header"))
+
+        for path, block in self.locations.items():
+            added = directives(block, "add_header")
+            if added:
+                self.assertIn(hsts, added, f"{path} adds headers without HSTS")
 
     def test_tls_and_the_offline_page(self):
         self.assertIn("listen 443 ssl http2;", self.conf)
@@ -226,6 +250,19 @@ class TheRenderedVhost(unittest.TestCase):
         self.assertIn("dashboard_auth_password != 'change-me-dashboard-password'",
                       tasks)
         self.assertIn("when: dashboard_domain | length > 0", tasks)
+
+    def test_the_role_refuses_the_old_port(self):
+        """
+        A server .env from before the panel still says
+        PI_DASHBOARD_PORT=8080. That is live.py on the Pi's loopback
+        now: every request would 502 into the offline page, with no
+        hint why. The role says so instead of deploying it.
+        """
+        with open(TASKS, encoding="utf-8") as fh:
+            tasks = fh.read()
+
+        self.assertIn("pi_dashboard_port | string != '8080'", tasks)
+        self.assertIn("set PI_DASHBOARD_PORT=8088 or drop the line", tasks)
 
 
 class TheOfflinePage(unittest.TestCase):
