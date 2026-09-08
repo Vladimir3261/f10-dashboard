@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F10 520d - live telemetry</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>F10 520d</h1>
+  <div class="chips">
+    <div class="chip"><span id="dot" class="dot off"></span><b id="status">connecting</b></div>
+    <div class="chip">VIN <b id="vin">-</b></div>
+    <div class="chip">ECU <b id="ecu">-</b></div>
+    <div class="chip"><b id="hz">0</b> Hz</div>
+    <div class="chip"><b id="lat">0</b> ms</div>
+    <div class="chip">logged <b id="rows">0</b></div>
+    <div class="chip" id="drivemodechip" title="how hard to poll the car">
+      mode <select id="drivemode"></select><b id="driveduty"></b>
+    </div>
+    <div class="chip" id="syncchip" title="click to pause/resume sync"
+         style="cursor:pointer">
+      <span id="syncdot" class="dot off"></span>sync
+      <b id="syncstate">-</b><span id="syncpend"></span>
+    </div>
+    <div class="chip" id="sharechip" title="create a temporary public link"
+         style="cursor:pointer">share</div>
+    <div class="chip" id="sharedbadge" style="display:none">shared &middot; live</div>
+  </div>
+</header>
+
+<div class="sheet" id="sharesheet">
+  <div class="sheetbox">
+    <h2>Share a live link</h2>
+    <p class="dim">
+      Anyone with the link sees this dashboard live, read-only, with the VIN
+      masked and no drive history. It stops working when it expires, when you
+      revoke it, or when the dashboard restarts.
+    </p>
+    <div class="row">
+      <label for="sharettl">Expires in</label>
+      <select id="sharettl">
+        <option value="900">15 minutes</option>
+        <option value="3600" selected>1 hour</option>
+        <option value="14400">4 hours</option>
+        <option value="43200">12 hours</option>
+      </select>
+      <button id="sharemint">Create link</button>
+    </div>
+    <div class="row" id="sharenew" style="display:none">
+      <input id="shareurl" readonly>
+      <button id="sharecopy">Copy</button>
+    </div>
+    <div id="sharelist"></div>
+    <div class="row">
+      <button id="sharerevokeall" class="danger">Revoke all</button>
+      <button id="shareclose">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modes" id="modeswitch">
+  <button data-mode="drive">Drive</button>
+  <button data-mode="detail">Detail</button>
+  <button data-mode="table">All data</button>
+</div>
+
+<!-- shared history controls (detail mode) -->
+<div class="controls" id="histctl">
+  <label>Run</label>
+  <select id="run"></select>
+  <label>Window</label>
+  <div class="seg" id="win"></div>
+  <button class="ctl" id="reload">Reload history</button>
+  <span id="hint" style="color:var(--muted);font-size:11.5px"></span>
+</div>
+
+<!-- ===================== MODE 1: DRIVE ===================== -->
+<section id="drive" class="hidden">
+  <div class="mcluster">
+    <div class="revbar" id="revbar"></div>
+    <div class="herorow">
+      <div class="herogauge">
+        <svg viewBox="0 0 200 165" id="bg-rpm"></svg>
+        <div class="heroval" id="hv-rpm">--</div>
+        <div class="herolabel">RPM</div>
+      </div>
+      <div class="gearbox" id="gearbox">
+        <div class="gearlabel">GEAR</div>
+        <div class="gearnum" id="gearnum">–</div>
+        <div class="mstripe"></div>
+      </div>
+      <div class="herogauge">
+        <svg viewBox="0 0 200 165" id="bg-speed"></svg>
+        <div class="heroval" id="hv-speed">--</div>
+        <div class="herolabel">KM/H</div>
+      </div>
+    </div>
+    <div class="tilerow" id="tilerow"></div>
+  </div>
+</section>
+
+<!-- ===================== MODE 2: DETAIL ===================== -->
+<section id="detail" class="hidden">
+  <div class="gauges">
+    <div class="gauge">
+      <svg viewBox="0 0 200 165" id="g-rpm"></svg>
+      <div class="gval" id="v-rpm">--</div><div class="gunit">rpm</div>
+    </div>
+    <div class="gauge">
+      <svg viewBox="0 0 200 165" id="g-boost"></svg>
+      <div class="gval" id="v-boost">--</div><div class="gunit">bar boost</div>
+    </div>
+    <div class="gauge">
+      <svg viewBox="0 0 200 165" id="g-speed"></svg>
+      <div class="gval" id="v-speed">--</div><div class="gunit">km/h</div>
+    </div>
+  </div>
+  <h2>All channels <span id="span" style="text-transform:none;letter-spacing:0"></span></h2>
+  <div class="panels" id="panels"></div>
+  <div class="axis"><span id="ax0"></span><span id="ax1"></span></div>
+</section>
+
+<!-- ===================== MODE 3: TABLE ===================== -->
+<section id="table" class="hidden">
+  <table>
+    <thead><tr>
+      <th>Channel</th><th>Key</th><th style="text-align:right">Value</th><th>Unit</th>
+      <th style="text-align:right">Min</th><th style="text-align:right">Max</th>
+      <th style="text-align:right">Age</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</section>
+
+<footer>
+  Read-only OBD-2 service 01 + verified BMW proprietary reads over HSFZ / ENET.
+  Nothing is written to the vehicle.
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
