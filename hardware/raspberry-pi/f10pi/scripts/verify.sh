@@ -2,7 +2,9 @@
 # f10pi health check. Reports, without ever printing a secret:
 #   hostname, wlan0 state, active Wi-Fi profile, Internet access,
 #   eth0 state, wg0 state, WireGuard handshake, VPN-server reachability,
-#   SSH service state, application service state.
+#   SSH service state, application service state, the two web ports
+#   (the admin panel listening on :8088; live.py on :8080 bound to the
+#   loopback only - never a LAN address).
 #
 # By default output is already safe (no PSKs/keys). Pass --public to also
 # redact public IPs, MAC addresses, SSIDs, and usernames so the log can be
@@ -122,7 +124,7 @@ fi
 
 # --- application services --------------------------------------------------
 hdr "application"
-for svc in f10-dashboard.service f10-sync.service; do
+for svc in f10-dashboard.service f10-sync.service f10-admin.service; do
   if systemctl list-unit-files | grep -q "^${svc}"; then
     if systemctl is-active --quiet "${svc}"; then
       ok "${svc} active"
@@ -134,11 +136,30 @@ for svc in f10-dashboard.service f10-sync.service; do
   fi
 done
 
-# dashboard port
-if have ss && ss -ltn 2>/dev/null | grep -q ':8080'; then
-  ok "dashboard listening on :8080"
+# web ports. The admin panel (:8088) is the front door and must listen;
+# live.py (:8080) is reached only through it and must be bound to the
+# loopback - a :8080 listener on any other address is a second,
+# unauthenticated way in and is reported as a failure.
+if have ss; then
+  listeners=$(ss -Hltn 2>/dev/null | awk '{print $4}')
+  if grep -q ':8088$' <<<"${listeners}"; then
+    ok "admin panel listening on :8088"
+    grep ':8088$' <<<"${listeners}" | sed 's/^/  ..   on: /' | san
+  else
+    info "admin panel not listening on :8088 (../admin/install.sh)"
+  fi
+  if grep -q ':8080$' <<<"${listeners}"; then
+    if grep ':8080$' <<<"${listeners}" | grep -qvE '^(127\.0\.0\.1|\[::1\]):8080$'; then
+      bad "live.py :8080 is bound off the loopback - it must be 127.0.0.1 only (run_car.sh --host 127.0.0.1)"
+      grep ':8080$' <<<"${listeners}" | sed 's/^/  ..   on: /' | san
+    else
+      ok "live.py listening on 127.0.0.1:8080 only (correct)"
+    fi
+  else
+    info "live.py not listening on :8080"
+  fi
 else
-  info "dashboard not listening on :8080"
+  info "ss not available - skipping port checks"
 fi
 
 hdr "done"
