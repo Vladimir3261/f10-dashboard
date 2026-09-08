@@ -64,6 +64,7 @@ Stdlib only, like the rest of the runtime.
 import argparse
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 import shutil
@@ -149,6 +150,14 @@ HOP_BY_HOP = frozenset({
 #: body length it restates.
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"authorization", "host",
                                         "content-length"}
+#: What live.py believes about the client - the address, the scheme and
+#: the public name a share link is minted against. This panel SETS
+#: them; a copy the client sent is replaced, never forwarded ahead of
+#: ours (live.py takes the first value). The one exception is a request
+#: that arrived from a `trusted_proxies` address - the VPS-side nginx
+#: of #41 - whose values are the truth about the hop before it.
+FORWARDED_HEADERS = frozenset({"x-forwarded-for", "x-forwarded-proto",
+                               "x-forwarded-host"})
 #: Response headers this server adds itself; a second copy from
 #: upstream would be a duplicate.
 DROPPED_RESPONSE_HEADERS = HOP_BY_HOP | {"server", "date"}
@@ -157,6 +166,14 @@ DROPPED_RESPONSE_HEADERS = HOP_BY_HOP | {"server", "date"}
 #: all. This bounds "not at all"; it is NOT a read deadline - see
 #: _proxy.
 CONNECT_TIMEOUT_S = 3.0
+#: The read deadline for everything that is NOT a stream: a runtime
+#: that accepts the connection and never answers (the process exists,
+#: its loop is stuck) would otherwise pin one panel thread per phone
+#: refresh, for good. A JSON answer takes milliseconds; a stream is
+#: silent for as long as the car is, and gets no deadline at all.
+READ_TIMEOUT_S = 15.0
+#: The paths that are streams - the owner's and the share viewer's.
+STREAM_PATHS = frozenset({"/api/stream", SHARE_PREFIX + "/api/stream"})
 #: The largest body a proxied POST may carry. live.py reads 4 KiB.
 MAX_PROXY_BODY = 16384
 #: A listen address that is not there yet (wg0 comes up after the
@@ -167,6 +184,30 @@ BIND_RETRY_S = 15.0
 def under_share(path: str) -> bool:
     """True for the share prefix itself and everything below it."""
     return path == SHARE_PREFIX or path.startswith(SHARE_PREFIX + "/")
+
+
+def bind_refusal(address: str) -> Optional[str]:
+    """
+    Why this listen address is refused, or None if it may be bound.
+
+    Semantic, not lexical: the kernel accepts `0`, `0.0`, `00.0.0.0`,
+    `::0`, `0::0` and `::ffff:0.0.0.0` as "every interface" just as it
+    accepts `0.0.0.0`, and a one-character F10_ADMIN_BIND typo must not
+    open the panel to the segment. Anything that is not an IP literal
+    is refused too - `[::]` or a host name would never bind and would
+    otherwise sit in the retry loop for ever, silently.
+    """
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return "not an IP address literal"
+
+    mapped = getattr(ip, "ipv4_mapped", None)
+
+    if ip.is_unspecified or (mapped is not None and mapped.is_unspecified):
+        return "a wildcard address (every interface)"
+
+    return None
 
 DEFAULTS: Dict[str, Any] = {
     #: Loopback by default: a deployment that forgets to set this is
@@ -197,6 +238,12 @@ DEFAULTS: Dict[str, Any] = {
     #: the whole share prefix are forwarded here; the Car link tab's
     #: diagnostics too (an older config's `diagnostics_url` is ignored).
     "dashboard_url": "http://127.0.0.1:8080",
+    #: Addresses whose X-Forwarded-* headers are believed - the reverse
+    #: proxy in front of this panel (#41: nginx on the VPS, over wg0),
+    #: by its address as this panel sees it. Empty means the panel is
+    #: the edge: every client-sent X-Forwarded-* is replaced with what
+    #: the panel itself knows.
+    "trusted_proxies": [],
     #: Per-drive databases, and the agent's watermark file. Empty by
     #: default and DERIVED from `repo_dir` - never a hardcoded
     #: /home/<guess>/ path. A config written by an older version of the
@@ -1132,6 +1179,13 @@ def make_handler(cfg: Dict[str, Any]):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "f10-admin"
+        #: No interpreter version on the wire - the share prefix is
+        #: public once #41 publishes it. (The base class would still
+        #: append a space after the name with sys_version empty.)
+        sys_version = ""
+
+        def version_string(self) -> str:
+            return self.server_version
 
         def log_message(self, *args):
             pass
@@ -1204,21 +1258,30 @@ def make_handler(cfg: Dict[str, Any]):
             """
             live.py is not answering.
 
-            503, with a body every consumer here understands: the
-            telemetry page's EventSource reconnects on a 503 (the spec
-            requires it - so the stream resumes by itself when the
-            runtime is back), the Car link tab reads `ready` and
-            `detail`, and a curl gets a sentence.
+            503, with a body every consumer here understands: the panel
+            page shows its banner and reloads the frame once the status
+            poll sees the runtime back (that reload, not the browser's
+            EventSource retry, is what resyncs the views), the Car link
+            tab reads `ready` and `detail`, and a curl gets a sentence.
+
+            The phone that asked may itself be gone by now - a wedged
+            runtime is found out at the read deadline, long after a
+            browser gives up - so the write is guarded: no traceback in
+            the journal for every refresh that was abandoned.
             """
             why = (exc.strerror if isinstance(exc, OSError) and exc.strerror
                    else str(exc) or type(exc).__name__)
-            self._json(503, {
-                "error": "runtime not running",
-                "ready": False,
-                "detail": "the runtime is not answering on "
-                          f"{cfg['dashboard_url']} ({why})",
-                "upstream": cfg["dashboard_url"],
-            }, {"Retry-After": "5"})
+
+            try:
+                self._json(503, {
+                    "error": "runtime not running",
+                    "ready": False,
+                    "detail": "the runtime is not answering on "
+                              f"{cfg['dashboard_url']} ({why})",
+                    "upstream": cfg["dashboard_url"],
+                }, {"Retry-After": "5"})
+            except OSError:
+                self.close_connection = True
 
         def _proxy(self, method: str) -> None:
             """
@@ -1230,7 +1293,9 @@ def make_handler(cfg: Dict[str, Any]):
             socket writer, with NO read deadline on the upstream socket
             once connected - a stream is silent between events, and a
             timeout there would end a drive's dashboard the first time
-            the car went quiet. The upstream connection is closed as
+            the car went quiet. Everything else gets READ_TIMEOUT_S, so
+            a runtime that accepts and never answers costs a thread for
+            seconds, not for ever. The upstream connection is closed as
             soon as either side goes away. The panel's own credentials
             stop here: live.py has no use for them, and a request log
             on the wrong side of a share link must not carry them.
@@ -1239,6 +1304,9 @@ def make_handler(cfg: Dict[str, Any]):
             host = target.hostname or "127.0.0.1"
             port = target.port or 80
             body = b""
+            is_stream = urlsplit(self.path).path in STREAM_PATHS
+            peer = self.client_address[0]
+            trusted = peer in (cfg.get("trusted_proxies") or ())
 
             if method == "POST":
                 try:
@@ -1257,20 +1325,34 @@ def make_handler(cfg: Dict[str, Any]):
 
             try:
                 conn.connect()
-                #: Connected. From here the socket waits as long as the
-                #: stream is quiet.
-                conn.sock.settimeout(None)
+                #: Connected. From here a stream's socket waits as long
+                #: as the stream is quiet; any other answer is due.
+                conn.sock.settimeout(None if is_stream else READ_TIMEOUT_S)
                 conn.putrequest(method, self.path, skip_host=True,
                                 skip_accept_encoding=True)
 
                 for name, value in self.headers.items():
-                    if name.lower() not in DROPPED_REQUEST_HEADERS:
-                        conn.putheader(name, value)
+                    lower = name.lower()
+
+                    if lower in DROPPED_REQUEST_HEADERS:
+                        continue
+
+                    if lower in FORWARDED_HEADERS and not trusted:
+                        #: The client's claim about itself: replaced
+                        #: below with what this panel knows.
+                        continue
+
+                    conn.putheader(name, value)
 
                 conn.putheader("Host", self.headers.get("Host")
                                or f"{host}:{port}")
-                conn.putheader("X-Forwarded-For", self.client_address[0])
-                conn.putheader("X-Forwarded-Proto", "http")
+
+                if not trusted or not self.headers.get("X-Forwarded-For"):
+                    conn.putheader("X-Forwarded-For", peer)
+
+                if not trusted or not self.headers.get("X-Forwarded-Proto"):
+                    conn.putheader("X-Forwarded-Proto", "http")
+
                 conn.putheader("Connection", "close")
 
                 if method == "POST":
@@ -1624,15 +1706,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     for address in addresses:
-        if address in ("0.0.0.0", "::"):
+        refusal = bind_refusal(address)
+
+        if refusal:
             #
             # Refused, not warned. This panel can reboot the host and make
             # it execute new code; on a hotspot or a car-park AP, a
             # wildcard bind offers that to everyone on the segment. One
-            # wildcard in a list is the same offer.
+            # wildcard in a list is the same offer, in any spelling the
+            # kernel accepts.
             #
-            print("[!] refusing to bind 0.0.0.0 - name the LAN address "
-                  "explicitly (see README).", file=sys.stderr)
+            print(f"[!] refusing to bind {address!r}: {refusal} - name the "
+                  "LAN address explicitly (see README).", file=sys.stderr)
             return 2
 
     port = int(cfg["port"])

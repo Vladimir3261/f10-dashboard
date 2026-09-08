@@ -58,6 +58,13 @@ merged in with their defaults).
   wait for it.
 - **`dashboard_url`** — where `live.py` is, `http://127.0.0.1:8080` by
   default. Everything the telemetry tabs fetch is proxied there.
+- **`trusted_proxies`** — empty by default, and stays empty until #41
+  puts nginx in front of the panel. See *What is proxied* below.
+
+`install.sh` only writes the `wg0` address if the interface exists when
+it runs: on a Pi where WireGuard is configured later, run it again, or
+add `10.77.0.10` to `bind` by hand. An address that is *listed* but not
+yet assigned is retried; one that is not listed is not.
 
 ## What is proxied, and what is not
 
@@ -72,10 +79,18 @@ merged in with their defaults).
 The list of proxied owner paths is closed: a path not on it is the
 panel's own or a `404`. `/api/stream` is a server-sent event stream that
 is open for a whole drive; the proxy relays it chunk by chunk with no
-read deadline, and closes the upstream side when the phone goes. The
-panel's `Authorization` header is stripped before forwarding; `Host`,
-`X-Forwarded-For` and `X-Forwarded-Proto` are set, so `live.py` builds
-share links against the address the phone actually used.
+read deadline, and closes the upstream side when the phone goes. Every
+other proxied request has a 15 s read deadline, so a runtime that
+accepts and never answers (the process is there, its loop is stuck)
+costs a thread for seconds and yields the same `503`, not a thread for
+good. The panel's `Authorization` header is stripped before
+forwarding; `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` are
+**set by the panel, replacing anything the client sent** — `live.py`
+takes the first value and builds share links from it, so a client must
+not get to choose the scheme or the public name. When nginx is in front
+(#41) it sets them itself; list its address, as the panel sees it, in
+`trusted_proxies` and the panel passes *that hop's* values through
+unchanged. Nothing else ever goes in that list.
 
 Nothing of the panel is dispatched under `/s/`: a share viewer asking
 for `/s/api/status`, `/s/api/action/reboot` or the Claude tab gets
