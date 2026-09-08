@@ -1,13 +1,34 @@
-# f10-admin — the Pi's control panel
+# f10-admin — the Pi's front door
 
-A phone-sized web page for the things you would otherwise SSH in to do,
-from the driver's seat: see whether the runtime is alive, read why it
-isn't, pull a fix, restart it, and shut the box down cleanly before
-cutting the power.
+One page, one address, one login: the car's telemetry views and the
+things you would otherwise SSH in to do, from the driver's seat.
 
 ```
-http://<pi-lan-ip>:8088/
+http://<pi-lan-ip>:8088/          (and http://10.77.0.10:8088/ over WireGuard)
 ```
+
+Six tabs. **Drive · Detail · All data** are the telemetry UI — the
+`dashboard/` files that `live.py` serves, shown here unchanged inside a
+frame, with their API reverse-proxied to the runtime behind this panel's
+authentication. **System · Car link · Claude** are the box: whether the
+runtime is alive, why it isn't, pull a fix, restart it, shut down cleanly
+before cutting the power. The active tab is the URL fragment
+(`#drive`, `#system`, …), so a bookmark lands on a tab.
+
+The runtime itself listens on the loopback only
+(`f10-dashboard.service` passes `--host 127.0.0.1` through `run_car.sh`),
+so `:8080` is not a second, unauthenticated way in; this panel is the
+only one. Share links (`/s/?t=…`) pass straight through to `live.py`,
+which stays the authority on its own tokens — a shared link never sees
+this panel's login and can never reach anything of it.
+
+## When live.py is down
+
+The page still loads and every management action still works — that is
+what a separate unit is for. The telemetry tabs show a *runtime not
+running* banner (the proxy answers `503` with a JSON body the page
+understands rather than a broken frame), the System tab's **restart**
+brings it back, and the views resync on their own once it answers.
 
 ## Install
 
@@ -18,12 +39,63 @@ cd ~/f10-dashboard/hardware/raspberry-pi/admin && sudo ./install.sh
 ```
 
 It generates `config.json` with a random password and the Pi's detected
-LAN address, installs the sudoers allowlist (validating it with
-`visudo -c` first), installs and starts the systemd unit, and prints the
-credentials. **Save them — they are printed once.**
+addresses (the LAN one, and `wg0`'s if the tunnel is configured),
+installs the sudoers allowlist (validating it with `visudo -c` first),
+installs and starts the systemd unit, and prints the credentials.
+**Save them — they are printed once.**
 
 Re-run it after a `git pull` to pick up changes; it is idempotent and
-leaves an existing `config.json` alone.
+leaves an existing `config.json`'s values alone (keys added since are
+merged in with their defaults).
+
+### `config.json` — the two keys that matter here
+
+- **`bind`** — a list of addresses, one listener each: the LAN address
+  the phone uses and the WireGuard one (`10.77.0.10`). A plain string
+  still works. `0.0.0.0` / `::` are refused, in a list too. An address
+  the Pi does not have yet — `wg0` comes up after the panel — is retried
+  every 15 s and added when it can be bound; the LAN listener does not
+  wait for it.
+- **`dashboard_url`** — where `live.py` is, `http://127.0.0.1:8080` by
+  default. Everything the telemetry tabs fetch is proxied there.
+- **`trusted_proxies`** — empty by default, and stays empty until #41
+  puts nginx in front of the panel. See *What is proxied* below.
+
+`install.sh` only writes the `wg0` address if the interface exists when
+it runs: on a Pi where WireGuard is configured later, run it again, or
+add `10.77.0.10` to `bind` by hand. An address that is *listed* but not
+yet assigned is retried; one that is not listed is not.
+
+## What is proxied, and what is not
+
+| path | who answers | login |
+|---|---|---|
+| `/`, `/dashboard/*` | the panel (the page; the telemetry files from `dashboard/`) | panel |
+| `/api/snapshot`, `/api/stream`, `/api/meta`, `/api/runs`, `/api/history`, `/api/sync`, `/api/diagnostics`, `/api/modes`, `/api/share` and `POST /api/mode`, `/api/share`, `/api/share/revoke` | `live.py`, through the panel | panel |
+| `/s/*` (share links, whole prefix) | `live.py`, through the panel | **`live.py`'s token only** — the panel asks for nothing |
+| `/api/status`, `/api/action/*` | the panel | panel |
+| `/healthz` | the panel | none |
+
+The list of proxied owner paths is closed: a path not on it is the
+panel's own or a `404`. `/api/stream` is a server-sent event stream that
+is open for a whole drive; the proxy relays it chunk by chunk with no
+read deadline, and closes the upstream side when the phone goes. Every
+other proxied request has a 15 s read deadline, so a runtime that
+accepts and never answers (the process is there, its loop is stuck)
+costs a thread for seconds and yields the same `503`, not a thread for
+good. The panel's `Authorization` header is stripped before
+forwarding; `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` are
+**set by the panel, replacing anything the client sent** — `live.py`
+takes the first value and builds share links from it, so a client must
+not get to choose the scheme or the public name. When nginx is in front
+(#41) it sets them itself; list its address, as the panel sees it, in
+`trusted_proxies` and the panel passes *that hop's* values through
+unchanged. Nothing else ever goes in that list.
+
+Nothing of the panel is dispatched under `/s/`: a share viewer asking
+for `/s/api/status`, `/s/api/action/reboot` or the Claude tab gets
+whatever `live.py` says about that path (its denied page, or a `404`),
+never the panel. A test enumerates every panel route and asserts it.
 
 ## What it shows
 
@@ -181,9 +253,20 @@ Pi fetch code that the runtime then executes, so anyone who can reach
 the panel and authenticate can run code on it. That is the intended
 feature; everything below is what keeps it bounded.
 
-- **Binds to one address, never `0.0.0.0`** — refused at startup, not
-  warned about. The Pi joins hotspots and car-park APs; a wildcard bind
-  would offer reboot-and-run-code to that whole segment.
+- **Binds to named addresses, never `0.0.0.0`** — refused at startup,
+  not warned about, and one wildcard in the list is the same refusal.
+  The Pi joins hotspots and car-park APs; a wildcard bind would offer
+  reboot-and-run-code to that whole segment.
+- **The runtime is behind it, not beside it.** `live.py` listens on the
+  loopback and is reached only through this panel's login — except the
+  share prefix, which is `live.py`'s own token-gated surface and is
+  passed through untouched, credentials and all: the panel neither adds
+  its login there nor forwards it upstream anywhere.
+- **Proxied POSTs must be `application/json`.** The browser attaches the
+  panel's cached credentials to any request here; a cross-origin form
+  cannot send that content type, and a script that does is preflighted.
+  It is the same line the custom header draws for the panel's own
+  actions, for the runtime's controls (mode, share).
 - **HTTP Basic auth**, compared with `hmac.compare_digest`, from a
   gitignored `config.json`. A panel with no password configured refuses
   everyone rather than letting everyone in.
@@ -213,11 +296,31 @@ feature; everything below is what keeps it bounded.
 Deliberately absent from the sudoers grant: `daemon-reload`, `enable`,
 `disable`, anything touching apt, and any shell. Changing what runs at
 boot is a provisioning decision, not something a phone does mid-drive.
+The proxy added no grant and no action: the sudoers file and the action
+table are what they were.
+
+### Exposure
+
+Today the panel is reachable on the Pi's LAN address and, over
+WireGuard, on `10.77.0.10` — both networks you are on. Once #41
+publishes the panel through the VPS (TLS in front, this Basic auth
+behind it), **the management surface — restart, pull, reboot, shut
+down, the Claude session — becomes reachable from the internet behind
+that TLS + password.** That is the point of the front door, and it is
+why the password must be strong and used nowhere else, why the share
+prefix is the only thing here that answers without it, and why the
+runtime's own port must stay on the loopback.
 
 ## If the phone cannot connect
 
-Check `bind` in `config.json` matches the address the Pi actually has on
-the network the phone is on — the Pi's address changes between your home
-network and a hotspot. `ip -4 -o addr show scope global` on the Pi shows
-the current one. `curl http://<ip>:8088/healthz` needs no credentials and
-answers `ok` if the panel itself is up.
+Check the `bind` list in `config.json` holds the address the Pi actually
+has on the network the phone is on — the Pi's address changes between
+your home network and a hotspot. `ip -4 -o addr show scope global` on
+the Pi shows the current ones. `curl http://<ip>:8088/healthz` needs no
+credentials and answers `ok` if the panel itself is up; the journal
+(`journalctl -u f10-admin`) says which addresses it bound and which it
+is still retrying.
+
+If the page loads but the telemetry tabs say *runtime not running*, the
+panel is fine and `live.py` is not: the System tab has the journal and
+the restart button.
