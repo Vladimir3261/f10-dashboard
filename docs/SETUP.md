@@ -246,7 +246,9 @@ cd f10-dashboard && ./run_car.sh
 
 **Check it:**
 
-- the dashboard on the Pi's `:8080` (or `https://f10.example.com` if you did
+- the admin panel on the Pi's `:8088` — the telemetry views are its first
+  three tabs; `live.py`'s own `:8080` is on the Pi's loopback only (or
+  `https://f10.example.com` if you did
   phase 3)
 - rows arriving in the lake: `cd infra && make lake-status`
 

@@ -20,6 +20,12 @@ camera/CV work.
   provisioning (hostname, Wi-Fi, WireGuard, SSH, BMW `eth0`), the
   application systemd services, config templates, and a verification
   script. This is the only implemented node.
+- **[`admin/`](admin/README.md)** — the Pi's front door: a phone-sized
+  panel on `:8088` with the telemetry views (proxied to `live.py`, which
+  stays on the loopback) and the management actions, behind one login.
+  The server's nginx publishes this same panel at
+  `https://<DASHBOARD_DOMAIN>/` with the same credential
+  ([`infra/NETWORK.md`](../../infra/NETWORK.md)).
 
 The two Pi Zero boards would each get their own directory here if/when
 they are provisioned; they'd share the same script/config patterns and

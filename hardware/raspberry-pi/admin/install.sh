@@ -13,6 +13,14 @@
 #   * creates config.json from the example if absent, with a generated
 #     password and the detected LAN + WireGuard addresses, and prints
 #     the credentials
+#   * when wg0 exists, trusts the VPS's tunnel address (WG_SERVER_IP in
+#     f10pi/config/local.env, 10.77.0.1 by default) as the reverse proxy
+#     in front of the panel - its X-Forwarded-* are then believed
+#
+# The password it generates is ALSO the one the VPS's nginx vhost must
+# hold (DASHBOARD_AUTH_USER / DASHBOARD_AUTH_PASSWORD in infra/.env):
+# nginx forwards Authorization to the panel, so one credential is one
+# login. Set the same pair on both sides.
 #
 set -euo pipefail
 
@@ -37,20 +45,39 @@ if [[ ! -f "$CONFIG" ]]; then
   # LAN address is the first non-loopback IPv4 that is not the tunnel's
   # (the phone reaches the Pi on it); the WireGuard address is wg0's,
   # if the tunnel is configured - it is what the VPS-side reverse proxy
-  # will reach the panel on (#41). An interface that is down right now
+  # reaches the panel on. An interface that is down right now
   # is not a problem: the panel retries an address it cannot bind.
+  #
+  # Under `set -euo pipefail` a pipeline whose first command fails ends
+  # the script - silently, with stderr discarded. `ip ... dev wg0` exits
+  # 1 when there is no wg0, and that is exactly the case these lines
+  # exist to handle: each is `|| true`, and "no address" is an empty
+  # string, never an abort.
   WG_IP="$(ip -4 -o addr show dev wg0 scope global 2>/dev/null \
-           | awk '{print $4}' | cut -d/ -f1 | head -1)"
+           | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
   LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null \
-            | awk '$2 != "wg0" {print $4}' | cut -d/ -f1 | head -1)"
+            | awk '$2 != "wg0" {print $4}' | cut -d/ -f1 | head -1 || true)"
   LAN_IP="${LAN_IP:-127.0.0.1}"
+  # The VPS's address on the tunnel: the one hop whose X-Forwarded-* the
+  # panel believes, and only when the tunnel exists. Nothing on the LAN
+  # ever goes in that list. f10pi's local.env names the server if the
+  # Pi was provisioned from it (the file is gitignored, so it is absent
+  # on any other Pi - not an error); the subnet's .1 otherwise.
+  LOCAL_ENV="$REPO_DIR/hardware/raspberry-pi/f10pi/config/local.env"
+  WG_SERVER_IP=""
+  if [[ -f "$LOCAL_ENV" ]]; then
+    WG_SERVER_IP="$(sed -n 's/^WG_SERVER_IP=//p' "$LOCAL_ENV" | head -1 || true)"
+  fi
+  WG_SERVER_IP="${WG_SERVER_IP:-10.77.0.1}"
+  PROXY_IP=""; [[ -n "$WG_IP" ]] && PROXY_IP="$WG_SERVER_IP"
   PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
   REMOTE="$(sudo -u "$PI_USER" git -C "$REPO_DIR" remote get-url origin \
             2>/dev/null || echo '')"
 
-  python3 - "$CONFIG" "$LAN_IP" "$WG_IP" "$PASSWORD" "$REPO_DIR" "$REMOTE" <<'PY'
+  python3 - "$CONFIG" "$LAN_IP" "$WG_IP" "$PASSWORD" "$REPO_DIR" "$REMOTE" \
+            "$PROXY_IP" <<'PY'
 import json, sys
-path, lan, wg, password, repo, remote = sys.argv[1:7]
+path, lan, wg, password, repo, remote, proxy = sys.argv[1:8]
 json.dump({
     "bind": [lan] + ([wg] if wg and wg != lan else []),
     "port": 8088,
@@ -62,6 +89,7 @@ json.dump({
     "services": ["f10-dashboard", "f10-sync"],
     "sync_status_url": "http://127.0.0.1:8091/sync/status",
     "dashboard_url": "http://127.0.0.1:8080",
+    "trusted_proxies": [proxy] if proxy else [],
     "log_lines": 200,
 }, open(path, "w"), indent=2)
 PY
@@ -157,8 +185,21 @@ if [[ "$NEW_CONFIG" == "1" ]]; then
   echo "    user: f10"
   echo "    pass: $(python3 -c "import json;print(json.load(open('$CONFIG'))['password'])")"
   echo
-  echo "    Save these now - they are not printed again."
+  echo "    Save these now - they are not printed again. When the VPS"
+  echo "    publishes this panel, put the SAME pair in infra/.env as"
+  echo "    DASHBOARD_AUTH_USER / DASHBOARD_AUTH_PASSWORD: one login."
 fi
+
+# The reverse proxy the panel believes, if any.
+python3 - "$CONFIG" <<'TRUST'
+import json, sys
+trusted = json.load(open(sys.argv[1])).get("trusted_proxies") or []
+if trusted:
+    print(f"    trusted_proxies: {', '.join(trusted)} (the VPS over wg0)")
+else:
+    print("    trusted_proxies: none - add the VPS's wg0 address (10.77.0.1)")
+    print("    once the tunnel exists, or share links will not carry the public name")
+TRUST
 
 echo
 echo "Reachable only on the addresses listed in \`bind\`. If the phone"

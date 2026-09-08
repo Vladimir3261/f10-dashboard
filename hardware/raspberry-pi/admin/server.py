@@ -113,6 +113,30 @@ PANEL_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
              "script-src 'unsafe-inline'; connect-src 'self'; "
              "frame-src 'self'")
 
+#: What a share viewer's browser gets when the Pi is up and live.py is
+#: not: the public prefix, so nothing of the box - no address, no
+#: upstream, no reason - just that it is not running, and a retry.
+#: Self-contained; the same wording as the VPS's page for the Pi
+#: itself being unreachable.
+SHARE_DOWN_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>Car unreachable</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;
+justify-content:center;background:#0b0d10;color:#c9d1d9;
+font:16px/1.5 system-ui,sans-serif;text-align:center}
+main{max-width:22rem;padding:2rem}h1{font-size:1.3rem;margin:0 0 .5rem}
+p{margin:.4rem 0;color:#8b949e}
+</style></head><body><main>
+<h1>The car is unreachable</h1>
+<p>Its telemetry is not running right now. This is normal when the car
+is parked.</p>
+<p>This page retries by itself.</p>
+</main></body></html>
+"""
+
 #: The framed telemetry document: its own files, its API through this
 #: origin, and the sync agent's pause/resume on :8091 (app.js talks to
 #: the agent directly, by design - see the comment there).
@@ -154,8 +178,9 @@ DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"authorization", "host",
 #: the public name a share link is minted against. This panel SETS
 #: them; a copy the client sent is replaced, never forwarded ahead of
 #: ours (live.py takes the first value). The one exception is a request
-#: that arrived from a `trusted_proxies` address - the VPS-side nginx
-#: of #41 - whose values are the truth about the hop before it.
+#: that arrived from a `trusted_proxies` address - the VPS-side nginx,
+#: from its wg0 address - whose values are the truth about the hop
+#: before it; an empty value from it counts as not sent.
 FORWARDED_HEADERS = frozenset({"x-forwarded-for", "x-forwarded-proto",
                                "x-forwarded-host"})
 #: Response headers this server adds itself; a second copy from
@@ -239,7 +264,8 @@ DEFAULTS: Dict[str, Any] = {
     #: diagnostics too (an older config's `diagnostics_url` is ignored).
     "dashboard_url": "http://127.0.0.1:8080",
     #: Addresses whose X-Forwarded-* headers are believed - the reverse
-    #: proxy in front of this panel (#41: nginx on the VPS, over wg0),
+    #: proxy in front of this panel (nginx on the VPS, over wg0: the
+    #: server's tunnel address, 10.77.0.1, written by install.sh),
     #: by its address as this panel sees it. Empty means the panel is
     #: the edge: every client-sent X-Forwarded-* is replaced with what
     #: the panel itself knows.
@@ -297,6 +323,11 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
     # upgrade instead of falling back to a guess.
     #
     repo = cfg["repo_dir"]
+
+    #: A list in the file, one string from the environment: normalised
+    #: here so the proxy compares addresses, never substrings.
+    cfg["trusted_proxies"] = listen_addresses(cfg.get("trusted_proxies")
+                                              or [])
 
     if not cfg["sessions_dir"]:
         cfg["sessions_dir"] = os.path.join(repo, "local", "sessions")
@@ -1180,7 +1211,7 @@ def make_handler(cfg: Dict[str, Any]):
         protocol_version = "HTTP/1.1"
         server_version = "f10-admin"
         #: No interpreter version on the wire - the share prefix is
-        #: public once #41 publishes it. (The base class would still
+        #: public through the VPS. (The base class would still
         #: append a space after the name with sys_version empty.)
         sys_version = ""
 
@@ -1271,17 +1302,40 @@ def make_handler(cfg: Dict[str, Any]):
             """
             why = (exc.strerror if isinstance(exc, OSError) and exc.strerror
                    else str(exc) or type(exc).__name__)
+            retry = {"Retry-After": "5"}
 
             try:
+                if under_share(urlsplit(self.path).path):
+                    #: The public prefix: a viewer who was handed a
+                    #: link learns that the car is not answering, and
+                    #: nothing about the box - not the upstream, not
+                    #: its address, not the errno. A browser gets a
+                    #: page; anything else the same shape as the owner
+                    #: body, minus the internals.
+                    if "text/html" in (self.headers.get("Accept") or ""):
+                        self._send(503, "text/html; charset=utf-8",
+                                   SHARE_DOWN_HTML.encode("utf-8"), retry)
+                    else:
+                        self._json(503, {
+                            "error": "runtime not running",
+                            "ready": False,
+                            "detail": "the car's telemetry is not running",
+                        }, retry)
+                    return
+
                 self._json(503, {
                     "error": "runtime not running",
                     "ready": False,
                     "detail": "the runtime is not answering on "
                               f"{cfg['dashboard_url']} ({why})",
                     "upstream": cfg["dashboard_url"],
-                }, {"Retry-After": "5"})
+                }, retry)
             except OSError:
                 self.close_connection = True
+
+        def _forwarded(self, name: str) -> str:
+            """A non-blank X-Forwarded-* value the client sent, or ""."""
+            return (self.headers.get(name) or "").strip()
 
         def _proxy(self, method: str) -> None:
             """
@@ -1306,7 +1360,11 @@ def make_handler(cfg: Dict[str, Any]):
             body = b""
             is_stream = urlsplit(self.path).path in STREAM_PATHS
             peer = self.client_address[0]
-            trusted = peer in (cfg.get("trusted_proxies") or ())
+            #: Through the same parser as `bind`: the environment
+            #: override is one string, and a substring test on it would
+            #: let "127.0.0.10,10.77.0.1" trust 127.0.0.1.
+            trusted = peer in listen_addresses(cfg.get("trusted_proxies")
+                                               or [])
 
             if method == "POST":
                 try:
@@ -1337,9 +1395,12 @@ def make_handler(cfg: Dict[str, Any]):
                     if lower in DROPPED_REQUEST_HEADERS:
                         continue
 
-                    if lower in FORWARDED_HEADERS and not trusted:
+                    if lower in FORWARDED_HEADERS and (
+                            not trusted or not value.strip()):
                         #: The client's claim about itself: replaced
-                        #: below with what this panel knows.
+                        #: below with what this panel knows. An EMPTY
+                        #: value from a trusted hop is absent, not a
+                        #: first value for the panel's own to follow.
                         continue
 
                     conn.putheader(name, value)
@@ -1347,10 +1408,10 @@ def make_handler(cfg: Dict[str, Any]):
                 conn.putheader("Host", self.headers.get("Host")
                                or f"{host}:{port}")
 
-                if not trusted or not self.headers.get("X-Forwarded-For"):
+                if not trusted or not self._forwarded("X-Forwarded-For"):
                     conn.putheader("X-Forwarded-For", peer)
 
-                if not trusted or not self.headers.get("X-Forwarded-Proto"):
+                if not trusted or not self._forwarded("X-Forwarded-Proto"):
                     conn.putheader("X-Forwarded-Proto", "http")
 
                 conn.putheader("Connection", "close")
