@@ -22,7 +22,11 @@ network interfaces, each with one job, kept strictly separate:
                                         │
                      f10-admin :8088 ───┤  the front door: telemetry
                      (LAN + wg0)        │  views + API proxied, System/
-                                        │  Car link/Claude tabs
+                          ▲             │  Car link/Claude tabs
+                          │             │
+        the server's nginx, over wg0    │  (https://<DASHBOARD_DOMAIN>/,
+        from 10.77.0.1 - same login     │   TLS + the same Basic Auth)
+                                        │
                                    sync agent ──► lake (over wlan0)
 ```
 
@@ -50,7 +54,13 @@ isolated link; all real Internet traffic goes out `wlan0`.
 - **f10-admin** (`hardware/raspberry-pi/admin/`) — the front door on
   `:8088`, bound to the LAN and `wg0` addresses: the telemetry views
   and their API reverse-proxied behind Basic auth, share links passed
-  through to `live.py`, and the System / Car link / Claude tabs.
+  through to `live.py`, and the System / Car link / Claude tabs. When
+  the server has a `DASHBOARD_DOMAIN`, its nginx proxies this same
+  panel to the internet over `wg0` (TLS in front, the same credential —
+  nginx forwards `Authorization` — so one login), which makes the
+  management actions reachable from anywhere behind that login. The
+  panel believes `X-Forwarded-*` only from the server's tunnel address
+  (`10.77.0.1`, its `trusted_proxies`).
 - **sync agent** (`infra/sync/agent.py`) — reads the SQLite logs
   read-only and ships drives to the ingest server over the `wg0` tunnel.
   It never talks to ClickHouse directly: ClickHouse publishes no host port,

@@ -9,8 +9,15 @@
 #
 # Two optional vhosts, each enabled only when its domain is set:
 #   GRAFANA_DOMAIN    -> 127.0.0.1:3000        (IP-allowlisted)
-#   DASHBOARD_DOMAIN  -> <PI_WG_IP>:8080       (Basic Auth, over WireGuard)
+#   DASHBOARD_DOMAIN  -> <PI_WG_IP>:8088       (Basic Auth, over WireGuard)
 # With no domains set, a plain-HTTP IP vhost for Grafana is used instead.
+#
+# :8088 on the Pi is the admin panel (hardware/raspberry-pi/admin): the
+# front door to the telemetry views AND the management actions. Its own
+# Basic Auth must use the same credential as the htpasswd written here -
+# nginx forwards Authorization upstream, so one login serves both. The
+# panel trusts this server's wg0 address for X-Forwarded-* (its
+# `trusted_proxies`); the vhost sets those headers itself, never appends.
 
 - name: Read edge configuration from the environment
   ansible.builtin.set_fact:
@@ -24,7 +31,7 @@
     grafana_domain: "{{ dotenv.get('GRAFANA_DOMAIN', '') | trim }}"
     dashboard_domain: "{{ dotenv.get('DASHBOARD_DOMAIN', '') | trim }}"
     pi_wg_ip: "{{ dotenv.get('PI_WG_IP', '') | default('10.77.0.10', true) }}"
-    pi_dashboard_port: "{{ dotenv.get('PI_DASHBOARD_PORT', '') | default('8080', true) }}"
+    pi_dashboard_port: "{{ dotenv.get('PI_DASHBOARD_PORT', '') | default('8088', true) }}"
     dashboard_auth_user: "{{ dotenv.get('DASHBOARD_AUTH_USER', '') | default('f10', true) }}"
     dashboard_auth_password: "{{ dotenv.get('DASHBOARD_AUTH_PASSWORD', '') }}"
     le_email: "{{ dotenv.get('LETSENCRYPT_EMAIL', '') | trim }}"
@@ -63,8 +70,26 @@
           - dashboard_auth_password != 'change-me-dashboard-password'
         fail_msg: >-
           DASHBOARD_AUTH_PASSWORD must be set to a real value in infra/.env.
-          The dashboard has no login of its own and serves the VIN, so it is
-          never published without authentication.
+          The vhost publishes the Pi's admin panel - the VIN, and the
+          management actions (restart, pull, reboot, shut down) - so it is
+          never published without authentication. Use the SAME user and
+          password the panel's config.json holds: nginx forwards the
+          Authorization header, and one login serves both.
+        quiet: true
+      when: dashboard_domain | length > 0
+
+    # The vhost proxies to the panel (:8088). A .env written before the
+    # panel existed still names live.py's 8080 - now on the Pi's loopback,
+    # so every request would 502 into the offline page with no hint why.
+    - name: Refuse the pre-panel dashboard port
+      ansible.builtin.assert:
+        that:
+          - pi_dashboard_port | string != '8080'
+        fail_msg: >-
+          PI_DASHBOARD_PORT=8080 in infra/.env: that is live.py on the Pi's
+          loopback, which nginx cannot reach. The vhost proxies to the Pi's
+          admin panel - set PI_DASHBOARD_PORT=8088 or drop the line (8088 is
+          the default).
         quiet: true
       when: dashboard_domain | length > 0
 
@@ -304,5 +329,5 @@
       {{ ('Grafana: https://' + grafana_domain) if grafana_domain
          else ('Grafana: http://<droplet>:' + gf_public_port) }}
       ({{ gf_allowed_ips | length }} allowlisted source(s));
-      {{ ('Dashboard: https://' + dashboard_domain + ' -> ' + pi_wg_ip + ':' + pi_dashboard_port + ' (Basic Auth)')
+      {{ ('Dashboard: https://' + dashboard_domain + ' -> ' + pi_wg_ip + ':' + pi_dashboard_port + ' (the Pi admin panel; Basic Auth, same credential as its config.json)')
          if dashboard_domain else 'Dashboard vhost: disabled' }}

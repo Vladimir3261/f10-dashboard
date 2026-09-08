@@ -8,8 +8,8 @@ Two supported configurations, both built from the same code:
 - **[Case A — IP only](#case-a--ip-only-no-domains)**: no domains, no TLS.
   Grafana on a plain-HTTP port restricted to an IP allowlist.
 - **[Case B — domains + TLS](#case-b--domains--tls)**: real hostnames,
-  Let's Encrypt certificates, and the Pi's dashboard published through the
-  server.
+  Let's Encrypt certificates, and the Pi's admin panel — the telemetry
+  views *and* the management actions — published through the server.
 
 Which one you get is decided by a single thing: whether `GRAFANA_DOMAIN` /
 `DASHBOARD_DOMAIN` are set in `infra/.env`. Everything else follows.
@@ -38,40 +38,91 @@ common trap) does not take effect.
 > Let's Encrypt then fails with a bare "Timeout during connect". Run
 > `make apply` too. (There is now a preflight that catches this and says so.)
 
+## What the dashboard vhost publishes: the Pi's admin panel
+
+`DASHBOARD_DOMAIN` proxies to the Pi's **admin panel** (`f10-admin`,
+`hardware/raspberry-pi/admin/`, `:8088` on the Pi's `wg0` address) — the
+one front door. Its first three tabs are the telemetry views, which the
+panel reverse-proxies to `live.py` on the Pi's **loopback**
+(`127.0.0.1:8080`, bound there by `f10-dashboard.service`); the other
+three are the box: service status and restart, logs, `git pull`, reboot,
+clean shutdown, the Claude session.
+
+**Management actions are therefore reachable from the internet**, behind
+TLS and Basic Auth, in Case B. Whoever holds the credential can restart
+the runtime, pull code the Pi then executes, reboot it and shut it down,
+from anywhere. That is the intended feature — it is why the panel exists
+— and it is why the credential is generated, strong and used nowhere
+else, why the playbook refuses to publish without one, and why the share
+prefix below is the only thing that answers without it. **Case A still
+publishes nothing**: the panel is then reachable on the LAN and over the
+tunnel only.
+
+**One login, two copies.** The panel has its own Basic Auth, and nginx
+forwards the browser's `Authorization` header to it unchanged (the vhost
+never clears it — a test asserts that), so the credential must be the
+same on both sides: `DASHBOARD_AUTH_USER` / `DASHBOARD_AUTH_PASSWORD` in
+the server's `infra/.env`, written by `make deploy` into
+`/etc/nginx/.htpasswd-dashboard`; and `username` / `password` in the
+Pi's gitignored `hardware/raspberry-pi/admin/config.json`, printed once
+by `install.sh`. The browser answers nginx's challenge and the same
+header satisfies the panel. With two different pairs every request
+passes nginx and then 401s at the Pi. Change one, change the other.
+
+**The Pi must trust the server's tunnel address.** nginx *sets*
+`X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` on every
+proxied location (replacing what the client sent, never appending it),
+and the panel passes them through only from addresses in its
+`trusted_proxies` — which must contain the server's `wg0` address,
+**`10.77.0.1`**. `install.sh` defaults it to that when `wg0` exists at
+install time; otherwise add it by hand. Without it the panel substitutes
+its own values and a share link minted from the public page comes out as
+`http://10.77.0.10:8088/s/...`, which only works on the tunnel.
+
 ## The one public hole: temporary share links
 
 Everything on the dashboard vhost sits behind HTTP Basic Auth except a
 single prefix, **`/s/`**, which exists so a live view can be handed to
-someone without giving them the dashboard password.
+someone without giving them the password. The panel passes the prefix
+straight through to `live.py` without asking for its login, and nothing
+of the panel is dispatched under it.
 
 | | Owner (`/`) | Share link (`/s/?t=<token>`) |
 |---|---|---|
 | nginx Basic Auth | required | **off** |
-| credential | the vhost password | the bearer token in the URL |
+| panel Basic Auth | the same credential, forwarded by nginx | **not asked** — the prefix passes through |
+| credential | the vhost / panel password | the bearer token in the URL |
 | VIN | shown in full | **always masked** to the last 4 |
 | gateway IP / ECU list | shown | stripped |
 | live view (`/api/snapshot`, `/api/stream`, `/api/meta`) | yes | yes |
 | drive history (`/api/runs`, `/api/history`) | yes | **404** |
 | sync status and controls (`/api/sync`) | yes | **404** |
 | minting or revoking links (`/api/share`) | yes | **404** |
+| panel status, logs, drive files (`/api/status`) | yes | **404** (nothing of the panel is under `/s/`) |
+| restart / pull / reboot / shutdown (`/api/action/*`) | yes | **404** |
+| the Claude tab | yes | **404** |
 | lifetime | until the password changes | 15 min - 12 h, then dead |
 
 nginx only turns `auth_basic` off for the prefix; it never sees a token and
 needs no reload when one is minted or revoked. **`live.py` is the
 authority** - it validates the token, serves only the allowlist above, and
 masks the VIN independently of `--redact-vin`. Tokens are held in memory
-only, so a dashboard restart invalidates every outstanding link.
+only, so a runtime restart invalidates every outstanding link.
 
-Mint and revoke from the **share** chip in the dashboard header. To turn
+Mint and revoke from the **share** chip in the dashboard header — behind
+the panel's login, so minting a link requires the credential. To turn
 the feature off completely, launch with `--no-share`; the prefix then 404s
 and no link can be created.
 
-> **Know what the LAN can do.** `/api/share` is owner-only in the sense
-> that it is unreachable through `/s/` and sits behind Basic Auth at the
-> edge - but the Pi's own `:8080` has never had a login, so anyone already
-> on the car's network can mint a link and publish it outward. That is a
-> real step up from merely reading the dashboard on the LAN. Use
-> `--no-share` if the Pi ever joins a network you do not control.
+> **Know what the LAN can do.** On the car's network the panel answers
+> on the Pi's LAN address, `:8088`, with the same login as the public
+> page — the LAN view is behind it too, and so is minting a share link.
+> `live.py`'s own `:8080` is bound to the loopback and is not reachable
+> from the LAN at all. What the LAN *can* do without a credential is the
+> same as the internet: open a share link it has been given. That login
+> travels base64-encoded over plain HTTP on the LAN, so use
+> `--no-share` if the Pi ever joins a network you do not control, and do
+> not type the password on one.
 
 > **Docker bypasses `ufw`.** A container port published on `0.0.0.0` inserts
 > iptables rules *ahead* of ufw's INPUT chain and is reachable regardless of
@@ -112,22 +163,29 @@ and no link can be created.
      │  RASPBERRY PI (behind NAT)  │
      │  wlan0 → internet           │
      │  eth0  → BMW ENET (car)     │
+     │  :8088 panel (LAN + wg0)    │
+     │  live.py 127.0.0.1:8080     │
      └─────────────────────────────┘
 ```
 
 **Publicly reachable:** SSH (22), WireGuard (51820/udp), and
-`GF_PUBLIC_PORT` **only from `GF_ALLOWED_IPS`**.
+`GF_PUBLIC_PORT` **only from `GF_ALLOWED_IPS`**. The Pi's panel is
+**not** published in this mode — nothing of it, telemetry or management.
 
 **Grafana** — `http://<DROPLET_IP>:<GF_PUBLIC_PORT>`, allowlisted at both
 layer 1 and layer 3. Anyone else gets `403` from nginx (and is dropped by the
 cloud firewall before that).
 
-**The Pi dashboard** is *not* published in this mode. Reach it over the
-tunnel, or via an SSH tunnel:
+**The Pi's panel** is reached on the car's LAN (`http://<pi-lan-ip>:8088/`),
+over the tunnel from the VPS (`http://10.77.0.10:8088/`), or from the
+laptop via an SSH tunnel through the VPS:
 
 ```bash
-ssh -L 8080:10.77.0.10:8080 root@<DROPLET_IP>   # then http://localhost:8080
+ssh -L 8088:10.77.0.10:8088 root@<DROPLET_IP>   # then http://localhost:8088
 ```
+
+(`live.py`'s `:8080` is on the Pi's loopback; there is nothing to forward
+to it from outside the Pi.)
 
 > ⚠️ Plain HTTP. The allowlist controls *who* connects, not whether traffic
 > is readable in transit — the Grafana password crosses the internet in
@@ -159,7 +217,8 @@ Let's Encrypt, renewed by certbot's own systemd timer.
      │   ├── grafana.example.com  allow <allowlist>; deny all;   │
      │   │        └─────────────────► 127.0.0.1:3000  Grafana    │
      │   └── f10.example.com      HTTP Basic Auth                │
-     │            └────────────────► 10.77.0.10:8080  (via wg0)  │
+     │            └────────────────► 10.77.0.10:8088  (via wg0)  │
+     │                               the Pi's admin panel         │
      │                                                          │
      │                    10.77.0.1:8090  ingest (VPN only)     │
      │                       (compose net)   ClickHouse         │
@@ -169,7 +228,8 @@ Let's Encrypt, renewed by certbot's own systemd timer.
                         │ WireGuard, initiated OUTBOUND by the Pi
      ┌──────────────────┴──────────┐
      │  RASPBERRY PI  10.77.0.10   │
-     │  :8080 dashboard (local)    │
+     │  :8088 panel (LAN + wg0)    │
+     │   └► live.py 127.0.0.1:8080 │
      │  eth0 → BMW ENET (car)      │
      └─────────────────────────────┘
 ```
@@ -184,14 +244,15 @@ else to HTTPS. It carries no application traffic.
 | Host | Protection | Proxies to |
 |---|---|---|
 | `grafana.example.com` | nginx IP allowlist (`GF_ALLOWED_IPS`) → `403` otherwise | `127.0.0.1:3000` |
-| `f10.example.com` | HTTP Basic Auth → `401` otherwise | `10.77.0.10:8080` over `wg0`; an "offline" page when the car is down |
+| `f10.example.com` | HTTP Basic Auth → `401` otherwise; `Authorization` forwarded, the panel checks the same credential | `10.77.0.10:8088` over `wg0` — the Pi's admin panel (telemetry views + management); a "car is unreachable" page when the Pi is down |
 | anything else (incl. bare IP) | no matching vhost / no certificate | — |
 
 **Why Basic Auth for the dashboard and an allowlist for Grafana.** The
-dashboard is meant to be viewed from a phone on mobile data, where your
-address changes constantly, so an IP allowlist is unusable; it also has no
-login of its own and serves the VIN, so the playbook refuses to publish it
-without a password. Grafana has its own login and is normally used from a
+panel is meant to be viewed from a phone on mobile data, where your
+address changes constantly, so an IP allowlist is unusable; what is
+behind it is the VIN and the management actions, so the playbook refuses
+to publish it without a real password (and that password is the panel's
+own — see above). Grafana has its own login and is normally used from a
 small number of known networks, so the allowlist costs nothing there.
 
 **Bare-IP access in this mode:** `http://<DROPLET_IP>` gets a 301 to
@@ -257,7 +318,7 @@ stays open and the VPS can reach back into the tunnel.
 | **SSH to the Pi** | laptop → VPS (public 22) → Pi `10.77.0.10:22` (wg0) | **the point of the tunnel**; VPS is the jump host, laptop needs no VPN |
 | Tunnel establishment | Pi → `<DROPLET_IP>:51820/udp` | dialled outbound; keepalive holds the NAT mapping open |
 | Telemetry upload | Pi → `10.77.0.1:8090` over `wg0` | bearer token; never crosses the public internet in the clear. Ingest is **published on the VPN address**, so this only works if `INGEST_BIND` is that address — bound to loopback the Pi just times out |
-| Dashboard viewing | phone → nginx → `10.77.0.10:8080` over `wg0` | Case B only; public path, no VPN on the phone |
+| Panel: dashboard viewing and management | phone → nginx → `10.77.0.10:8088` over `wg0` | Case B only; public path, no VPN on the phone; `10.77.0.1` is in the panel's `trusted_proxies` |
 
 Adding your laptop as a second peer is possible but unnecessary for this
 model; it only helps if you want the Pi reachable without the VPS SSH hop.
@@ -272,9 +333,9 @@ the above works. For that first configuration use the LAN
 the tunnel ever breaks — see
 [`recovery.md`](../hardware/raspberry-pi/f10pi/docs/recovery.md).
 
-Note the asymmetry: **viewing the dashboard needs no VPN** (nginx proxies it
-over the tunnel on your behalf), whereas **SSH does** — there is no public SSH
-path to the Pi, by design.
+Note the asymmetry: **the panel needs no VPN** (nginx proxies it over the
+tunnel on your behalf, management actions included), whereas **SSH does**
+— there is no public SSH path to the Pi, by design.
 
 The Pi's own interfaces stay strictly separated — `wlan0` is the only default
 route, and `eth0` is a link-local island for the BMW ENET cable with no
@@ -290,7 +351,8 @@ gateway and no DNS. See
 | **ClickHouse** | **not published at all** — compose network only | the ingest server and Grafana inside the compose network; humans via `docker compose exec` on the host |
 | ingest server | `INGEST_BIND:8090` — the **WireGuard address**, e.g. `10.77.0.1` | the Pi over `wg0` only |
 | Grafana | `127.0.0.1:3000` | nginx only |
-| Pi dashboard | Pi's own `:8080` | nginx over `wg0` only |
+| Pi admin panel | the Pi's LAN and `wg0` addresses, `:8088` — never a wildcard | the phone on the car's LAN; nginx over `wg0` (Case B) |
+| `live.py` on the Pi | `127.0.0.1:8080` — loopback only | the panel's proxy; nothing else, not even the LAN |
 
 Because ClickHouse publishes no host port, a WireGuard client cannot query it
 directly. To run SQL against the lake, use the host:
@@ -337,10 +399,15 @@ A quick summary of most of this is `make lake-status`.
   hardening step.
 - **Case A sends the Grafana password in cleartext.** The allowlist limits
   who can connect, not who can read the traffic in transit.
-- **Basic Auth is only as good as its password**, and it protects a dashboard
-  that serves the VIN. Use a generated value. `live.py --redact-vin` will mask
-  the VIN in the HTTP/SSE API if you ever expose the dashboard more widely;
-  it does not affect what is stored locally or in the lake.
+- **Basic Auth is only as good as its password**, and it protects the
+  VIN *and* the management surface: restart, `git pull` (code the Pi then
+  executes), reboot, shutdown. Use the generated value `install.sh`
+  printed, on both sides, and nowhere else. `live.py --redact-vin` will
+  mask the VIN in the HTTP/SSE API if you ever expose the dashboard more
+  widely; it does not affect what is stored locally or in the lake.
+- **The panel trusts one hop.** Only `10.77.0.1` may set the forwarded
+  headers the panel believes; a LAN client's claims are replaced. Never
+  add a LAN or phone address to `trusted_proxies`.
 - **A secret containing `$` must not be routed through Make.** Ansible reads
   `infra/.env` directly for this reason; see `PROVISIONING.md`.
 - **Everything here is one host.** A compromise of the analytics server

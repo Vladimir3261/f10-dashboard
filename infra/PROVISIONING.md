@@ -208,9 +208,9 @@ works unchanged. Set them to serve proper HTTPS instead:
 
 ```bash
 GRAFANA_DOMAIN=grafana.example.com     # Grafana, still IP-allowlisted
-DASHBOARD_DOMAIN=f10.example.com       # the Pi dashboard, Basic Auth
+DASHBOARD_DOMAIN=f10.example.com       # the Pi's admin panel, Basic Auth
 LETSENCRYPT_EMAIL=you@example.com
-DASHBOARD_AUTH_USER=f10
+DASHBOARD_AUTH_USER=f10                # the SAME pair as the panel's config.json
 DASHBOARD_AUTH_PASSWORD=<a real password>
 PI_WG_IP=10.77.0.10                    # must match the Pi's wireguard_peers entry
 LETSENCRYPT_STAGING=1                  # 1 while testing, 0 for real certs
@@ -226,19 +226,48 @@ only produces a cryptic certbot error — and repeated failures burn
 Let's Encrypt's rate limit (5 certs per domain per week). Use
 `LETSENCRYPT_STAGING=1` while you get it working, then flip to `0`.
 
-**How the Pi dashboard is reached.** The Pi has no public address: it dials
-out over WireGuard, and nginx proxies back across the tunnel to
-`PI_WG_IP:8080`. The VPN already provides the path, so no port forwarding or
-tunnel of any other kind is involved. If the car is off or out of signal the
-vhost fails fast and serves a "Car is offline" page that retries by itself,
-rather than hanging or showing a bare 502.
+**How the Pi is reached.** The Pi has no public address: it dials out over
+WireGuard, and nginx proxies back across the tunnel to `PI_WG_IP:8088` -
+the Pi's **admin panel** (`hardware/raspberry-pi/admin/`), which is the one
+front door: the telemetry views (proxied by the panel to `live.py` on the
+Pi's loopback) and the management actions (restart, `git pull`, reboot,
+shut down, the Claude session). The VPN already provides the path, so no
+port forwarding or tunnel of any other kind is involved. If the Pi is off
+or out of signal the vhost fails fast and serves a "car is unreachable"
+page that retries by itself, rather than hanging or showing a bare 502.
+
+**Upgrading a server that published the old `:8080`.** A `.env` written
+before the panel existed may still say `PI_DASHBOARD_PORT=8080`. That
+port is now `live.py` on the Pi's loopback, unreachable from the tunnel,
+so every request would 502 into the offline page. Set
+`PI_DASHBOARD_PORT=8088` or delete the line (8088 is the default) before
+`make deploy` — the playbook refuses `8080` with a message saying so.
+
+**One login.** The panel has its own Basic Auth, and nginx forwards the
+`Authorization` header to it, so `DASHBOARD_AUTH_USER` /
+`DASHBOARD_AUTH_PASSWORD` here must be the **same** user and password as
+`username` / `password` in the Pi's `admin/config.json` (what
+`install.sh` printed). The browser answers nginx's challenge once and the
+same header satisfies the panel; with two different pairs every request
+passes nginx and then 401s at the Pi. The htpasswd lives on the server at
+`/etc/nginx/.htpasswd-dashboard`; the panel's copy is the gitignored
+`config.json` on the Pi. Change one, change the other.
+
+**The Pi must trust this server's tunnel address.** The panel only
+believes `X-Forwarded-For/-Proto/-Host` from addresses in its
+`trusted_proxies`; that list must contain the server's wg0 address
+(`10.77.0.1`). `install.sh` defaults it to that when `wg0` exists at
+install time; otherwise add it by hand. Without it the panel replaces
+nginx's headers with its own and share links come out as `http://` on the
+tunnel address instead of the public name.
 
 **Why Basic Auth and not the IP allowlist** for the dashboard: the point is
 viewing it from a phone on mobile data, where your address changes
-constantly. The dashboard has no login of its own and serves the VIN, so the
-playbook refuses to publish it without a real `DASHBOARD_AUTH_PASSWORD`.
-(`live.py --redact-vin` will additionally mask the VIN in the HTTP/SSE API if
-you ever want that; it's off by default and never affects stored data.)
+constantly. What is behind it is the VIN and the management actions, so
+the playbook refuses to publish it without a real
+`DASHBOARD_AUTH_PASSWORD`. (`live.py --redact-vin` will additionally mask
+the VIN in the HTTP/SSE API if you ever want that; it's off by default and
+never affects stored data.)
 
 **Ports with TLS on.** 80 and 443 open to the world, and nginx does the
 filtering: port 80 serves *only* the ACME challenge and redirects everything

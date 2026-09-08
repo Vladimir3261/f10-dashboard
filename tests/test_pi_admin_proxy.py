@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -565,6 +566,60 @@ class BehindATrustedProxy(ProxyCase):
     def test_the_default_trusts_nobody(self):
         self.assertEqual(admin.DEFAULTS["trusted_proxies"], [])
 
+    def test_an_empty_value_from_the_proxy_is_absent(self):
+        """
+        nginx sends `X-Forwarded-Host: ` for an empty variable. That is
+        not a first value for the panel's own to be appended after: the
+        empty header is dropped and the panel fills in as if it were
+        never sent - one value upstream, not "" then ours.
+        """
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "",
+            "X-Forwarded-Proto": " ",
+            "X-Forwarded-Host": "",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+        self.assertNotIn("X-Forwarded-Host", forwarded)
+
+
+class TrustedProxiesGivenAsAString(ProxyCase):
+    """
+    `F10_ADMIN_TRUSTED_PROXIES` is one string. "127.0.0.10,10.77.0.1"
+    CONTAINS "127.0.0.1"; it must not trust it. The list goes through
+    the same parser as `bind`, so the test is on addresses.
+    """
+
+    config = {"trusted_proxies": "127.0.0.10,10.77.0.1"}
+
+    def test_a_substring_of_the_list_is_not_trusted(self):
+        self.request("/api/meta", headers={
+            "X-Forwarded-For": "203.0.113.9",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "f10.example",
+        })
+        forwarded = self.runtime.last("/api/meta")["all"]
+
+        self.assertEqual(forwarded.get("X-Forwarded-For"), ["127.0.0.1"])
+        self.assertEqual(forwarded.get("X-Forwarded-Proto"), ["http"])
+        self.assertNotIn("X-Forwarded-Host", forwarded)
+
+    def test_load_config_normalises_the_environment_form(self):
+        os.environ["F10_ADMIN_TRUSTED_PROXIES"] = "127.0.0.10, 10.77.0.1"
+        self.addCleanup(os.environ.pop, "F10_ADMIN_TRUSTED_PROXIES", None)
+
+        cfg = admin.load_config(None)
+
+        self.assertEqual(cfg["trusted_proxies"], ["127.0.0.10", "10.77.0.1"])
+        self.assertNotIn("127.0.0.1", cfg["trusted_proxies"])
+
+    def test_load_config_keeps_the_list_form(self):
+        cfg = admin.load_config(None)
+
+        self.assertEqual(cfg["trusted_proxies"], [])
+
 
 class ReadDeadline(ProxyCase):
     """
@@ -835,6 +890,39 @@ class RuntimeDown(ProxyCase):
 
         self.assertEqual(code, 503)
         self.assertEqual(body["error"], "runtime not running")
+
+    def test_a_share_viewer_learns_nothing_about_the_box(self):
+        """
+        The public prefix. The owner's 503 names the upstream and the
+        errno - useful on the Car link tab, and the loopback URL is in
+        the docs anyway. A viewer who was handed a link gets neither:
+        a browser gets a small page saying the car is unreachable, a
+        script the same JSON shape without `upstream` or an address.
+        """
+        upstream = self.cfg["dashboard_url"]
+
+        code, headers, body = self.json("/s/?t=abc", authed=False)
+        self.assertEqual(code, 503)
+        self.assertEqual(headers.get("Retry-After"), "5")
+        self.assertFalse(body["ready"])
+        self.assertNotIn("upstream", body)
+        self.assertNotIn(upstream, json.dumps(body))
+        self.assertNotRegex(json.dumps(body), r"\d+\.\d+\.\d+\.\d+|:\d{4}")
+
+        code, headers, raw = self.request(
+            "/s/?t=abc", authed=False, headers={"Accept": "text/html,*/*"})
+        page = raw.decode("utf-8")
+        self.assertEqual(code, 503)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertEqual(headers.get("Retry-After"), "5")
+        self.assertIn("unreachable", page.lower())
+        self.assertNotIn(upstream, page)
+        self.assertNotRegex(page, r"\d+\.\d+\.\d+\.\d+|:\d{4}|refused|errno")
+        self.assertNotRegex(page, r'(?i)<(link|script)[^>]*\b(href|src)=')
+
+        #: The owner still gets the detailed body.
+        code, headers, body = self.json("/api/meta")
+        self.assertEqual(body["upstream"], upstream)
 
     def test_the_page_and_the_telemetry_files_still_load(self):
         for path in ("/", "/dashboard/", "/dashboard/style.css",
@@ -1306,13 +1394,109 @@ class DeploymentShape(unittest.TestCase):
 
         self.assertEqual(example["dashboard_url"], "http://127.0.0.1:8080")
         self.assertNotIn("diagnostics_url", example)
-        self.assertEqual(example["trusted_proxies"], [])
+
+    def test_the_example_trusts_the_vps_over_the_tunnel_and_nothing_else(self):
+        """
+        #41: the VPS's nginx reaches the panel from its wg0 address,
+        10.77.0.1. That is the one hop whose X-Forwarded-* are believed;
+        never a LAN address, never one of the panel's own.
+        """
+        example = json.loads(self._read(self.ADMIN, "config.example.json"))
+
+        self.assertEqual(example["trusted_proxies"], ["10.77.0.1"])
+        self.assertFalse(set(example["trusted_proxies"]) & set(example["bind"]))
 
     def test_the_installer_detects_both_addresses(self):
         script = self._read(self.ADMIN, "install.sh")
 
         self.assertIn("wg0", script)
         self.assertIn("dashboard_url", script)
+
+    def test_the_installer_trusts_the_vps_only_when_the_tunnel_exists(self):
+        """
+        A new config on a Pi with wg0 trusts the server's tunnel address
+        (the f10pi local.env's WG_SERVER_IP, else 10.77.0.1); without
+        the tunnel the list stays empty - nothing on a LAN is a proxy.
+        """
+        script = self._read(self.ADMIN, "install.sh")
+
+        self.assertIn('WG_SERVER_IP="${WG_SERVER_IP:-10.77.0.1}"', script)
+        self.assertIn('[[ -n "$WG_IP" ]] && PROXY_IP="$WG_SERVER_IP"', script)
+        self.assertIn('"trusted_proxies": [proxy] if proxy else []', script)
+        self.assertIn("DASHBOARD_AUTH_PASSWORD", script)
+
+    def test_the_installers_config_block_survives_no_wg0_and_no_local_env(self):
+        """
+        The config block, run verbatim under the script's own
+        `set -euo pipefail` with a fake `ip` on PATH. Before the fix
+        `ip ... dev wg0` exiting 1 (no such device) or `sed` on an
+        absent local.env (gitignored: every Pi not provisioned through
+        f10pi) failed the pipeline and ended the script silently -
+        before config.json, sudoers or the unit were written.
+        """
+        script = self._read(self.ADMIN, "install.sh")
+        start = script.index("# ------")
+        start = script.index("config", start)
+        start = script.rindex("\n", 0, start) + 1
+        end = script.index("# ------", script.index("MERGE\n", start))
+        block = script[start:end]
+
+        cases = {
+            #: (wg0 present, local.env content or None) -> expected list
+            "wg0+local.env": (True, "WG_SERVER_IP=10.77.0.77\n", ["10.77.0.77"]),
+            "wg0, no local.env": (True, None, ["10.77.0.1"]),
+            "no wg0, no local.env": (False, None, []),
+            "no wg0, local.env": (False, "WG_SERVER_IP=10.77.0.77\n", []),
+        }
+
+        for label, (has_wg0, local_env, expected) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                repo = os.path.join(tmp, "repo")
+                cfg_dir = os.path.join(repo, "hardware", "raspberry-pi", "f10pi",
+                                       "config")
+                os.makedirs(cfg_dir)
+                if local_env is not None:
+                    with open(os.path.join(cfg_dir, "local.env"), "w") as fh:
+                        fh.write(local_env)
+
+                fake_bin = os.path.join(tmp, "bin")
+                os.makedirs(fake_bin)
+                lines = ["#!/bin/sh"]
+                if has_wg0:
+                    lines.append('case "$*" in *"dev wg0"*) '
+                                 'echo "3: wg0 inet 10.77.0.10/24 scope global wg0";; '
+                                 '*) echo "2: wlan0 inet 192.168.4.23/24 brd scope global wlan0"; '
+                                 'echo "3: wg0 inet 10.77.0.10/24 scope global wg0";; esac')
+                else:
+                    lines.append('case "$*" in *"dev wg0"*) '
+                                 'echo "Device \\"wg0\\" does not exist." >&2; exit 1;; '
+                                 '*) echo "2: wlan0 inet 192.168.4.23/24 brd scope global wlan0";; esac')
+                for name, body in (("ip", "\n".join(lines)),
+                                   ("sudo", "#!/bin/sh\necho git@example:o/r.git"),
+                                   ("chown", "#!/bin/sh\nexit 0")):
+                    path = os.path.join(fake_bin, name)
+                    with open(path, "w") as fh:
+                        fh.write(body + "\n")
+                    os.chmod(path, 0o755)
+
+                harness = os.path.join(tmp, "config-block.sh")
+                with open(harness, "w") as fh:
+                    fh.write("set -euo pipefail\n"
+                             f"HERE={tmp!r}\nREPO_DIR={repo!r}\nPI_USER=f10\n"
+                             + block)
+
+                env = dict(os.environ, PATH=fake_bin + os.pathsep + os.environ["PATH"])
+                run = subprocess.run(["bash", harness], env=env,
+                                     capture_output=True, text=True, timeout=30)
+
+                self.assertEqual(run.returncode, 0,
+                                 f"{label}: exit {run.returncode}\n{run.stderr}")
+                with open(os.path.join(tmp, "config.json")) as fh:
+                    written = json.load(fh)
+                self.assertEqual(written["trusted_proxies"], expected)
+                self.assertEqual(written["bind"],
+                                 ["192.168.4.23"] + (["10.77.0.10"] if has_wg0 else []))
+                self.assertNotIn("10.77.0.77", run.stdout + run.stderr)
 
     def test_no_new_action_and_the_sudoers_grant_is_unchanged(self):
         """#40 adds a proxy, not a privilege."""
@@ -1333,7 +1517,9 @@ class DeploymentShape(unittest.TestCase):
 
         self.assertIn("/s/", readme)
         self.assertIn("dashboard_url", readme)
-        self.assertIn("#41", readme)
+        self.assertIn("trusted_proxies", readme)
+        self.assertIn("10.77.0.1", readme)
+        self.assertIn("DASHBOARD_AUTH_PASSWORD", readme)
 
 
 if __name__ == "__main__":

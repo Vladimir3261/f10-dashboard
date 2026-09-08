@@ -5,6 +5,7 @@ things you would otherwise SSH in to do, from the driver's seat.
 
 ```
 http://<pi-lan-ip>:8088/          (and http://10.77.0.10:8088/ over WireGuard)
+https://<DASHBOARD_DOMAIN>/       (from anywhere: the VPS's nginx, TLS, same login)
 ```
 
 Six tabs. **Drive · Detail · All data** are the telemetry UI — the
@@ -39,16 +40,18 @@ cd ~/f10-dashboard/hardware/raspberry-pi/admin && sudo ./install.sh
 ```
 
 It generates `config.json` with a random password and the Pi's detected
-addresses (the LAN one, and `wg0`'s if the tunnel is configured),
-installs the sudoers allowlist (validating it with `visudo -c` first),
-installs and starts the systemd unit, and prints the credentials.
-**Save them — they are printed once.**
+addresses (the LAN one, and `wg0`'s if the tunnel is configured — in
+which case it also trusts the VPS's tunnel address as the reverse proxy,
+see `trusted_proxies` below), installs the sudoers allowlist (validating
+it with `visudo -c` first), installs and starts the systemd unit, and
+prints the credentials. **Save them — they are printed once**, and they
+are the pair the VPS's vhost must hold too (below).
 
 Re-run it after a `git pull` to pick up changes; it is idempotent and
 leaves an existing `config.json`'s values alone (keys added since are
 merged in with their defaults).
 
-### `config.json` — the two keys that matter here
+### `config.json` — the keys that matter here
 
 - **`bind`** — a list of addresses, one listener each: the LAN address
   the phone uses and the WireGuard one (`10.77.0.10`). A plain string
@@ -58,8 +61,24 @@ merged in with their defaults).
   wait for it.
 - **`dashboard_url`** — where `live.py` is, `http://127.0.0.1:8080` by
   default. Everything the telemetry tabs fetch is proxied there.
-- **`trusted_proxies`** — empty by default, and stays empty until #41
-  puts nginx in front of the panel. See *What is proxied* below.
+- **`trusted_proxies`** — the addresses whose `X-Forwarded-*` headers
+  are believed: the VPS's nginx, which reaches the panel over the tunnel
+  from the server's `wg0` address, **`10.77.0.1`**. `install.sh` writes
+  that when `wg0` exists at install time (`WG_SERVER_IP` from
+  `f10pi/config/local.env` if set); on a Pi that gets its tunnel later,
+  add it by hand. Nothing else — no LAN address, ever — goes in that
+  list. Given as one comma-separated string through
+  `F10_ADMIN_TRUSTED_PROXIES`, it is parsed into addresses; a substring
+  never matches. See *What is proxied* below.
+- **`username` / `password`** — the panel's login, and, once the VPS
+  publishes the panel, **the same pair as `DASHBOARD_AUTH_USER` /
+  `DASHBOARD_AUTH_PASSWORD` in the server's `infra/.env`**. nginx
+  forwards the browser's `Authorization` header to the panel, so one
+  credential answers both challenges; with two different ones every
+  request passes nginx and 401s here. The server's copy lives in
+  `/etc/nginx/.htpasswd-dashboard` (written by `make deploy`), this one
+  in the gitignored `config.json` on the Pi. Change one, change the
+  other.
 
 `install.sh` only writes the `wg0` address if the interface exists when
 it runs: on a Pi where WireGuard is configured later, run it again, or
@@ -87,10 +106,13 @@ good. The panel's `Authorization` header is stripped before
 forwarding; `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` are
 **set by the panel, replacing anything the client sent** — `live.py`
 takes the first value and builds share links from it, so a client must
-not get to choose the scheme or the public name. When nginx is in front
-(#41) it sets them itself; list its address, as the panel sees it, in
-`trusted_proxies` and the panel passes *that hop's* values through
-unchanged. Nothing else ever goes in that list.
+not get to choose the scheme or the public name. The VPS's nginx in
+front sets all three itself (replacing, never appending, the client's)
+and reaches the panel from `10.77.0.1`; with that address in
+`trusted_proxies` the panel passes *that hop's* values through
+unchanged, so a share link minted through the public name carries the
+public name. An empty value from that hop counts as not sent. Nothing
+else ever goes in that list.
 
 Nothing of the panel is dispatched under `/s/`: a share viewer asking
 for `/s/api/status`, `/s/api/action/reboot` or the Claude tab gets
@@ -301,15 +323,25 @@ table are what they were.
 
 ### Exposure
 
-Today the panel is reachable on the Pi's LAN address and, over
-WireGuard, on `10.77.0.10` — both networks you are on. Once #41
-publishes the panel through the VPS (TLS in front, this Basic auth
-behind it), **the management surface — restart, pull, reboot, shut
-down, the Claude session — becomes reachable from the internet behind
-that TLS + password.** That is the point of the front door, and it is
-why the password must be strong and used nowhere else, why the share
-prefix is the only thing here that answers without it, and why the
-runtime's own port must stay on the loopback.
+The panel is reachable on the Pi's LAN address and, over WireGuard, on
+`10.77.0.10` — both networks you are on — and, when the VPS has a
+`DASHBOARD_DOMAIN` (`infra/NETWORK.md`, Case B), **from the internet
+at `https://<DASHBOARD_DOMAIN>/`**: the server's nginx terminates TLS,
+asks for the same Basic Auth credential, and proxies to this panel over
+the tunnel. **That means the management surface — restart, pull,
+reboot, shut down, the Claude session — is reachable from the internet
+behind that TLS + password.** That is the point of the front door, and
+it is why the password must be strong and used nowhere else, why the
+share prefix is the only thing here that answers without it, and why
+the runtime's own port must stay on the loopback. In Case A (no
+domain) the VPS publishes nothing and the panel stays LAN + tunnel.
+
+Two consequences of the shared credential: rotating the password means
+`install.sh`/`config.json` on the Pi *and* `infra/.env` + `make deploy`
+on the server; and a share link minted from the public page carries the
+public name only because `10.77.0.1` is in `trusted_proxies` — with
+that list empty, links come out as `http://10.77.0.10:8088/s/...`,
+which only works on the tunnel.
 
 ## If the phone cannot connect
 

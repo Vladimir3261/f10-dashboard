@@ -137,9 +137,12 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
 - **`./run_car.sh`** launches `live.py` with every verified channel — use
   it instead of a bare `live.py` (a bare launch has no gear/DPF/etc and
   the dashboard falls back to "N").
-- **Dashboard has 3 views**: Drive (M-Performance cluster — shift-light
-  rev bar, hero tach+speedo, big centre GEAR, M-tricolor, tiles), Detail
-  (per-channel history graphs), All-data (dense table w/ min/max/age).
+- **The telemetry UI** (`dashboard/`, served by `live.py`) has 3 views:
+  Drive (M-Performance cluster — shift-light rev bar, hero tach+speedo,
+  big centre GEAR, M-tricolor, tiles), Detail (per-channel history
+  graphs), All-data (dense table w/ min/max/age). On the Pi it is reached
+  only through the admin panel below; on a laptop `live.py` serves it
+  directly on `:8080`.
 - **Poll rates follow the channel, not the loop** (OBD mapping v2,
   2026-08-30; v5 2026-09-01): wall-clock tiers — `motion` 10 Hz (rpm/
   speed/map/pedal), `control_ctx` 1 s (load/maf), `context` and `slow`
@@ -167,20 +170,29 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   the VPS `.env` (gitignored); the VPS IP + Grafana password are in the
   owner's notes, not git. `analysis/clickhouse/insights.sql` is the query
   battery.
-- **The Pi admin panel** (`hardware/raspberry-pi/admin/`): the **single
-  front door** — a phone-sized page on `:8088` (LAN + wg0 listeners),
-  six tabs. *Drive / Detail / All-data* — the `dashboard/` telemetry UI
-  framed unchanged, its API reverse-proxied to `live.py` (which the Pi
-  unit binds to the loopback) behind the panel's auth; share links
-  (`/s/*`) pass through with `live.py`'s own token check and can reach
-  nothing of the panel. *System* — health
+- **The Pi admin panel** (`hardware/raspberry-pi/admin/`) is the
+  **single front door**, on the Pi and from the internet — a phone-sized
+  page on `:8088` (LAN + wg0 listeners, never a wildcard), six tabs.
+  *Drive / Detail / All-data* — the `dashboard/` telemetry UI framed
+  unchanged, its API reverse-proxied to `live.py` (which
+  `f10-dashboard.service` binds to `127.0.0.1:8080`) behind the panel's
+  Basic auth; share links (`/s/*`) pass through with `live.py`'s own
+  token check and can reach nothing of the panel. *System* — health
   (temp/throttle/disk/Wi-Fi/**clock**), recording truth (samples/min, not
   just "service active"), drive files with delete-if-synced, services,
   logs incl. previous boot, `git pull` (ff-only, pinned remote), reboot,
   clean shutdown. *Car link* — see below. *Claude* — the optional agent
   session: status, crash-loop detection, tmux pane, restart; no terminal
-  and no prompt box, deliberately. Basic auth, LAN-only bind, sudoers
-  allowlist. Its own systemd unit: it must survive `live.py` being broken.
+  and no prompt box, deliberately. Sudoers allowlist; its own systemd
+  unit, so it survives `live.py` being broken. **The VPS publishes this
+  same panel** (`infra/`, nginx, `DASHBOARD_DOMAIN`; Case B in
+  `infra/NETWORK.md`): TLS + Basic Auth at the edge, `Authorization`
+  forwarded, so the htpasswd on the server and `config.json` on the Pi
+  hold the **same credential** — one login — and the management actions
+  are reachable from anywhere behind it; the panel trusts
+  `X-Forwarded-*` only from the server's wg0 address `10.77.0.1`
+  (`trusted_proxies`, written by `install.sh`). With no domain (Case A)
+  nothing is published.
 - **`/api/diagnostics` — the verification view** (Car link tab). The full
   car-communication picture for a session: mappings loaded (with an
   `--extra` badge), what resolution **dropped and why**, per-request
@@ -271,8 +283,10 @@ Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and
 ## Running it in the car
 
 - Launch with **`./run_car.sh`** (loads every verified channel; a bare
-  `live.py` has no gear and the dashboard shows "N"). Dashboard on
-  `:8080`; open the Drive view for the M-cluster.
+  `live.py` has no gear and the dashboard shows "N"). On a laptop the
+  dashboard is on `:8080`; on the Pi the unit runs it with
+  `--host 127.0.0.1` and you open the **admin panel** on `:8088` (or
+  `https://<DASHBOARD_DOMAIN>/`) — the Drive view is its first tab.
 - **Pick a drive mode** for the trip: `normal` by default,
   `./run_car.sh --mode long` for a motorway run, `--mode sampling` for a
   multi-hour one, `--mode debug` when chasing a specific problem. Also
