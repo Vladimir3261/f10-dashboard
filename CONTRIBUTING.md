@@ -11,10 +11,10 @@ review criteria.
 
 The code is under the MIT licence in `LICENSE`; a contribution is
 offered under the same terms. The *data* in the repository is a
-separate question from the code — the scope note in `LICENSE`,
+separate question from the code — `LICENSE-DATA.md`,
 `THIRD_PARTY.md` and `research/reports/legal-and-license-notes.md` say
-which facts came from where and under what terms, and `LICENSE` does
-not relicense any of it.
+which facts came from where and under what terms; `LICENSE` does not
+relicense any of it.
 
 ## Before opening a pull request
 
