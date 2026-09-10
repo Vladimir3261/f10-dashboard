@@ -58,8 +58,10 @@ life of the runtime process**:
 
 Because the total is monotonic **and can never be corrected
 downwards**, a single implausible sample would poison the value for the
-life of the process. Two independent layers stop that, and everything
-they refuse is counted in **`rejected`** and published in the body:
+life of the process. Two independent layers stop that, and **every
+sample that does not make it into the total is counted in `rejected`**
+and published in the body — whichever layer refused it, including a
+reading the mapping or the executor already flagged:
 
 1. **The mapping declares the range.** `n47d_odometer_m` carries
    `valid_max: 2000000` (2,000 km) in
@@ -113,6 +115,36 @@ climbing on a healthy car means the channel is misbehaving and the
 total has stopped following the car** — and it is the signal to go and
 measure that ECU update rate.
 
+### When the anchor is what is wrong
+
+Not moving the anchor is right for a blip and wrong for a bad anchor. A
+glitch small enough to look like a post-reset value — at 1 Hz, anything
+under ~1 km — is believed, becomes the anchor, and then every *genuine*
+sample is an impossible forward jump. Measured on the version before
+this guard: one read decoding to 2 m froze the odometer for **3,934 s
+while the car drove 78.7 km**, and the freeze scales with the true value
+(~100 min at 500 km since regen, ~6.7 h at the ceiling). The trigger is
+the one named in [`DATA_QUALITY.md`](DATA_QUALITY.md): a mis-correlated
+F303 response delivering another channel's four bytes *inside* the
+declared range, where no `valid_max` can catch it — `n47d_opmode` is a
+same-shape u32 bitfield with small values on the same DID.
+
+So after **`ODOMETER_RESYNC_AFTER` (5) refusals in a row** the
+accumulator concludes the anchor is the implausible thing, adopts the
+current reading, and **credits nothing**. The distance driven across
+the gap is *dropped, never guessed* — the only direction that can
+neither break monotonicity nor bill the client for metres nobody drove.
+Worst case is ~7 s of a frozen `odometer_m` and a few hundred metres
+lost, instead of an hour of blindness. A resync can never adopt an
+out-of-range value (the range check runs first), and a run of
+decoder-flagged readings never triggers one — a flagged read says
+nothing about whether the anchor is still right.
+
+For a client this is invisible apart from `rejected` ticking up by six
+and `odometer_m` briefly standing still: it is still monotonic, still
+never corrected downwards, and never credited with distance that was
+not driven.
+
 `epoch` is a random id minted when `live.py` starts. It changes
 **only** when the process restarts. An ECU reconnect keeps it — the
 ECU's counter persists across the link, so the accumulator carries
@@ -154,12 +186,14 @@ as one reset, not as a jump backwards.
   (`null` before the first connection). The Pi has no RTC; an unsynced
   `odometer_t` is still monotonic but not comparable to anything else.
 - `resets`: how many ECU counter resets this epoch has bridged.
-- `rejected`: how many 44BF samples this epoch **refused** as not
-  physically possible (see "Refused samples" above). `0` on a healthy
-  channel. Non-zero means the car answered with a value the accumulator
-  would not believe, so `odometer_m` did **not** advance across it — a
-  client that sees this climbing should treat the distance as
-  untrustworthy rather than assume the car stopped moving.
+- `rejected`: how many 44BF samples this epoch did **not** make it into
+  the total (see "Refused samples" above) — both the ones the mapping or
+  the executor flagged (`clipped`, `sentinel`, `saturated`, `stale`) and
+  the ones the accumulator judged physically impossible. `0` on a
+  healthy channel. Non-zero means `odometer_m` did **not** advance
+  across those samples; a client that sees this climbing should treat
+  the distance as untrustworthy rather than assume the car stopped
+  moving. The per-quality breakdown is in `/api/diagnostics`, not here.
 - `speed_kmh` is a JSON number, not an integer: PID `0x0D` decodes
   through the mapping engine, which returns a float, so an integer
   km/h reads as `47.0`.
@@ -222,7 +256,16 @@ these two paths and nothing else (not the dashboard, not the panel).
    is not advancing across them: the distance is untrustworthy, and
    `odometer_t` standing still is the confirmation. This is the one
    field that distinguishes "the car is stationary" from "the channel is
-   broken".
+   broken", and it counts the mapping's own catches too — a `0xFFFFFFFF`
+   moves it.
+7. **Back off between stream reconnects.** A browser's `EventSource`
+   retries with a delay of its own; a native client has none, and
+   nothing caps concurrent streams on this path. Use a bounded backoff
+   (say 1 s doubling to 30 s, reset on a received event) — an
+   aggressively reconnecting client is the one way to make the runtime
+   work hard for you. A vanished client's server-side thread is reaped
+   within one keepalive interval (15 s), so a few reconnects cost
+   nothing; a few per second do not.
 
 ## Drive modes
 

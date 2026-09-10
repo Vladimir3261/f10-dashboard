@@ -229,8 +229,10 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   **refused and counted** (`rejected` in the body,
   `odometer_rejected` in `/api/diagnostics`) rather than accumulated —
   the mapping declares `valid_max` and the accumulator bounds the step
-  against elapsed time. `docs/ODOMETER_API.md`.
-- 1,388 tests, no car / no network / no BMW data required
+  against elapsed time. And because a *wrong anchor* would then refuse
+  everything, five refusals in a row re-anchor without crediting the
+  gap: distance is dropped, never guessed. `docs/ODOMETER_API.md`.
+- 1,397 tests, no car / no network / no BMW data required
   (`python3 tools/run_tests.py` prints the skip count; 3 skip without the
   research source cache). CI runs the same checks on every PR —
   `docs/CI.md`.

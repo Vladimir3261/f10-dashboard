@@ -334,21 +334,241 @@ class TheAccumulator(unittest.TestCase):
         self.assertGreater(odo.current()[0], version)
         self.assertEqual(odo.current()[1]["rejected"], 1)
 
+    def test_a_single_glitch_cannot_freeze_the_odometer(self):
+        """
+        B3. A glitch small enough to look like a post-reset value is
+        believed and becomes the anchor; every genuine sample after it is
+        then an impossible forward jump, and because a refusal does not
+        move the anchor, the odometer used to stay frozen until the
+        growing span caught up. Measured before this test existed: a read
+        decoding to 2 froze it for 3,934 s while the car drove 78.7 km,
+        scaling to ~6.7 h at the channel's ceiling.
+
+        Now the ANCHOR is what gets replaced after
+        ODOMETER_RESYNC_AFTER refusals in a row, so service comes back
+        within a bounded number of samples.
+        """
+        odo = live.Odometer()
+        raw, at = 250000, 0.0
+
+        for _ in range(5):                       # 20 m/s, 1 Hz
+            raw, at = raw + 20, at + 1.0
+            odo.feed(*cycle(raw=raw, at=at))
+
+        frozen_at = odo.current()[1]["odometer_m"]
+        self.assertEqual(frozen_at, 80)
+
+        with redirect_stdout(io.StringIO()):
+            at += 1.0
+            odo.feed(*cycle(raw=2, at=at))       # the glitch, believed
+            self.assertEqual(odo._prev_raw, 2)
+
+            #: The bound: a handful of samples, not an hour of them.
+            recovered = None
+
+            for i in range(1, 40):
+                raw, at = raw + 20, at + 1.0
+                odo.feed(*cycle(raw=raw, at=at))
+
+                if recovered is None and (
+                        odo.current()[1]["odometer_m"] > frozen_at + 2):
+                    recovered = i
+
+        self.assertIsNotNone(recovered, "the odometer never advanced again")
+        self.assertLessEqual(recovered, live.ODOMETER_RESYNC_AFTER + 3,
+                             "recovery must be bounded by the resync, not "
+                             "by the span catching up")
+        #: Five refused, the sixth re-anchors, the seventh is the first
+        #: one credited - 7 s of blindness, not 3,934.
+        self.assertEqual(recovered, live.ODOMETER_RESYNC_AFTER + 2)
+        #: And it tracks properly afterwards: every sample from the
+        #: seventh on is a plain 20 m step.
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 82 + (40 - recovered) * 20)
+        #: The refused samples' distance is DROPPED, never invented: the
+        #: car drove 39 x 20 m after the glitch and the total grew by the
+        #: 33 samples that were believed.
+        self.assertLess(snap["odometer_m"], 82 + 39 * 20)
+        self.assertEqual(snap["rejected"], live.ODOMETER_RESYNC_AFTER + 1)
+
+    def test_the_resync_credits_nothing_so_it_cannot_invent_distance(self):
+        """
+        The recovery path drops the gap rather than guessing it. That is
+        the only direction that cannot break monotonicity or bill the
+        client for metres nobody drove - and it means a caller who can
+        inject readings can only ever LOSE distance, never gain it.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            #: Six impossible jumps in a row: five refused, the sixth
+            #: re-anchors. The total must not move on any of them.
+            for i in range(live.ODOMETER_RESYNC_AFTER + 1):
+                odo.feed(*cycle(raw=1500000 + i, at=2.0 + i))
+                self.assertEqual(odo.current()[1]["odometer_m"], 0, i)
+
+        self.assertEqual(odo._prev_raw, 1500000 + live.ODOMETER_RESYNC_AFTER)
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        self.assertEqual(snap["resets"], 0)
+        self.assertEqual(snap["rejected"], live.ODOMETER_RESYNC_AFTER + 1)
+
+        #: From the new anchor, real distance accrues again - and only
+        #: real distance.
+        odo.feed(*cycle(raw=1500000 + live.ODOMETER_RESYNC_AFTER + 30,
+                        at=2.0 + live.ODOMETER_RESYNC_AFTER + 1))
+        self.assertEqual(odo.current()[1]["odometer_m"], 30)
+
+    def test_a_resync_never_adopts_an_out_of_range_value(self):
+        """
+        The range check runs before the delta logic, so a refusal for
+        being out of range can never re-anchor - however many of them
+        arrive in a row.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            for i in range(live.ODOMETER_RESYNC_AFTER * 3):
+                odo.feed(*cycle(raw=0xFFFFFFFF, at=2.0 + i))
+
+        self.assertEqual(odo._prev_raw, 1000)
+        self.assertEqual(odo.current()[1]["odometer_m"], 0)
+
+        #: The genuine sample after all of that is still measured from
+        #: the anchor that was never wrong.
+        odo.feed(*cycle(raw=1050, at=100.0))
+        self.assertEqual(odo.current()[1]["odometer_m"], 50)
+
+    def test_a_run_of_flagged_readings_does_not_trigger_a_resync(self):
+        """
+        A reading the decoder flagged says nothing about the anchor, so
+        it must not be evidence for throwing a good one away.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            for i in range(live.ODOMETER_RESYNC_AFTER * 3):
+                odo.feed(*cycle(raw=0, at=2.0 + i, quality="sentinel"))
+
+        self.assertEqual(odo._prev_raw, 1000)
+        self.assertEqual(odo._refused_in_a_row, 0)
+        #: Still counted, though - see the flagged-drop test below.
+        self.assertEqual(odo.current()[1]["rejected"],
+                         live.ODOMETER_RESYNC_AFTER * 3)
+
+    def test_one_glitch_against_a_good_anchor_never_reaches_a_resync(self):
+        """
+        A resync costs real distance, so it must take a RUN of refusals.
+        A lone blip is refused once and the next genuine sample clears
+        the counter.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=500000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            for i in range(20):
+                #: blip, then a genuine sample, over and over
+                odo.feed(*cycle(raw=499999, at=2.0 + 2 * i))
+                odo.feed(*cycle(raw=500000 + 20 * (i + 1), at=3.0 + 2 * i))
+
+        self.assertEqual(odo._prev_raw, 500400)
+        self.assertEqual(odo.current()[1]["odometer_m"], 400)
+        self.assertEqual(odo.current()[1]["rejected"], 20)
+        self.assertEqual(odo.current()[1]["resets"], 0)
+
+    def test_a_mapping_flagged_reading_is_counted_as_refused(self):
+        """
+        `rejected` is what client rule 6 tells the app to watch to tell
+        "the car is stationary" from "the channel is producing garbage".
+        The single most likely garbage value is a 0xFFFFFFFF caught by
+        the mapping's `valid_max`, which arrives here already labelled -
+        so it has to count, or the rule is wrong for the one case it most
+        needs to cover.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        for i, quality in enumerate(
+                ("clipped", "sentinel", "saturated", "stale")):
+            with redirect_stdout(io.StringIO()):
+                landed = odo.feed(*cycle(raw=4294967295.0, at=2.0 + i,
+                                         quality=quality))
+
+            with self.subTest(quality=quality):
+                self.assertFalse(landed)
+                self.assertEqual(odo.current()[1]["rejected"], i + 1)
+
+        #: Nothing was accumulated and the anchor is untouched.
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        self.assertEqual(snap["odometer_t"], 1.0)
+        odo.feed(*cycle(raw=1030, at=10.0))
+        self.assertEqual(odo.current()[1]["odometer_m"], 30)
+
+    def test_an_out_of_range_first_sample_is_refused_not_anchored(self):
+        """
+        `ODOMETER_MAX_M` is the ONLY guard on the first sample of an
+        epoch - there is no previous value to bound a delta against - so
+        without it a `0xFFFFFFFF` arriving with a bare `live.py` (no
+        mapping file, no `valid_max`) would silently become the origin.
+        """
+        odo = live.Odometer()
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=0xFFFFFFFF, at=1.0)))
+            self.assertFalse(odo.feed(*cycle(raw=live.ODOMETER_MAX_M + 1,
+                                             at=2.0)))
+            self.assertFalse(odo.feed(*cycle(raw=-1, at=3.0)))
+
+        snap = odo.current()[1]
+        #: Not anchored, and not published as a reading either.
+        self.assertIsNone(snap["odometer_m"])
+        self.assertIsNone(snap["odometer_t"])
+        self.assertEqual(snap["rejected"], 3)
+        self.assertIsNone(odo._prev_raw)
+
+        #: The first sample INSIDE the range is still the origin.
+        self.assertTrue(odo.feed(*cycle(raw=live.ODOMETER_MAX_M, at=4.0)))
+        self.assertEqual(odo.current()[1]["odometer_m"], 0)
+
+    def test_an_acquisition_stamp_of_exactly_zero_is_honoured(self):
+        """
+        `is None`, not truthiness: substituting `time.time()` for a 0.0
+        stamp would make the next delta window nonsensical.
+        """
+        odo = live.Odometer()
+        odo.feed({live.ODOMETER_SOURCE: Reading(500.0),
+                  live.ODOMETER_SPEED: Reading(30.0)},
+                 {live.ODOMETER_SOURCE: 0.0, live.ODOMETER_SPEED: 0.0})
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_t"], 0.0)
+        self.assertEqual(snap["speed_t"], 0.0)
+
     def test_a_flagged_reading_is_ignored(self):
         odo = live.Odometer()
         odo.feed(*cycle(raw=1000, at=1.0))
         odo.feed(*cycle(raw=1100, at=2.0))
         version = odo.current()[0]
 
-        self.assertFalse(odo.feed(*cycle(raw=0, at=3.0, quality="sentinel")))
-        self.assertFalse(odo.feed(*cycle(raw=99, at=3.5, quality="saturated")))
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(
+                odo.feed(*cycle(raw=0, at=3.0, quality="sentinel")))
+            self.assertFalse(
+                odo.feed(*cycle(raw=99, at=3.5, quality="saturated")))
 
         snap = odo.current()[1]
         self.assertEqual(snap["odometer_m"], 100)
         self.assertEqual(snap["odometer_t"], 2.0)
         self.assertEqual(snap["resets"], 0)
-        #: Nothing landed, nothing else changed: no version bump.
-        self.assertEqual(odo.current()[0], version)
+        #: Nothing landed - but `rejected` moved, and that IS news for a
+        #: client watching for the channel to misbehave, so the state is
+        #: published.
+        self.assertEqual(snap["rejected"], 2)
+        self.assertGreater(odo.current()[0], version)
 
         #: And the next good one carries on from the last good one -
         #: the flagged 0 did not become a reset.
@@ -1366,15 +1586,19 @@ class TheMappingBounds(unittest.TestCase):
         reading = self.decode(live.ODOMETER_SOURCE, 0xFFFFFFFF)
 
         self.assertFalse(reading.usable)
-        self.assertFalse(odo.feed(
-            {live.ODOMETER_SOURCE: reading}, {live.ODOMETER_SOURCE: 2.0}
-        ))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(
+                {live.ODOMETER_SOURCE: reading}, {live.ODOMETER_SOURCE: 2.0}
+            ))
         snap = odo.current()[1]
         self.assertEqual(snap["odometer_m"], 0)
-        #: Dropped by quality, before the accumulator's own bounds - so
-        #: it is not counted as a refusal. The recorded sample carries
-        #: the `clipped` label, which is where that fact lives.
-        self.assertEqual(snap["rejected"], 0)
+        #: Dropped by quality, before the accumulator's own bounds - and
+        #: still COUNTED. This is the flagship garbage value, and
+        #: `rejected` is what client rule 6 tells the app to watch, so
+        #: leaving it at 0 here would make the documented rule wrong for
+        #: the one case it most needs to cover.
+        self.assertEqual(snap["rejected"], 1)
 
     def test_the_km_channel_is_untouched_by_the_metre_channel_s_bound(self):
         """
@@ -1408,7 +1632,18 @@ class TheWiring(unittest.TestCase):
     def setUp(self):
         import inspect
         self.poll_loop = inspect.getsource(live.poll_loop)
+        self.demo_loop = inspect.getsource(live.demo_loop)
         self.main = inspect.getsource(live.main)
+
+    def test_the_demo_loop_feeds_it_too(self):
+        """
+        --demo is the only way to exercise this endpoint without a car,
+        and the accumulator was wired in but never fed: the endpoint
+        answered 200 with nulls for ever.
+        """
+        self.assertIn("odometer.configure(", self.demo_loop)
+        self.assertIn("odometer.feed(", self.demo_loop)
+        self.assertIn("ODOMETER_SOURCE: Reading(", self.demo_loop)
 
     def test_the_poll_loop_feeds_every_cycle_and_reports_the_link(self):
         self.assertIn("odometer.feed(readings, stamps", self.poll_loop)

@@ -261,6 +261,12 @@ Two things worth carrying forward from that:
   mapping file could set a label. "Flagged readings are ignored" is a
   property of a *pair* — the guard and a declaration — not of the code
   alone.
+- **"Ignored" is not the same as "unreported".** Dropping a flagged
+  reading silently made the accumulator's own `rejected` counter read 0
+  for the single most likely garbage value on the channel — while the
+  API's documented client rule pointed at that counter to tell "the car
+  is stationary" from "the channel is broken". A consumer that acts on a
+  label owes its own caller a count of how often it acted.
 - **The declaration is not the whole defence.** The accumulator also
   bounds the raw value and the step between two samples in its own code
   (`ODOMETER_MAX_M`, and a delta window from the elapsed time), because

@@ -4006,6 +4006,25 @@ ODOMETER_DELTA_SLACK_M = 1000
 #: The point is to leave a trace in the journal on the Pi's SD card, not
 #: to write one line per second for a channel that is broken.
 ODOMETER_LOG_REJECTS = 5
+#: After this many refusals IN A ROW against the same anchor, the anchor
+#: is what is wrong - not the readings - and it is re-synced to the
+#: current value without crediting the gap (`Odometer._resync`).
+#:
+#: Why a resync is needed at all: a glitch that lands inside the reset
+#: window is believed to be a regeneration and becomes the anchor, and
+#: because a refusal deliberately does NOT move the anchor, every
+#: genuine sample afterwards is an impossible forward jump until the
+#: growing span admits it. Measured on the version without this: one
+#: read decoding to 2 m froze the odometer for 3,934 s while the car
+#: drove 78.7 km, and it scales with the true value - ~100 min at
+#: 500 km since regen, ~6.7 h at the ceiling.
+#:
+#: 5 at the class's 1 Hz caps that at ~5 s and at most ~170 m of
+#: distance DROPPED (never invented - a resync credits nothing). Five
+#: consecutive impossible transitions are strong evidence about the
+#: anchor: a single glitch against a good anchor is refused once and the
+#: very next genuine sample is accepted, which resets this counter.
+ODOMETER_RESYNC_AFTER = 5
 
 #: The longest `Authorization` value the token store will even look at.
 #: A minted token is 43 characters of urlsafe base64, so "Bearer " plus
@@ -4020,6 +4039,19 @@ MAX_AUTH_HEADER_LEN = 512
 DEFAULT_API_TOKENS = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "local", "api-tokens.json"
 )
+
+
+def _stamp(stamps: Dict[str, float], key: str) -> float:
+    """
+    A signal's acquisition time, or now if the cycle carried none.
+
+    `is None`, not truthiness: an acquisition stamp of exactly 0.0 is a
+    timestamp, not a missing one - and substituting `time.time()` for it
+    would make the very next delta window nonsensical.
+    """
+    at = stamps.get(key)
+
+    return time.time() if at is None else at
 
 
 class Odometer:
@@ -4060,6 +4092,20 @@ class Odometer:
     where the last *credible* reading put it, so a single blip costs
     nothing and the next good sample carries on from the right place.
 
+    **But an anchor can itself be wrong**, and then not moving it is a
+    trap: a glitch small enough to look like a post-reset value is
+    believed, becomes the anchor, and every genuine sample after it is
+    an impossible forward jump - the odometer freezes for as long as it
+    takes the span to catch up, measured at 66 minutes and 78.7 km of
+    lost distance. So after `ODOMETER_RESYNC_AFTER` refusals **in a
+    row** the anchor is the thing that gets replaced: `_resync` adopts
+    the current reading and credits **nothing**. Distance across the gap
+    is dropped, never invented, and service resumes in seconds instead
+    of hours. A sample the *decoder* flagged does not count towards that
+    total - it says nothing about the anchor - though it is counted in
+    `rejected`, which is every sample that did not make it into the
+    total, whatever refused it.
+
     `epoch` is minted once, here, and changes only when the process
     restarts. An ECU reconnect keeps it - the counter carries straight
     on, and if the ECU regenerated while the link was down that shows
@@ -4086,13 +4132,21 @@ class Odometer:
         self.connected = False
         self.clock_synced: Optional[bool] = None
         self.resets = 0
-        #: Samples refused as not physically possible. Published, so a
-        #: client and /api/diagnostics can see the channel misbehaving
-        #: instead of trusting a total that quietly stopped growing.
+        #: Every sample that did not make it into the total - flagged by
+        #: the decoder, or refused here as not physically possible.
+        #: Published, so a client and /api/diagnostics can see the
+        #: channel misbehaving instead of trusting a total that quietly
+        #: stopped growing.
         self.rejected = 0
+        #: Refusals since the last accepted sample, counting only the
+        #: ones that are evidence about `_prev_raw`. ODOMETER_RESYNC_AFTER
+        #: of them means the anchor is wrong.
+        self._refused_in_a_row = 0
         #: Log lines spent on refusals so far (capped, see
         #: ODOMETER_LOG_REJECTS).
         self._logged_rejects = 0
+        #: Log lines spent on re-anchoring, on its own budget.
+        self._logged_resyncs = 0
 
     def configure(self, loaded: bool, mapping_ver: Optional[int]) -> None:
         """What this run can offer: called once per resolved profile."""
@@ -4131,17 +4185,34 @@ class Odometer:
             refused_before = self.rejected
             reading = readings.get(ODOMETER_SOURCE)
 
-            if reading is not None and reading.usable:
-                landed = self._feed_distance(
-                    reading, stamps.get(ODOMETER_SOURCE) or time.time()
-                )
+            if reading is not None:
+                if reading.usable:
+                    landed = self._feed_distance(
+                        reading, _stamp(stamps, ODOMETER_SOURCE)
+                    )
+                else:
+                    #
+                    # The decoder or the executor already said this is
+                    # not a measurement (`clipped` from the mapping's
+                    # valid_max, `sentinel`, `saturated`, `stale`). It is
+                    # not accumulated - and it IS counted, because
+                    # `rejected` is what tells a client "the channel is
+                    # producing garbage" apart from "the car is not
+                    # moving", and the mapping's ceiling catching a
+                    # 0xFFFFFFFF is the single most likely way for that
+                    # to happen. It does not count against the anchor:
+                    # a flagged read says nothing about whether
+                    # `_prev_raw` is still right.
+                    #
+                    self._reject("a %s reading" % reading.quality,
+                                 reading.value, against_anchor=False)
 
             speed = readings.get(ODOMETER_SPEED)
 
             if speed is not None and speed.usable:
                 landed = True
                 self.speed_kmh = speed.value
-                self.speed_t = stamps.get(ODOMETER_SPEED) or time.time()
+                self.speed_t = _stamp(stamps, ODOMETER_SPEED)
 
             #: A refusal is published too: `rejected` moved, and a
             #: stream client watching for the channel to misbehave should
@@ -4181,10 +4252,13 @@ class Odometer:
             return self._reject("out of range", raw)
 
         if self._prev_raw is None:
-            #: The first credible sample of the epoch is the origin.
+            #: The first credible sample of the epoch is the origin. The
+            #: range check above is the ONLY guard on it - there is no
+            #: previous value to bound a delta against.
             self.odometer_m = 0
             self._prev_raw = raw
             self.odometer_t = at
+            self._refused_in_a_row = 0
 
             return True
 
@@ -4203,8 +4277,8 @@ class Odometer:
 
         if delta >= 0:
             if delta > ceiling:
-                return self._reject(
-                    "forward jump of %d m in %.3f s" % (delta, span), raw
+                return self._refuse_or_resync(
+                    "forward jump of %d m in %.3f s" % (delta, span), raw, at
                 )
 
             self.odometer_m += delta
@@ -4218,16 +4292,58 @@ class Odometer:
         else:
             #: Backwards, but not to a post-reset value. A regeneration
             #: restarts the counter at zero; this did not.
-            return self._reject(
-                "backwards step of %d m to %d m" % (-delta, raw), raw
+            return self._refuse_or_resync(
+                "backwards step of %d m to %d m" % (-delta, raw), raw, at
             )
 
         self._prev_raw = raw
         self.odometer_t = at
+        self._refused_in_a_row = 0
 
         return True
 
-    def _reject(self, why: str, value: Any) -> bool:
+    def _refuse_or_resync(self, why: str, raw: int, at: float) -> bool:
+        """
+        Refuse this sample - unless the ANCHOR is what looks wrong.
+
+        Caller holds the lock. A glitch against a good anchor is refused
+        once and the next genuine sample is accepted, so a run of
+        refusals means the value we are measuring against is the
+        implausible one. After ODOMETER_RESYNC_AFTER of them the anchor
+        is replaced by this reading and NOTHING is credited: the distance
+        driven across the gap is lost rather than guessed, which is the
+        only direction that cannot break monotonicity or invent metres.
+
+        `raw` is already known to be inside `0 .. ODOMETER_MAX_M` (the
+        range check runs first and never reaches here), so a resync can
+        never adopt an out-of-range value.
+        """
+        if self._refused_in_a_row < ODOMETER_RESYNC_AFTER:
+            return self._reject(why, raw)
+
+        #
+        # Its own log budget: by the time a resync happens the refusal
+        # budget is spent, and this is the more informative line of the
+        # two - it says the accumulator noticed and recovered rather
+        # than sitting there refusing for an hour.
+        #
+        if self._logged_resyncs < ODOMETER_LOG_REJECTS:
+            self._logged_resyncs += 1
+            print("[!] odometer: re-anchoring to %r after %d refusals in a "
+                  "row (%s); the gap is dropped, not credited"
+                  % (raw, self._refused_in_a_row, why), flush=True)
+
+        #: Counted like any other sample that did not make it into the
+        #: total - it did not.
+        self.rejected += 1
+        self._refused_in_a_row = 0
+        self._prev_raw = raw
+        self.odometer_t = at
+
+        return False
+
+    def _reject(self, why: str, value: Any,
+                against_anchor: bool = True) -> bool:
         """
         Count a refused sample and, for the first few, say so.
 
@@ -4235,18 +4351,33 @@ class Odometer:
         `return self._reject(...)`. The anchor is deliberately NOT
         moved: the next credible sample carries on from the last one
         that was believed.
+
+        `against_anchor` is whether this refusal is evidence that
+        `_prev_raw` is wrong. A transition we judged impossible is; a
+        reading the DECODER flagged is not - it says nothing about the
+        anchor, and letting a run of sentinels trigger a re-anchor would
+        throw away a perfectly good one.
         """
         self.rejected += 1
 
-        if self._logged_rejects < ODOMETER_LOG_REJECTS:
-            self._logged_rejects += 1
-            tail = ("" if self._logged_rejects < ODOMETER_LOG_REJECTS
-                    else " (further refusals counted, not logged)")
-            print("[!] odometer: refused %s (%s: %r, prev %r)%s"
-                  % (why, ODOMETER_SOURCE, value, self._prev_raw, tail),
-                  flush=True)
+        if against_anchor:
+            self._refused_in_a_row += 1
+
+        self._log_reject("refused " + why, value)
 
         return False
+
+    def _log_reject(self, message: str, value: Any) -> None:
+        """One bounded log line. Caller holds the lock."""
+        if self._logged_rejects >= ODOMETER_LOG_REJECTS:
+            return
+
+        self._logged_rejects += 1
+        tail = ("" if self._logged_rejects < ODOMETER_LOG_REJECTS
+                else " (further refusals counted, not logged)")
+        print("[!] odometer: %s (%s: %r, prev %r)%s"
+              % (message, ODOMETER_SOURCE, value, self._prev_raw, tail),
+              flush=True)
 
     def _bump(self) -> None:
         """Caller holds the lock."""
