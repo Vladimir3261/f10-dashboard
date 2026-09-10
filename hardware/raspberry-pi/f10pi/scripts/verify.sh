@@ -124,8 +124,13 @@ fi
 
 # --- application services --------------------------------------------------
 hdr "application"
+# Installed = systemd can show the unit file. Not `list-unit-files | grep -q`:
+# under pipefail, grep -q exits at the first match while systemctl is still
+# writing the rest of the (long) list, systemctl dies of SIGPIPE, the
+# pipeline fails and every installed service reported "not installed"
+# (seen on the Pi, systemd 257).
 for svc in f10-dashboard.service f10-sync.service f10-admin.service; do
-  if systemctl list-unit-files | grep -q "^${svc}"; then
+  if systemctl cat "${svc}" >/dev/null 2>&1; then
     if systemctl is-active --quiet "${svc}"; then
       ok "${svc} active"
     else
