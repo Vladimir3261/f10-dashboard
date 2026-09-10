@@ -3,7 +3,9 @@ The dashboard vhost (infra/ansible/roles/nginx/templates/dashboard.conf.j2)
 publishes the Pi's admin panel through nginx. What it must hold, rendered:
 
 - it proxies to the PANEL port (8088 by default), not live.py's 8080;
-- Basic Auth is on for the vhost and off ONLY under the share prefix;
+- Basic Auth is on for the vhost and off ONLY under the share prefix
+  and on the two exact odometer-API paths (bearer token, judged by
+  live.py - docs/ODOMETER_API.md);
 - every proxied location SETS X-Forwarded-For / -Proto / -Host from
   nginx's own knowledge - `$remote_addr`, never the appending
   `$proxy_add_x_forwarded_for` - because the panel passes this hop's
@@ -63,6 +65,10 @@ def render(source: str, facts: dict) -> str:
     return re.sub(r"{{\s*(\w+)\s*}}", sub, source)
 
 
+#: The odometer API's two locations - exact matches, the only ones.
+ODOMETER = ("/api/odometer", "/api/odometer/stream")
+
+
 def locations(conf: str):
     """
     {location path: block body} for every `location` in the rendered
@@ -112,10 +118,11 @@ class TheRenderedVhost(unittest.TestCase):
         self.assertIn("server_name f10.example.com;", self.conf)
 
     def test_every_proxied_location_targets_the_panel(self):
-        """Four proxied locations, all to the Pi's wg0 address and the
+        """Six proxied locations, all to the Pi's wg0 address and the
         panel port - live.py's 8080 is on the Pi's loopback."""
         self.assertEqual(set(self.proxied),
-                         {"/", "/s/", "/s/api/stream", "/api/stream"})
+                         {"/", "/s/", "/s/api/stream", "/api/stream",
+                          *ODOMETER})
 
         for path, block in self.proxied.items():
             self.assertEqual(directives(block, "proxy_pass"),
@@ -179,14 +186,43 @@ class TheRenderedVhost(unittest.TestCase):
         #: there a share viewer got a 401 instead of the page when the
         #: Pi was down (review of PR #44, reproduced with nginx 1.24).
         #: `internal` keeps a direct GET of it at 404 regardless.
-        self.assertEqual(off, {"/s/", "/s/api/stream", "/__offline.html"})
+        self.assertEqual(off, {"/s/", "/s/api/stream", "/__offline.html",
+                               *ODOMETER})
         self.assertIn("internal;", self.locations["/__offline.html"])
 
         for path in ("/", "/api/stream"):
             self.assertNotIn("auth_basic", self.locations[path], path)
 
+    def test_the_odometer_paths_are_exact_matches_with_the_token_forwarded(self):
+        """
+        `location =` for both, so `/api/odometer2` or
+        `/api/odometer/anything` falls back to the `/` block and its
+        Basic Auth - the open surface is two URLs, not a prefix. The
+        bearer token rides in Authorization; nothing in the block
+        touches that header (the vhost-wide test above already refuses
+        a `proxy_set_header Authorization` anywhere).
+        """
+        for path in ODOMETER:
+            with self.subTest(path=path):
+                self.assertRegex(
+                    self.conf,
+                    re.compile(r"^\s*location\s+=\s+" + re.escape(path) + r"\s*{",
+                               re.M),
+                    f"{path} must be an exact-match location",
+                )
+                block = self.proxied[path]
+                self.assertEqual(directives(block, "auth_basic"), ["off"])
+                self.assertNotIn("Authorization", block)
+                self.assertNotIn("authorization", block)
+                self.assertIn('add_header X-Robots-Tag "noindex, nofollow" always;',
+                              block)
+
+        #: A prefix location for the API would open everything below it.
+        self.assertNotRegex(self.conf,
+                            re.compile(r"^\s*location\s+/api/odometer", re.M))
+
     def test_the_streams_keep_the_sse_treatment(self):
-        for path in ("/api/stream", "/s/api/stream"):
+        for path in ("/api/stream", "/s/api/stream", "/api/odometer/stream"):
             block = self.proxied[path]
 
             self.assertEqual(directives(block, "proxy_buffering"), ["off"])
@@ -197,7 +233,7 @@ class TheRenderedVhost(unittest.TestCase):
             self.assertEqual(directives(block, "proxy_set_header Connection"),
                              ['""'])
 
-        for path in ("/", "/s/"):
+        for path in ("/", "/s/", "/api/odometer"):
             self.assertEqual(directives(self.proxied[path],
                                         "proxy_read_timeout"), ["120s"])
 

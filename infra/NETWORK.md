@@ -103,6 +103,15 @@ of the panel is dispatched under it.
 | the Claude tab | yes | **404** |
 | lifetime | until the password changes | 15 min - 12 h, then dead |
 
+The second exception is the **odometer API** — exactly `/api/odometer`
+and `/api/odometer/stream` (`location =`, never a prefix): `auth_basic
+off` at nginx, passed through the panel without its login, and the one
+place the panel forwards `Authorization`, because the navigation client
+carries `live.py`'s own bearer token there (`tools/api_token.py`,
+[`docs/ODOMETER_API.md`](../docs/ODOMETER_API.md)); `live.py` judges
+it, answers with the odometer and speed only, and nothing of the
+session, the panel or the share surface is reachable through it.
+
 nginx only turns `auth_basic` off for the prefix; it never sees a token and
 needs no reload when one is minted or revoked. **`live.py` is the
 authority** - it validates the token, serves only the allowlist above, and
@@ -244,7 +253,7 @@ else to HTTPS. It carries no application traffic.
 | Host | Protection | Proxies to |
 |---|---|---|
 | `grafana.example.com` | nginx IP allowlist (`GF_ALLOWED_IPS`) → `403` otherwise | `127.0.0.1:3000` |
-| `f10.example.com` | HTTP Basic Auth → `401` otherwise; `Authorization` forwarded, the panel checks the same credential | `10.77.0.10:8088` over `wg0` — the Pi's admin panel (telemetry views + management); a "car is unreachable" page when the Pi is down |
+| `f10.example.com` | HTTP Basic Auth → `401` otherwise; `Authorization` forwarded, the panel checks the same credential. Off on `/s/` (share token in the URL) and on the two exact odometer-API paths (bearer token, judged by `live.py`) | `10.77.0.10:8088` over `wg0` — the Pi's admin panel (telemetry views + management); a "car is unreachable" page when the Pi is down |
 | anything else (incl. bare IP) | no matching vhost / no certificate | — |
 
 **Why Basic Auth for the dashboard and an allowlist for Grafana.** The

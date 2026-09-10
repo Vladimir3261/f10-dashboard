@@ -7,7 +7,7 @@ verified files, up to seven candidate files (`./run_car.sh --candidate
 before anyone sits in the car with it: every file loads together, no
 two files claim a channel id or put the same frame on the wire twice,
 every polling class the files declare is one the drive-mode table
-(`config/modes.yaml` v3) knows how to treat, and the rotation cost the
+(`config/modes.yaml` v4) knows how to treat, and the rotation cost the
 docs quote is the one the plan actually has.
 
 The capability set advertises everything, so what is measured is the
@@ -33,8 +33,11 @@ EVERYTHING = PRODUCTION + VERIFIED + CANDIDATE_FILES
 
 #: What docs/TELEMETRY_CANDIDATES.md and n47-next-session.md § 3b quote
 #: for the validation load. Measured here; the docs were updated to
-#: these numbers on 2026-09-10.
-QUOTED = {"dde_dyn": 34, "dde_slow": 15, "egs": 2, "egs_slow": 1}
+#: these numbers on 2026-09-10. `odometer` (issue #49, dpf-egr v4) is
+#: the 44BF distance counter lifted out of the rotation into a 1 Hz
+#: class of its own: 34 -> 33 in `dde_dyn`, one in `odometer`.
+QUOTED = {"dde_dyn": 33, "odometer": 1, "dde_slow": 15, "egs": 2,
+          "egs_slow": 1}
 
 
 def load_all(files=EVERYTHING):
@@ -83,8 +86,8 @@ class TheWholeLoadFits(unittest.TestCase):
             {m.id for m in self.registry.mappings},
         )
 
-    def test_the_table_is_v3(self):
-        self.assertEqual(self.table.fingerprint(), "drive-modes@3")
+    def test_the_table_is_v4(self):
+        self.assertEqual(self.table.fingerprint(), "drive-modes@4")
 
     def test_no_two_files_claim_a_channel(self):
         """The registry refuses this at add(); pin it for the full set."""
@@ -156,7 +159,7 @@ class TheWholeLoadFits(unittest.TestCase):
         self.assertEqual(
             sorted(known),
             ["context", "control_ctx", "dde_dyn", "dde_slow", "egs",
-             "egs_slow", "motion", "rare", "slow"],
+             "egs_slow", "motion", "odometer", "rare", "slow"],
         )
 
     def test_the_rotation_counts_the_docs_quote(self):
@@ -200,6 +203,26 @@ class TheWholeLoadFits(unittest.TestCase):
         self.assertEqual(
             fired, {"slow", "rare", "dde_dyn", "dde_slow", "egs_slow"},
         )
+        #: `odometer` is NOT exempt: a navigation client needs `normal`
+        #: or `long` (docs/ODOMETER_API.md), and in `sampling` it sleeps
+        #: with the fast tiers - by design, so the mode stays cheap.
+        self.assertNotIn("odometer", fired)
+
+    def test_the_odometer_class_is_one_hertz_in_every_driving_mode(self):
+        """
+        What modes.yaml v4 added, measured on the plan: `odometer` at
+        its declared 1 s in `normal`, `long` and `debug` alike (x1.0,
+        not `long`'s x2.5 or `debug`'s x0.1), silent in `off`.
+        """
+        for mode_name in ("normal", "long", "debug"):
+            _, _, plan = rehearsal(self.table.get(mode_name))
+            self.assertEqual(plan.classes["odometer"].period, 1.0, mode_name)
+
+        _, _, plan = rehearsal(self.table.get("off"))
+        self.assertEqual(
+            [r for r in plan.due(0, 1000.0) if r.polling_class == "odometer"],
+            [],
+        )
 
     def test_each_candidate_loads_alone_on_the_verified_set_too(self):
         """
@@ -208,14 +231,15 @@ class TheWholeLoadFits(unittest.TestCase):
         follow from that.
         """
         base = rehearsal(files=PRODUCTION + VERIFIED)[2].counts()
-        self.assertEqual(base.get("dde_dyn"), 23)
+        self.assertEqual(base.get("dde_dyn"), 22)
+        self.assertEqual(base.get("odometer"), 1)
         self.assertNotIn("dde_slow", base)
 
         expected = {
             "injectors": {"dde_slow": 9},
-            "egr": {"dde_dyn": 23 + 3},
-            "airpath": {"dde_dyn": 23 + 7},
-            "ibs": {"dde_dyn": 23 + 1, "dde_slow": 5},
+            "egr": {"dde_dyn": 22 + 3},
+            "airpath": {"dde_dyn": 22 + 7},
+            "ibs": {"dde_dyn": 22 + 1, "dde_slow": 5},
             "tank": {"dde_slow": 1},
             "egs-speeds": {"egs": 2, "egs_slow": 1},
             # PID 0x01 is one request carrying mil + dtc_count; 0x4C one more.

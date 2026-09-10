@@ -9,7 +9,10 @@ answered" without ambiguity. No car, no network, no systemd.
 
 What matters most here is what the proxy does NOT do: forward the
 panel's credentials, let the share prefix reach anything management-
-shaped, or buffer a stream.
+shaped, or buffer a stream. The one deliberate exception - the two
+odometer-API paths, where the client's OWN bearer token must reach
+live.py - is tested in both directions: forwarded there, stripped
+everywhere else, and no lookalike rides through.
 """
 
 import base64
@@ -1107,6 +1110,158 @@ class NothingOfThePanelUnderTheSharePrefix(ProxyCase):
         self.assertFalse(
             {p for p in admin.PROXY_POST if p.startswith("/api/action/")}
         )
+
+
+class TheOdometerPassthrough(ProxyCase):
+    """
+    /api/odometer and /api/odometer/stream (issue #49): live.py's bearer
+    token is the credential, so the panel adds no login of its own on
+    exactly those two paths and - the only place - lets `Authorization`
+    through. Everything else keeps stripping it, and a lookalike path
+    stays behind the panel's login.
+    """
+
+    BEARER = {"Authorization": "Bearer nav-token-for-live-py"}
+
+    def test_the_two_paths_are_exactly_these(self):
+        self.assertEqual(admin.ODOMETER_PATHS,
+                         {"/api/odometer", "/api/odometer/stream"})
+        self.assertIn("/api/odometer/stream", admin.STREAM_PATHS)
+        self.assertNotIn("/api/odometer", admin.STREAM_PATHS)
+
+    def test_the_bearer_token_reaches_the_runtime_without_the_panels_login(self):
+        for path in sorted(admin.ODOMETER_PATHS):
+            with self.subTest(path=path):
+                code, headers, body = self.json(path, authed=False,
+                                                headers=self.BEARER)
+
+                self.assertEqual(code, 200)
+                self.assertEqual(body["answered_by"], "runtime")
+                self.assertNotIn("WWW-Authenticate", headers)
+
+                forwarded = self.runtime.last(path)["headers"]
+                self.assertEqual(forwarded.get("Authorization"),
+                                 self.BEARER["Authorization"])
+                #: One copy, not the panel's plus the client's.
+                self.assertEqual(
+                    self.runtime.last(path)["all"].get("Authorization"),
+                    [self.BEARER["Authorization"]],
+                )
+
+    def test_without_a_token_the_runtimes_answer_is_relayed_not_the_panels(self):
+        """
+        No credential at all: the panel does not challenge for its Basic
+        login - live.py owns the 401 here (a Bearer challenge, tested in
+        tests/test_odometer.py). The fake answers 200; what matters is
+        who answered and that nothing was invented on the way.
+        """
+        code, headers, body = self.json("/api/odometer", authed=False)
+
+        self.assertEqual(code, 200)
+        self.assertEqual(body["answered_by"], "runtime")
+        self.assertNotIn("Authorization",
+                         self.runtime.last("/api/odometer")["headers"])
+
+    def test_the_query_string_rides_along(self):
+        self.request("/api/odometer?since=1", authed=False, headers=self.BEARER)
+
+        self.assertEqual(self.runtime.last("/api/odometer")["path"],
+                         "/api/odometer?since=1")
+
+    def test_authorization_is_still_stripped_everywhere_else(self):
+        """The other direction: the owner's paths and the share prefix."""
+        for path in sorted(admin.PROXY_GET - {"/api/stream"}):
+            with self.subTest(path=path):
+                self.request(path)                       # Basic, the panel's
+                forwarded = self.runtime.last(path)["headers"]
+                self.assertNotIn("Authorization", forwarded, path)
+
+        for path in ("/s/api/snapshot?t=abc", "/s/api/odometer?t=abc",
+                     "/s/?t=abc"):
+            with self.subTest(path=path):
+                self.request(path, authed=False, headers=self.BEARER)
+                forwarded = self.runtime.last(path.split("?")[0])["headers"]
+                self.assertNotIn("Authorization", forwarded, path)
+
+    def test_a_lookalike_path_stays_behind_the_login(self):
+        for path in ("/api/odometer2", "/api/odometer/", "/api/odometer/x",
+                     "/api/odometerstream", "/api/odometer/stream/",
+                     "/api/odometer/stream/x", "/API/odometer",
+                     "/api/odometer%2Fstream", "/api//odometer"):
+            with self.subTest(path=path):
+                code, headers, body = self.request(path, authed=False,
+                                                   headers=self.BEARER)
+
+                self.assertEqual(code, 401, path)
+                self.assertIn("Basic", headers.get("WWW-Authenticate", ""))
+                self.assertIsNone(self.runtime.last(path), path)
+
+    def test_a_post_is_not_passed_through(self):
+        for path in sorted(admin.ODOMETER_PATHS):
+            with self.subTest(path=path):
+                code, headers, body = self.request(
+                    path, method="POST", body={}, authed=False,
+                    headers=self.BEARER,
+                )
+
+                self.assertEqual(code, 401)
+                self.assertIsNone(self.runtime.last(path))
+
+    def test_the_bearer_token_opens_nothing_of_the_panel(self):
+        """A live.py token is not a panel login."""
+        for path in ("/", "/api/status", "/api/diagnostics", "/api/meta",
+                     "/api/stream", "/dashboard/app.js"):
+            with self.subTest(path=path):
+                code, headers, raw = self.request(path, authed=False,
+                                                  headers=self.BEARER)
+                self.assertEqual(code, 401, path)
+
+        for name in sorted(admin.ACTIONS):
+            with self.subTest(action=name):
+                code, headers, raw = self.request(
+                    f"/api/action/{name}", method="POST", body={},
+                    authed=False, headers=self.BEARER,
+                )
+                self.assertEqual(code, 401)
+
+        self.assertEqual(self.calls, [])
+
+    def test_the_paths_are_no_panel_route(self):
+        self.assertFalse(admin.ODOMETER_PATHS & admin.PROXY_GET)
+        self.assertFalse(admin.ODOMETER_PATHS & admin.PROXY_POST)
+        self.assertFalse(admin.ODOMETER_PATHS & set(admin.TELEMETRY_FILES))
+        self.assertFalse({p for p in admin.ODOMETER_PATHS
+                          if p.startswith("/api/action/")})
+
+
+class TheOdometerPassthroughWithTheRuntimeDown(ProxyCase):
+    """The same minimal 503 a share viewer gets: no upstream, no address."""
+
+    runtime_up = False
+
+    def test_a_navigation_client_learns_only_that_the_car_is_away(self):
+        upstream = self.cfg["dashboard_url"]
+
+        for path in sorted(admin.ODOMETER_PATHS):
+            for accept in (None, "text/html,*/*"):
+                with self.subTest(path=path, accept=accept):
+                    headers = {"Authorization": "Bearer x"}
+
+                    if accept:
+                        headers["Accept"] = accept
+
+                    code, head, body = self.json(path, authed=False,
+                                                 headers=headers)
+                    self.assertEqual(code, 503)
+                    self.assertEqual(head.get("Retry-After"), "5")
+                    self.assertTrue(head["Content-Type"].startswith(
+                        "application/json"))
+                    self.assertEqual(body["error"], "runtime not running")
+                    self.assertFalse(body["ready"])
+                    self.assertNotIn("upstream", body)
+                    self.assertNotIn(upstream, json.dumps(body))
+                    self.assertNotRegex(json.dumps(body),
+                                        r"\d+\.\d+\.\d+\.\d+|:\d{4}")
 
 
 class TheTelemetryUi(ProxyCase):

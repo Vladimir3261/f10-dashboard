@@ -2286,7 +2286,7 @@ class Diagnostics:
         with self._lock:
             keep = {
                 k: v for k, v in self._state.items()
-                if k in ("registry", "extra_ids")
+                if k in ("registry", "extra_ids", "api_tokens")
             }
             keep["status"] = status
             self._state = keep
@@ -2310,9 +2310,15 @@ class Diagnostics:
         """
         state = self._get()
         registry = state.get("registry")
+        #: The odometer API's token store: the COUNT and nothing else.
+        #: No token, no name, no path - the view is reachable by anyone
+        #: behind the panel's login, which is not the same audience.
+        tokens = state.get("api_tokens")
+        api_tokens = tokens.count() if tokens is not None else 0
 
         if registry is None:
-            return {"mappings": [], "classes": [], "channels": 0}
+            return {"mappings": [], "classes": [], "channels": 0,
+                    "api_tokens": api_tokens}
 
         extra_ids = set(state.get("extra_ids") or ())
         classes = {c.name: c for c in registry.polling_classes()}
@@ -2324,6 +2330,7 @@ class Diagnostics:
             ) + 1
 
         return {
+            "api_tokens": api_tokens,
             "mappings": [{
                 "id": m.id,
                 "version": m.version,
@@ -3010,6 +3017,7 @@ def poll_loop(
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
     diag: Optional[Diagnostics] = None,
+    odometer: Optional["Odometer"] = None,
 ) -> None:
     diag = diag if diag is not None else Diagnostics()
     #: The caller normally supplies this; constructing one here keeps
@@ -3226,6 +3234,19 @@ def poll_loop(
             tel.set_meta(profile.meta())
 
             #
+            # What THIS run can offer the odometer API: the source
+            # channel is in the profile or it is not (the file was not
+            # loaded, or the ECU did not prove the profile it needs).
+            # The accumulator itself is never reset here - it lives as
+            # long as the process, and a reconnect carries on.
+            #
+            if odometer is not None:
+                odometer.configure(
+                    ODOMETER_SOURCE in profile.signal_keys(),
+                    profile.channel_version(ODOMETER_SOURCE),
+                )
+
+            #
             # Everything the diagnostics view needs, published once per
             # connection. References, not copies: the report is built on
             # demand so a page nobody opens costs nothing per cycle.
@@ -3330,6 +3351,13 @@ def poll_loop(
                     key: r for key, r in readings.items() if not r.usable
                 }
                 values.update(fresh)
+
+                #: Before the carried-forward view is touched: the
+                #: accumulator wants exactly what landed this cycle,
+                #: with its own acquisition time, and skips the flagged.
+                if odometer is not None:
+                    odometer.feed(readings, stamps, connected=True,
+                                  clock_synced=synced)
 
                 #
                 # A channel that answered with something unusable this
@@ -3466,6 +3494,11 @@ def poll_loop(
             #: would keep reading as if the link were live.
             diag.clear(msg)
 
+            if odometer is not None:
+                #: The values stay - they are the last known - but the
+                #: client is told the link is down.
+                odometer.set_connected(False)
+
             if rec is not None:
                 rec.event("error", msg)
         finally:
@@ -3482,6 +3515,7 @@ def demo_loop(
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
     diag: Optional[Diagnostics] = None,
+    odometer: Optional["Odometer"] = None,
 ) -> None:
     #: The demo synthesises values rather than scheduling requests, so a
     #: mode has nothing to scale here - it is accepted and reported so the
@@ -3851,6 +3885,270 @@ class ShareTokens:
             self._tokens.pop(token, None)
 
 
+# --------------------------------------------------------------- odometer
+#
+# The odometer API (docs/ODOMETER_API.md, issue #49): a monotonic distance
+# counter plus the latest speed, for a navigation client that dead-
+# reckons without GPS. Nothing here knows what a PID is - the source is a
+# mapping channel like any other; this is the accumulation and the
+# transport of it.
+#
+
+#: The channel the accumulator reads: the ECU's "distance since the last
+#: successful regeneration" counter in whole metres (0x44BF on the d72
+#: DDE, `mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml`). It
+#: counts up between regenerations and is reset to zero by a successful
+#: one; the accumulator below bridges the reset. The km channel on the
+#: same bytes is rounded to 10 m, which is why the API has a channel of
+#: its own.
+ODOMETER_SOURCE = "n47d_odometer_m"
+#: The speed channel: SAE PID 0x0D, integer km/h, `motion` class.
+ODOMETER_SPEED = "speed"
+#: The stream sends at most this many events per second; samples that
+#: land closer together are coalesced into the latest state.
+ODOMETER_STREAM_MAX_HZ = 10.0
+#: A comment line goes out after this long without an event, so a proxy
+#: and the client can tell a quiet link from a dead one.
+ODOMETER_KEEPALIVE_S = 15.0
+#: Where the bearer tokens live by default (gitignored).
+DEFAULT_API_TOKENS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "local", "api-tokens.json"
+)
+
+
+class Odometer:
+    """
+    The in-memory, process-lifetime odometer.
+
+    `odometer_m` only ever grows for as long as this process lives: each
+    accepted sample of the source channel adds `raw - prev_raw` when that
+    is non-negative, and adds `raw` itself when the ECU's counter went
+    backwards - which is what a successful regeneration looks like from
+    here (the counter restarts at zero; the metres driven between the
+    last sample and the reset are the only thing lost, one sample's
+    worth). A reading the decoder flagged (`Reading.quality != "ok"`) is
+    ignored, never accumulated.
+
+    `epoch` is minted once, here, and changes only when the process
+    restarts. An ECU reconnect keeps it - the counter carries straight
+    on, and if the ECU regenerated while the link was down that shows
+    as one reset - so a client counts deltas within one epoch and
+    re-bases when the epoch changes.
+
+    Thread-safe: the poll loop feeds it, the HTTP threads read it and
+    wait on it.
+    """
+
+    def __init__(self, epoch: Optional[str] = None) -> None:
+        self.epoch = epoch or secrets.token_hex(4)
+        self.cond = threading.Condition()
+        self.version = 0
+        #: Whether the source channel is in the running profile - the
+        #: endpoint answers 503 while it is not.
+        self.loaded = False
+        self.mapping_ver: Optional[int] = None
+        self.odometer_m: Optional[int] = None
+        self.odometer_t: Optional[float] = None
+        self._prev_raw: Optional[int] = None
+        self.speed_kmh: Optional[float] = None
+        self.speed_t: Optional[float] = None
+        self.connected = False
+        self.clock_synced: Optional[bool] = None
+        self.resets = 0
+
+    def configure(self, loaded: bool, mapping_ver: Optional[int]) -> None:
+        """What this run can offer: called once per resolved profile."""
+        with self.cond:
+            self.loaded = bool(loaded)
+            self.mapping_ver = mapping_ver
+            self._bump()
+
+    def set_connected(self, connected: bool,
+                      clock_synced: Optional[bool] = None) -> None:
+        with self.cond:
+            changed = connected != self.connected
+
+            if clock_synced is not None and clock_synced != self.clock_synced:
+                self.clock_synced = clock_synced
+                changed = True
+
+            self.connected = connected
+
+            if changed:
+                self._bump()
+
+    def feed(self, readings: Dict[str, Any], stamps: Dict[str, float],
+             connected: bool = True,
+             clock_synced: Optional[bool] = None) -> bool:
+        """
+        One poll cycle's readings. Returns True when a sample landed.
+
+        `readings` is what the executor decoded this cycle (key ->
+        Reading); `stamps` the per-signal acquisition times, wall clock.
+        A cycle that carried neither channel changes nothing but the
+        link state.
+        """
+        with self.cond:
+            landed = False
+            reading = readings.get(ODOMETER_SOURCE)
+
+            if reading is not None and reading.usable:
+                raw = int(reading.value)
+
+                if raw >= 0:
+                    landed = True
+                    at = stamps.get(ODOMETER_SOURCE) or time.time()
+
+                    if self._prev_raw is None:
+                        self.odometer_m = 0
+                    elif raw >= self._prev_raw:
+                        self.odometer_m += raw - self._prev_raw
+                    else:
+                        #: The ECU's counter went backwards: a successful
+                        #: regeneration restarted it at zero, and what it
+                        #: counts now was driven after that.
+                        self.odometer_m += raw
+                        self.resets += 1
+
+                    self._prev_raw = raw
+                    self.odometer_t = at
+
+            speed = readings.get(ODOMETER_SPEED)
+
+            if speed is not None and speed.usable:
+                landed = True
+                self.speed_kmh = speed.value
+                self.speed_t = stamps.get(ODOMETER_SPEED) or time.time()
+
+            changed = landed or connected != self.connected
+
+            if clock_synced is not None and clock_synced != self.clock_synced:
+                self.clock_synced = clock_synced
+                changed = True
+
+            self.connected = connected
+
+            if changed:
+                self._bump()
+
+            return landed
+
+    def _bump(self) -> None:
+        """Caller holds the lock."""
+        self.version += 1
+        self.cond.notify_all()
+
+    def _snapshot(self) -> Dict[str, Any]:
+        """Caller holds the lock. The API body, minus `t`."""
+        return {
+            "epoch": self.epoch,
+            "odometer_m": self.odometer_m,
+            "odometer_t": self.odometer_t,
+            "speed_kmh": self.speed_kmh,
+            "speed_t": self.speed_t,
+            "connected": self.connected,
+            "clock_synced": self.clock_synced,
+            "resets": self.resets,
+            "source": ODOMETER_SOURCE,
+            "mapping_ver": self.mapping_ver,
+        }
+
+    def current(self) -> Tuple[int, Dict[str, Any]]:
+        with self.cond:
+            return self.version, self._snapshot()
+
+    def wait(self, seen: int, timeout: float) -> Tuple[int, Dict[str, Any]]:
+        """Block until the state moved past `seen`, or `timeout`."""
+        with self.cond:
+            if self.version == seen:
+                self.cond.wait(timeout)
+
+            return self.version, self._snapshot()
+
+
+class ApiTokens:
+    """
+    The bearer tokens the odometer API accepts, from a JSON file.
+
+    `{"tokens": [{"name": ..., "token": ..., "created": ...}, ...]}`,
+    minted and revoked by `tools/api_token.py` (which also keeps the
+    file at mode 0600). Re-read whenever the file's mtime changes, so a
+    revocation takes effect without restarting the runtime. Compared in
+    constant time, and no token is ever logged or reported - the
+    diagnostics view sees the count.
+
+    A missing or unreadable file means NO token is valid: the endpoint
+    fails closed rather than open.
+    """
+
+    def __init__(self, path: Optional[str]) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._tokens: List[str] = []
+        self._stamp: Optional[Tuple[float, int]] = None
+
+    def _load(self) -> None:
+        """Caller holds the lock."""
+        if not self.path:
+            self._tokens = []
+            return
+
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            self._tokens = []
+            self._stamp = None
+            return
+
+        stamp = (st.st_mtime, st.st_size)
+
+        if stamp == self._stamp:
+            return
+
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+
+            entries = doc.get("tokens") if isinstance(doc, dict) else None
+            self._tokens = [
+                str(e["token"]) for e in (entries or [])
+                if isinstance(e, dict) and e.get("token")
+            ]
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._tokens = []
+
+        self._stamp = stamp
+
+    def count(self) -> int:
+        with self._lock:
+            self._load()
+
+            return len(self._tokens)
+
+    def validate(self, header: Optional[str]) -> bool:
+        """`Authorization: Bearer <token>` - anything else is a no."""
+        if not header:
+            return False
+
+        scheme, _, presented = header.strip().partition(" ")
+
+        if scheme.lower() != "bearer" or not presented.strip():
+            return False
+
+        presented = presented.strip()
+
+        with self._lock:
+            self._load()
+            #: Every token is compared, whatever the first one said, so
+            #: the answer's timing does not say which one matched.
+            ok = False
+
+            for token in self._tokens:
+                ok |= hmac.compare_digest(token, presented)
+
+            return ok
+
+
 def db_runs(path: str) -> List[Dict]:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
@@ -3936,6 +4234,8 @@ def make_handler(
     share_base_url: str = "",
     modes: Optional["ModeControl"] = None,
     diag: Optional["Diagnostics"] = None,
+    odometer: Optional["Odometer"] = None,
+    api_tokens: Optional["ApiTokens"] = None,
 ):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -4121,6 +4421,90 @@ def make_handler(
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
 
+        # -- odometer API -------------------------------------------
+
+        def _odometer_authorised(self) -> bool:
+            """
+            Bearer token, or a 401 that names nothing.
+
+            One answer for "no header", "wrong scheme", "unknown token"
+            and "revoked": a caller learns only that it is not in. The
+            challenge header is what the contract promises a client it
+            can key on.
+            """
+            if api_tokens is not None and api_tokens.validate(
+                    self.headers.get("Authorization")):
+                return True
+
+            payload = json.dumps({"error": "unauthorized"}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+            return False
+
+        def _odometer_loaded(self) -> bool:
+            """503 when this run has no odometer channel to offer."""
+            if odometer is not None and odometer.loaded:
+                return True
+
+            self._json_body({"error": "odometer channel not loaded"}, 503)
+
+            return False
+
+        @staticmethod
+        def _odometer_body(snap: Dict[str, Any]) -> Dict[str, Any]:
+            """The contract's JSON: `t` is when this body was built."""
+            body = {"t": time.time()}
+            body.update(snap)
+
+            return body
+
+        def _odometer_stream(self) -> None:
+            """
+            SSE: one `data:` line per new sample, coalesced to at most
+            ODOMETER_STREAM_MAX_HZ events per second, a keepalive
+            comment after ODOMETER_KEEPALIVE_S of quiet.
+
+            Coalescing works by waiting out the minimum gap and THEN
+            taking the state, so a burst of samples inside one gap
+            becomes one event carrying the latest of them.
+            """
+            self._headers("text/event-stream", {"Connection": "close"})
+            self.close_connection = True
+            self.end_headers()
+
+            seen = -1
+            gap = 1.0 / ODOMETER_STREAM_MAX_HZ
+            last_sent = -gap
+
+            try:
+                while True:
+                    version, snap = odometer.wait(seen, ODOMETER_KEEPALIVE_S)
+
+                    if version == seen:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        continue
+
+                    wait_for = gap - (time.monotonic() - last_sent)
+
+                    if wait_for > 0:
+                        time.sleep(wait_for)
+                        version, snap = odometer.current()
+
+                    seen = version
+                    msg = "data: " + json.dumps(self._odometer_body(snap)) + "\n\n"
+                    self.wfile.write(msg.encode())
+                    self.wfile.flush()
+                    last_sent = time.monotonic()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
         def do_GET(self):
             raw = self.path
             path = raw.split("?")[0]
@@ -4136,6 +4520,28 @@ def make_handler(
             #
             if path == SHARE_PREFIX or path.startswith(SHARE_PREFIX + "/"):
                 self._serve_share(path, query)
+                return
+
+            #
+            # The odometer API: its own bearer token, nothing of the
+            # session in the body, and not on the share allowlist (a
+            # share viewer asking for /s/api/odometer gets the 404
+            # above). Auth is decided before anything else is said -
+            # the 503 for a run without the channel is for callers who
+            # are in.
+            #
+            if path in ("/api/odometer", "/api/odometer/stream"):
+                if not self._odometer_authorised():
+                    return
+
+                if not self._odometer_loaded():
+                    return
+
+                if path == "/api/odometer/stream":
+                    self._odometer_stream()
+                    return
+
+                self._json_body(self._odometer_body(odometer.current()[1]))
                 return
 
             if path == "/api/share":
@@ -4436,6 +4842,12 @@ def main() -> int:
                          "https://f10.example.com. Defaults to the Host the "
                          "request arrived on, which is right behind the "
                          "server's reverse proxy.")
+    ap.add_argument("--api-tokens", default=DEFAULT_API_TOKENS,
+                    metavar="PATH",
+                    help="bearer-token file for /api/odometer (default "
+                         "local/api-tokens.json next to live.py; mint one "
+                         "with tools/api_token.py). Re-read when it "
+                         "changes. Missing file: every token is refused.")
     ap.add_argument("--ecu", type=lambda s: int(s, 0), default=None,
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
@@ -4566,9 +4978,24 @@ def main() -> int:
     #: absent, and before the first connection attempt.
     diag.publish(registry=registry, extra_ids=extra_ids)
 
+    #
+    # The odometer API's state and its token store. The epoch is minted
+    # here, once per process. Until a profile is resolved the endpoint
+    # answers from what was LOADED: with the mapping file present a
+    # client gets `connected: false` and nulls rather than a 503 that
+    # would only mean "not connected yet".
+    #
+    odometer = Odometer()
+    odometer.configure(
+        ODOMETER_SOURCE in {s.key for s in registry.signals},
+        None,
+    )
+    api_tokens = ApiTokens(args.api_tokens)
+    diag.publish(api_tokens=api_tokens)
+
     worker = threading.Thread(
         target=demo_loop if args.demo else poll_loop,
-        args=(tel, args, rec, registry, modes, diag),
+        args=(tel, args, rec, registry, modes, diag, odometer),
         daemon=True,
     )
     worker.start()
@@ -4584,6 +5011,8 @@ def main() -> int:
             args.share_base_url,
             modes,
             diag,
+            odometer,
+            api_tokens,
         ),
     )
     server.daemon_threads = True
@@ -4601,6 +5030,14 @@ def main() -> int:
            f"{args.share_base_url or '<this host>'}{SHARE_PREFIX}/")
     )
     print(f"[+] logging:   {args.db if rec else 'disabled'}")
+    print(
+        "[+] odometer:  /api/odometer - "
+        + (f"{api_tokens.count()} token(s) in {args.api_tokens}"
+           if api_tokens.count() else
+           f"no tokens ({args.api_tokens}); mint one with tools/api_token.py")
+        + ("" if odometer.loaded else
+           f"; source channel {ODOMETER_SOURCE} is not loaded (503)")
+    )
     print(
         f"[+] mappings:  {args.mappings} "
         f"({len(registry.mappings)} file(s), {len(registry.requests)} requests, "
