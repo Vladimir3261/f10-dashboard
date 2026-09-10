@@ -54,12 +54,16 @@ else
 fi
 
 printf '\n== boot firmware/regulatory messages ==\n'
-if dmesg | grep -q 'Firmware rejected country setting'; then
+# Read dmesg once; `dmesg | grep -q` under pipefail would fail on a match
+# that comes early in a long log (grep exits, dmesg gets SIGPIPE) and report
+# the rejection as absent.
+boot_log="$(dmesg 2>/dev/null || true)"
+if grep -q 'Firmware rejected country setting' <<<"${boot_log}"; then
   warnx "brcmfmac rejected a country setting during this boot"
-  dmesg | grep -E 'brcmfmac.*Firmware|Firmware rejected country setting'
+  grep -E 'brcmfmac.*Firmware|Firmware rejected country setting' <<<"${boot_log}"
 else
   ok "no 'Firmware rejected country setting' message in dmesg"
-  dmesg | grep -E 'brcmfmac.*Firmware' || true
+  grep -E 'brcmfmac.*Firmware' <<<"${boot_log}" || true
 fi
 
 printf '\n== channels 12/13/14 ==\n'
