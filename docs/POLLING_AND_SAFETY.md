@@ -99,6 +99,8 @@ common cadence to be correlated: ClickHouse joins on nearest timestamp
 | `rare` | 60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
 | `dde_dyn` | 0.5 s x 22 | the 22 proprietary DDE reads | round-robin: one per firing, so ~11 s per channel |
 | `egs` | 0.5 s | engaged gear | was 0.25 s; the EGS is the ECU that sleeps |
+| `dde_slow` | 10 s x n | the #15 candidates' adaptation/state reads (injector corrections, IBS state, tank content) | round-robin, one per firing: 15 members when every candidate is loaded, so ~150 s per channel; a value that moves over minutes has no business on the 0.5 s rotation. Only present when a candidate file is loaded (`./run_car.sh --candidate …`) |
+| `egs_slow` | 10 s | EGS ATF temperature (raw, candidate) | the EGS's own slow read; candidate-only, as above |
 
 `map` is the one channel kept fast for a display reason rather than a
 physical one: the derived `boost` (`map - baro`) is the Drive view's
@@ -142,7 +144,7 @@ request is due (`bmwdiag/mapping/modes.py`, applied in `polling.py`).
 | mode | what it does | requests/12 min |
 |---|---|---|
 | `off` | connected but silent — no request is sent | 0 |
-| `sampling` | 120 s awake, 600 s asleep; slow tiers exempt | 5,531 |
+| `sampling` | 120 s awake, 600 s asleep; slow tiers exempt (incl. `dde_slow`/`egs_slow`) | 5,531 |
 | `long` | motorway cruising — motion at 2 Hz | 6,564 |
 | `normal` | exactly what the mappings declare | 29,940 |
 | `debug` | the pre-v2 behaviour, for investigating a problem | 85,560 |
@@ -165,9 +167,13 @@ Switch from the dashboard's `mode` chip, or start in one with
   nothing would say so. Drives spanning a switch are reassembled from
   consecutive sessions.
 - **The duty cycle never silences the slow tiers.** `sampling` exempts
-  `slow`, `rare` and `dde_dyn`, because the events worth catching on a
-  long drive — a thermal excursion, a regeneration — are exactly the
-  ones that would start and finish inside a sleep window.
+  `slow`, `rare` and `dde_dyn` — and, since `modes.yaml` v3
+  (2026-09-10), the candidate classes `dde_slow` and `egs_slow`, which
+  are treated exactly like `slow` in every mode — because the events
+  worth catching on a long drive — a thermal excursion, a regeneration
+  — are exactly the ones that would start and finish inside a sleep
+  window, and a 150 s rotation that slept 600 s in 720 would never
+  complete inside one burst.
 - **`sampling` is quieter than `long`**, which is not obvious and was
   measured rather than assumed: it silences the fast tiers entirely for
   ten minutes in twelve, where `long` merely slows them. They are

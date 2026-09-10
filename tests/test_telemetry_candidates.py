@@ -158,17 +158,23 @@ class EveryCandidateIsHonestAboutItsState(unittest.TestCase):
 
     def test_nothing_here_is_loaded_by_the_car_launcher(self):
         """
-        Candidates reach the car only through an explicit --extra-mappings
-        on a validation run. run_car.sh (mirrored by CAR_FILES) must not
-        know them, and the production set is a different file entirely.
+        Candidates reach the car only through an explicit opt-in on a
+        validation run: `./run_car.sh --candidate <name>` (which the
+        script resolves to `--extra-mappings <file>`), never by default.
+        A bare launch (mirrored by CAR_FILES) composes none of them, and
+        the production set is a different file entirely. The launcher is
+        executed with a stub python3, not grepped - since it learned the
+        names, their presence in the text proves nothing.
         """
-        with open(os.path.join(support.ROOT, "run_car.sh"), encoding="utf-8") as fh:
-            launcher = fh.read()
+        from tests.test_run_car import run_launcher
+
+        code, argv, err = run_launcher()
+        self.assertEqual(code, 0, err)
 
         for path in ALL_FILES:
             name = os.path.basename(path)
             with self.subTest(file=name):
-                self.assertNotIn(name, launcher)
+                self.assertFalse(any(a.endswith(name) for a in argv), argv)
                 self.assertFalse(any(f.endswith(name) for f in CAR_FILES))
 
 

@@ -93,7 +93,7 @@
     },
     {
       "id": "drive-modes",
-      "version": 2,
+      "version": 3,
       "production": true,
       "path": "config/modes.yaml"
     },

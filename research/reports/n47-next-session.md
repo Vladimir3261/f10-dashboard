@@ -14,6 +14,9 @@ proven. This file is the to-do for the next session.
 - Ignition on; engine running for anything load- or flow-dependent.
 - Artifacts land in `validation-runs/` (tracked, VIN-redacted) and
   `local/validation-runs-raw/` (gitignored, VIN).
+- The next drive is the issue #15 final test: follow
+  [`docs/FINAL_TEST.md`](../../docs/FINAL_TEST.md) — the ordered
+  checklist with every command, in the order § 3b gives.
 
 ## DONE — engaged gear found (2026-08-27)
 
@@ -290,12 +293,17 @@ then flip the file to `verified` (version 2, artifact named in
    pin re-base; the other eight unpolled advertised PIDs stay out for
    the reasons in the doc.
 
-Rotation cost if *all* were loaded: `dde_dyn` 23 → 34 requests
-(~14 s per member) plus a new `dde_slow` rotation of 15. `dde_slow` and
-`egs_slow` are not named in `config/modes.yaml`: every mode scales them
-×1.0 and `sampling` does not exempt them (see the doc). Validate one
-file at a time; what enters `run_car.sh` afterwards is a separate
-decision per file.
+Rotation cost if *all* were loaded (measured offline by the dress
+rehearsal in `tests/test_final_test_readiness.py`, 2026-09-10):
+`dde_dyn` 23 → 34 requests (~14 s per member) plus a new `dde_slow`
+rotation of 15, `egs` 1 → 2, `egs_slow` 1. Since `config/modes.yaml`
+**v3** `dde_slow` and `egs_slow` are named in every mode and treated
+like `slow`: exempt from `sampling`'s sleep, ×1.0 in `long`, ×0.1 in
+`debug`. Validate one file at a time — `./run_car.sh --candidate egr`
+loads one for the drive half without editing the script; what enters
+the default set afterwards is a separate decision per file. The
+driver's-seat checklist for the whole day is
+[`docs/FINAL_TEST.md`](../../docs/FINAL_TEST.md).
 
 ### 4. Superseded / historical
 

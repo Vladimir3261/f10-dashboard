@@ -292,6 +292,12 @@ Start with `docs/MAPPING_ARCHITECTURE.md` for the runtime model and
   multi-hour one, `--mode debug` when chasing a specific problem. Also
   switchable mid-drive from the `mode` chip — that ends the current run
   and starts a new one, which is intended.
+- **A validation drive** adds one issue #15 candidate file by name:
+  `./run_car.sh --candidate egr` (names: injectors, egr, airpath, ibs,
+  tank, egs-speeds, sae-extra; an unknown name refuses and lists them).
+  One file per drive. The driver's-seat checklist for the final #15
+  test — deploy checks, the eight steps in order with their exact
+  commands and pass/fail, what to bring back — is `docs/FINAL_TEST.md`.
 - The link is **ENET/HSFZ over Ethernet** — the host needs a
   `169.254.x.x` link-local address on the cable, and discovery UDP-
   broadcasts to find the gateway. On a laptop this is automatic; on a
