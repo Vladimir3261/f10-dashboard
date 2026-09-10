@@ -43,9 +43,12 @@ now, while it is cheap. Licenses were read at the pinned revisions in
    `license.bulk_redistribution: withheld` on `morguux-d73n47a0`, and
    the generated coverage report lists a withheld source's rows only
    when they carry a normalized name (26 rows), counting the rest
-   (1619) per group without reproducing them. The blobs remain in git
-   history from 2026-08-25 onwards; whether to rewrite history is an
-   owner decision, laid out in `docs/HISTORY_REWRITE.md`.
+   (1619) per group without reproducing them. The blobs sat in git
+   history from 2026-08-25 until **2026-09-10, when the history was
+   rewritten** (`git filter-repo --strip-blobs-with-ids`, force-pushed;
+   every commit after the first re-hashed, tree at HEAD unchanged) —
+   the record, the blob ids and the one remaining step (GitHub's
+   cached views) are in `docs/HISTORY_REWRITE.md`.
 2. **`ediabasx-docs-sgbd`** publishes whole PRG-derived tables. We used
    it only for individual row cross-checks (a handful of quoted rows
    with citations); do not bulk-scrape it, and do not mirror it.

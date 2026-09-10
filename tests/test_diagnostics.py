@@ -690,7 +690,7 @@ class RestingIsVisible(unittest.TestCase):
     """
     A rested request must say so, not read as silently absent.
 
-    The whole point of cfbabd4's stats fields: without them, a channel
+    The whole point of 4664854's stats fields: without them, a channel
     the executor stood down after repeated faults is indistinguishable
     on the panel from one that is healthy but slow. Wired only after the
     branch merged, so the tab never rendered a field the runtime did not

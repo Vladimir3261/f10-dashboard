@@ -25,6 +25,7 @@ from bmwdiag.mapping import MappingRegistry, load_file
 from bmwdiag.mapping.modes import load_modes
 from bmwdiag.mapping.polling import PollingPlan, resolve_classes
 from bmwdiag.mapping.registry import AllCapabilities
+from bmwdiag.protocol.request import build_request
 
 PRODUCTION = ["mappings/obd/engine.yaml"]
 CANDIDATE_FILES = list(CANDIDATES.values())
@@ -58,13 +59,13 @@ def wire_identity(request, targets):
     """
     What actually goes on the wire, so two requests that would send the
     same frame to the same ECU are seen as one - regardless of their ids.
-    """
-    dst = request.target.address
-    if dst is None:
-        dst = targets[request.target.name]
 
-    return (dst, request.service, request.pid, request.did,
-            request.payload, request.setup)
+    The frame comes from the canonical builder (the one the executor
+    uses), not from a re-derivation of its fields here: the pair (dst,
+    built payload) plus the setup frames that precede it.
+    """
+    built = build_request(request, targets)
+    return (built.dst, built.payload, request.setup)
 
 
 class TheWholeLoadFits(unittest.TestCase):
@@ -113,8 +114,8 @@ class TheWholeLoadFits(unittest.TestCase):
         for request in self.profile.requests:
             identity = wire_identity(request, targets)
             with self.subTest(request=request.id):
-                self.assertNotIn(
-                    identity, seen,
+                self.assertIsNone(
+                    seen.get(identity),
                     f"{request.id} sends the same frame as {seen.get(identity)}",
                 )
             seen[identity] = request.id

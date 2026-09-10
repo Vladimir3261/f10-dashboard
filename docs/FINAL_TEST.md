@@ -37,9 +37,11 @@ Do these at home, with the Pi on Wi-Fi and the car off.
    a link (`/s/?t=…`); open it in a private window — telemetry only,
    **no login**, and nothing of the panel under it (`/s/api/status`,
    `/s/api/action/…` are 404).
-6. **Pi off** (or `sudo systemctl stop wg-quick@wg0` on it): the
-   public URL shows the "car is unreachable" page — with and without
-   a login. Start it again before you leave.
+6. **Pi off** (or `sudo systemctl stop wg-quick@wg0` on it): `/` →
+   the login prompt, then the "car is unreachable" page; the share
+   link (`/s/?t=…`) → the same page with no login. (`/` without a
+   login is 401 either way — the unauthenticated offline page lives
+   only under `/s/`.) Start it again before you leave.
 7. Write down the cluster's **range** and **average consumption**
    before you start, and keep the pump receipt — item 6 below needs
    all three.
@@ -115,8 +117,11 @@ and move on; a rejected row stays in the file as a documented dead end.
 - **One client at a time.** `f10-dashboard` stopped before any
   `validate_candidate.py` / `dtc.py`; never two tools at once; never
   the laptop and the Pi on the car together.
-- **Read-only.** Only `0x22`/`0x2C`/`0x19`/`0x01` ever go out; the
-  tools refuse anything else at one choke point. No DTC clear (`0x14`
+- **Read-only.** Only `0x01`/`0x09`/`0x22`/`0x19`/`0x3E` and the
+  `0x2C` define/clear/read subfunctions ever go out (`0x09` is the
+  ident read during discovery; `0x3E` is permitted by the allowlist
+  but nothing currently sends it); the tools refuse anything else at
+  one choke point. No DTC clear (`0x14`
   has no code path), no routine, no write, no adaptation reset — not
   even "to see what happens".
 - **No VIN** in anything committed: the tracked artifact is redacted

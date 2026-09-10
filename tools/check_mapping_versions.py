@@ -5,13 +5,23 @@ Guard: a changed mapping file must have its `version` incremented.
 The project identifies a recorded dataset by the mapping version stamped on
 its samples (docs/DATA_VERSIONING.md). For that to mean anything, editing a
 mapping file's content and forgetting to bump its version must be caught.
-This checker compares each mapping file against a git ref (default HEAD):
-if the file's content changed - anything other than the version line
+This checker compares each versioned data file against a git ref (default
+HEAD): if the file's content changed - anything other than the version
 itself - its version must be strictly greater than before.
 
-It watches ONLY `mappings/**/*.yaml`. Code changes (loader, live.py, ...)
-never require a version bump; the version tracks the mapping data, not the
-program.
+It watches `mappings/**/*.yaml` and `config/modes.yaml` (the drive-mode
+table, versioned data too: its `drive-modes@N` is part of every session's
+mapping set). Code changes (loader, live.py, ...) never require a version
+bump; the version tracks the data, not the program.
+
+"Content" is what the loader sees: both sides are parsed with the
+runtime's own YAML subset and compared with the version removed. So a
+comment-only edit - a `#` line, a trailing `# ...` - is not a content
+change and needs no bump (docs/DATA_VERSIONING.md: "bump for content, not
+comments"), while a `#` inside a quoted string or a block scalar is
+content, because the loader would see it. A side that fails to parse is
+compared as text (minus the version line) so a broken file cannot slip
+through as "unchanged".
 
 Usage:
     python3 tools/check_mapping_versions.py            # vs HEAD
@@ -23,11 +33,30 @@ git on PATH.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from bmwdiag.mapping.yamlsubset import loads  # noqa: E402  (stdlib-only package)
+
 VERSION_RE = re.compile(r'^\s*version:\s*"?(\d+)"?\s*$', re.MULTILINE)
+
+# The versioned data files. `git diff` is limited to these pathspecs and the
+# result filtered again by is_watched(), so a stray .yaml elsewhere under
+# config/ is not silently pulled in.
+WATCHED_PATHSPECS = ("mappings", "config/modes.yaml")
+
+
+def is_watched(path: str) -> bool:
+    """A mapping file, or the drive-mode table."""
+    if path == "config/modes.yaml":
+        return True
+    return path.startswith("mappings/") and path.endswith(".yaml")
 
 
 def git(*args: str) -> str:
@@ -43,7 +72,24 @@ def git_ok(*args: str):
 
 
 def parse_version(text: str) -> int:
-    """The mapping.version in `text`, or 0 if none (pre-versioning file)."""
+    """
+    The version in `text` - `mapping.version` for a mapping file, top-level
+    `version` for the mode table - or 0 if none (pre-versioning file).
+    Read from the parsed document, so a trailing comment on the version
+    line does not hide it; the regex is the fallback for text that does
+    not parse.
+    """
+    try:
+        doc = loads(text or "")
+    except Exception:
+        doc = None
+    if isinstance(doc, dict):
+        mapping = doc.get("mapping")
+        raw = mapping.get("version") if isinstance(mapping, dict) else doc.get("version")
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str) and raw.isdigit():
+            return int(raw)
     m = VERSION_RE.search(text or "")
     return int(m.group(1)) if m else 0
 
@@ -53,13 +99,34 @@ def strip_version(text: str) -> str:
     return VERSION_RE.sub("", text or "")
 
 
+def content(text: str):
+    """
+    The file as the loader sees it, minus its version: the parsed document
+    with `mapping.version` (mapping files) / top-level `version` (the mode
+    table) removed. Comments are gone because the parser drops them; a `#`
+    inside a quoted string or block scalar survives because it is data.
+
+    If the text does not parse, fall back to the raw text minus the version
+    line - the conservative side: a broken file compares as changed.
+    """
+    try:
+        doc = loads(text or "")
+    except Exception:
+        return strip_version(text)
+    if not isinstance(doc, dict):
+        return doc
+    doc = dict(doc)
+    doc.pop("version", None)
+    mapping = doc.get("mapping")
+    if isinstance(mapping, dict):
+        doc["mapping"] = {k: v for k, v in mapping.items() if k != "version"}
+    return doc
+
+
 def changed_mappings(ref: str):
-    """Tracked mappings/*.yaml that differ from `ref` (working tree)."""
-    out = git_ok("diff", "--name-only", ref, "--", "mappings") or ""
-    files = [
-        line for line in out.splitlines()
-        if line.startswith("mappings/") and line.endswith(".yaml")
-    ]
+    """Tracked watched files that differ from `ref` (working tree)."""
+    out = git_ok("diff", "--name-only", ref, "--", *WATCHED_PATHSPECS) or ""
+    files = [line for line in out.splitlines() if is_watched(line)]
     return sorted(set(files))
 
 
@@ -77,6 +144,7 @@ def main(argv=None) -> int:
 
     problems = []
     checked = 0
+    cosmetic = []                                        # differ in git, same to the loader
 
     for path in changed_mappings(args.against):
         try:
@@ -88,15 +156,17 @@ def main(argv=None) -> int:
         if old_text is None:
             continue                                     # newly added; version>=1 enforced by loader
 
-        if strip_version(new_text) == strip_version(old_text):
-            continue                                     # only the version line (or nothing) changed
+        if content(new_text) == content(old_text):
+            cosmetic.append(path)                        # only comments / the version (or nothing) changed
+            continue
 
         checked += 1
         old_v, new_v = parse_version(old_text), parse_version(new_text)
         if new_v <= old_v:
             problems.append(
                 f"  {path}: content changed but version did not increase "
-                f"(was {old_v}, now {new_v}) - bump `mapping.version`"
+                f"(was {old_v}, now {new_v}) - bump "
+                + ("`version`" if path == "config/modes.yaml" else "`mapping.version`")
             )
 
     if problems:
@@ -109,6 +179,8 @@ def main(argv=None) -> int:
 
     print(f"ok  mapping versions: {checked} changed file(s) properly bumped "
           f"(vs {args.against})")
+    for path in cosmetic:
+        print(f"    {path}: comments/version only - no bump needed")
     return 0
 
 

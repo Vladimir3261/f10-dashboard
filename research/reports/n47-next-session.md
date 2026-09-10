@@ -118,7 +118,7 @@ Every drive on 2026-08-29 split into 3–18 runs, because in
 try/except guarding decoding: a timeout or an `HsfzNack` against the
 *secondary* EGS at `0x18` tore down a healthy `0x12` link.
 
-Fixed in `69d879f`. Note the approach differs from what was planned
+Fixed in `37e27ca`. Note the approach differs from what was planned
 here: rather than adding typed exceptions at the `bmwdiag/protocol/`
 seam, faults are classified **structurally** (`_is_request_fault`), so
 `bmwdiag` still imports nothing about the transport. A consecutive-fault
@@ -329,5 +329,5 @@ is partly done and its follow-up is the soot analysis above.
   Runs recorded before the flag existed stay unknown (NULL) and must
   still be treated as suspect. See `docs/ROADMAP.md`.
 - **~~The fragmentation fix is written but unapplied.~~** Landed as
-  `69d879f`; the stash it referred to was dropped after review. See
+  `37e27ca`; the stash it referred to was dropped after review. See
   item 0 above.

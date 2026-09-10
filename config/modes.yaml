@@ -73,7 +73,10 @@ version: 3
 #   context  1/10 s   throttle, relthr, torque, rail, lambda
 #   slow     1/10 s   temps, voltage, fuel rate, cat, EGR
 #   rare     1/60 s   ambient, baro, fuel level, runtime, distance
-#   dde_dyn  ~1/11 s each (22 requests, round-robin, one per 0.5 s)
+#   dde_dyn  round-robin, one member per 0.5 s - 23 members with the
+#                     ./run_car.sh set (~1/11.5 s each), 34 with every
+#                     #15 candidate loaded (~1/17 s each); measured by
+#                     tests/test_final_test_readiness.py
 #   egs      2 Hz     engaged gear
 #   dde_slow 1/10 s   round-robin, one member per 10 s - the #15
 #                     candidates' adaptation/state reads (15 members

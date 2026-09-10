@@ -180,7 +180,7 @@ Stage status against the plan below:
 
 | was | now |
 |---|---|
-| drives fragmented into 3–18 runs | per-request faults skipped, link faults reconnect (`69d879f`) |
+| drives fragmented into 3–18 runs | per-request faults skipped, link faults reconnect (`37e27ca`) |
 | host clock rewrote timelines mid-drive | wait for NTP, label every run `clock_synced`, end a run on a step |
 | 7,740 requests/min, 83% of storage at 0.1–3.8% distinct | 2,735/min on physics-based wall-clock tiers, scaled by drive mode |
 | three interchangeable rate units | one: `seconds` |
@@ -206,7 +206,7 @@ its model (count 92 → 93), which costs fuel and is the classic oil-dilution
 path, on a car where they clean nothing.
 
 **2. Drives fragment into runs, which corrupts longitudinal analysis.**
-*(Fixed 2026-08-30, commit `69d879f`.)* Drive 7 recorded as 4 runs, not 1.
+*(Fixed 2026-08-30, commit `37e27ca`.)* Drive 7 recorded as 4 runs, not 1.
 Cause was error handling, not the cable: in `bmwdiag/mapping/execute.py` the
 transport call sat outside the try/except that guards decoding, so one
 `TimeoutError` (or an `HsfzNack` from the EGS) tore down the whole HSFZ link
