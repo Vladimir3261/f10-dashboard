@@ -1381,8 +1381,10 @@ def make_handler(cfg: Dict[str, Any]):
             path = urlsplit(self.path).path
             is_stream = path in STREAM_PATHS
             #: The bearer token for live.py rides through on the
-            #: odometer paths only; everywhere else the header is the
-            #: panel's own login and stops here.
+            #: odometer paths only, and only if it IS a bearer token
+            #: (see the scheme test below); everywhere else, and for any
+            #: other scheme, the header is the panel's own login and
+            #: stops here.
             forward_auth = path in ODOMETER_PATHS
             peer = self.client_address[0]
             #: Through the same parser as `bind`: the environment
@@ -1417,8 +1419,21 @@ def make_handler(cfg: Dict[str, Any]):
                 for name, value in self.headers.items():
                     lower = name.lower()
 
-                    if lower == "authorization" and forward_auth:
-                        conn.putheader(name, value)
+                    if lower == "authorization":
+                        #
+                        # Only a Bearer credential rides through, and
+                        # only on the odometer paths. `auth_basic off`
+                        # stops nginx ASKING for the vhost realm, not a
+                        # browser already holding it from SENDING it -
+                        # so without this scheme test the panel's own
+                        # Basic login would be forwarded to live.py,
+                        # which has no use for it. The docstring above
+                        # promises it stops here; this is what makes
+                        # that true.
+                        #
+                        if forward_auth and value.strip()[:7].lower() == "bearer ":
+                            conn.putheader(name, value)
+
                         continue
 
                     if lower in DROPPED_REQUEST_HEADERS:

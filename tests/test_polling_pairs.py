@@ -501,6 +501,13 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         # that adds a tenth to the wire traffic fails here rather than
         # on the car.
         #
+        # On the stale figures this replaces: the comment here used to
+        # give the pre-change baseline as 1098 / 340 / 518 / 3320, which
+        # had drifted - master itself measures 1132 / 357 / 552 / 3492,
+        # the numbers quoted above. So this re-base is the odometer
+        # class's cost alone; it is not absorbing an earlier unrecorded
+        # increase. Re-measure, do not copy, when re-basing again.
+        #
         budgets = {"normal": 1420, "long": 590, "sampling": 650, "debug": 3950}
 
         for name, budget in budgets.items():

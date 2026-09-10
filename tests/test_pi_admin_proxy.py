@@ -1162,6 +1162,38 @@ class TheOdometerPassthrough(ProxyCase):
         self.assertNotIn("Authorization",
                          self.runtime.last("/api/odometer")["headers"])
 
+    def test_only_a_bearer_scheme_is_forwarded_never_the_panels_own_basic(self):
+        """
+        `auth_basic off` stops nginx ASKING for the vhost realm; it does
+        not stop a browser that already holds that credential from
+        SENDING it to /api/odometer. Without a scheme test the panel
+        would forward its own login to live.py, which has no use for it -
+        against the docstring's promise that it stops here.
+        """
+        panels_own = {"Authorization": "Basic b3duZXI6cHc="}
+
+        for path in sorted(admin.ODOMETER_PATHS):
+            for name, header in (("basic", panels_own),
+                                 ("digest", {"Authorization": "Digest x=y"}),
+                                 ("no scheme", {"Authorization": "nav-token"}),
+                                 ("bearer, no space",
+                                  {"Authorization": "Bearernav-token"})):
+                with self.subTest(path=path, header=name):
+                    self.request(path, authed=False, headers=header)
+                    forwarded = self.runtime.last(path)["headers"]
+
+                    self.assertNotIn("Authorization", forwarded,
+                                     (path, name))
+
+        #: The real thing still rides through, in either case.
+        for value in ("Bearer nav-token", "bearer nav-token"):
+            self.request("/api/odometer", authed=False,
+                         headers={"Authorization": value})
+            self.assertEqual(
+                self.runtime.last("/api/odometer")["headers"]["Authorization"],
+                value,
+            )
+
     def test_the_query_string_rides_along(self):
         self.request("/api/odometer?since=1", authed=False, headers=self.BEARER)
 

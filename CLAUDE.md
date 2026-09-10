@@ -224,8 +224,13 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   `local/api-tokens.json`) — no Basic Auth, no session, no VIN, not on
   the share allowlist. 44BF sits in its own `odometer` class at 1 Hz
   (dpf-egr v4, modes v4; ~+180 exchanges/min, synthetic). Needs
-  `normal` or `long`; `sampling` sleeps it. `docs/ODOMETER_API.md`.
-- 1,095 tests, no car / no network / no BMW data required
+  `normal` or `long`; `sampling` sleeps it. Because the total can never
+  be corrected downwards, a sample that is not physically possible is
+  **refused and counted** (`rejected` in the body,
+  `odometer_rejected` in `/api/diagnostics`) rather than accumulated —
+  the mapping declares `valid_max` and the accumulator bounds the step
+  against elapsed time. `docs/ODOMETER_API.md`.
+- 1,388 tests, no car / no network / no BMW data required
   (`python3 tools/run_tests.py` prints the skip count; 3 skip without the
   research source cache). CI runs the same checks on every PR —
   `docs/CI.md`.
