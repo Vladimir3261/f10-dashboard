@@ -29,10 +29,10 @@ mapping:
   id: guard-fixture
   version: 3            # the data version
   description: "fixture #1"   # a '#' inside a string is content
-requests:
-  - id: rpm_read        # declaration order is the rotation order
+requests:               # keyed by id, like the real files: order is
+  rpm_read:             # the key order, which a dict `==` ignores
     pid: 0x0C
-  - id: speed_read
+  speed_read:
     pid: 0x0D
 channels:
   - id: rpm
@@ -40,14 +40,14 @@ channels:
 """
 
 REQUESTS_SWAPPED = MAPPING.replace(
-    """  - id: rpm_read        # declaration order is the rotation order
+    """  rpm_read:             # the key order, which a dict `==` ignores
     pid: 0x0C
-  - id: speed_read
+  speed_read:
     pid: 0x0D
 """,
-    """  - id: speed_read
+    """  speed_read:
     pid: 0x0D
-  - id: rpm_read        # declaration order is the rotation order
+  rpm_read:             # the key order, which a dict `==` ignores
     pid: 0x0C
 """)
 assert REQUESTS_SWAPPED != MAPPING
@@ -171,7 +171,10 @@ class VersionGuard(unittest.TestCase):
         """
         The loader numbers requests by position and the rotation is
         sorted by that number: swapping two requests changes the order
-        the car is polled in (B1 on PR #47 - a dict comparison missed it).
+        the car is polled in (B1 on PR #47 - a dict comparison missed
+        it, which is why the fixture's requests are a keyed mapping, as
+        in the real files, and not a list: a list compares in order
+        either way and would not pin the fix).
         """
         self.write("mappings/obd/engine.yaml", REQUESTS_SWAPPED)
         code, out = self.run_guard()
