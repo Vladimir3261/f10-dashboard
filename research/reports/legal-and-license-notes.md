@@ -47,8 +47,7 @@ now, while it is cheap. Licenses were read at the pinned revisions in
    history from 2026-08-25 until **2026-09-10, when the history was
    rewritten** (`git filter-repo --strip-blobs-with-ids`, force-pushed;
    every commit after the first re-hashed, tree at HEAD unchanged) —
-   the record, the blob ids and the one remaining step (GitHub's
-   cached views) are in `docs/HISTORY_REWRITE.md`.
+   the record and the blob ids are in `docs/HISTORY_REWRITE.md`.
 2. **`ediabasx-docs-sgbd`** publishes whole PRG-derived tables. We used
    it only for individual row cross-checks (a handful of quoted rows
    with citations); do not bulk-scrape it, and do not mirror it.

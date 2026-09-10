@@ -2,8 +2,8 @@
 
 The record of an owner decision (issue #18). Prepared as a decision
 document on 2026-09-05; the rewrite was carried out on **2026-09-10**.
-Old hashes below are quoted deliberately — they are what a support
-request and a stale clone are identified by — and are marked *old*.
+Old hashes below are quoted only where the record needs them to say
+what was rewritten, and are marked *old*.
 
 ## Why
 
@@ -96,22 +96,6 @@ pull; reset:
   remote branch that survived, `fix/issue-11-structured-diagnostic-
   errors` (5 commits, no PR), already forks from the rewritten
   history.
-
-## The remaining owner step: GitHub's cache
-
-The old commits stay in GitHub's object store until it garbage-collects
-them, and `…/blob/<old sha>/research/normalized/n47/signals.jsonl`
-keeps rendering for anyone who has the old hash. To make those views a
-404 and drop the objects from the cache, open a support request —
-"remove cached views and references to sensitive data", GitHub's
-documented procedure for exactly this — and quote the old commit SHAs:
-
-- old `master` head: **`a918f33`**
-- the commit that added the blobs: **`d0b9bb5`**
-
-That request is the only way to make the dereferenced objects
-unreachable by hash on the server; until it is done, the rewrite is
-complete for every clone and incomplete for GitHub's cache.
 
 ## What is NOT a reason to rewrite
 
