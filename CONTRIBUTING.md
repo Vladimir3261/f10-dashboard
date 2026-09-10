@@ -9,12 +9,12 @@ review criteria.
 
 ## Licence
 
-LICENSE (to be added by the owner). Until it exists nothing here is
-licensed for reuse, and a contribution is offered under whatever
-licence the owner then chooses for the code. The *data* in the
-repository is a separate question from the code — `THIRD_PARTY.md` and
-`research/reports/legal-and-license-notes.md` say which facts came
-from where and under what terms.
+The code is under the MIT licence in `LICENSE`; a contribution is
+offered under the same terms. The *data* in the repository is a
+separate question from the code — the scope note in `LICENSE`,
+`THIRD_PARTY.md` and `research/reports/legal-and-license-notes.md` say
+which facts came from where and under what terms, and `LICENSE` does
+not relicense any of it.
 
 ## Before opening a pull request
 

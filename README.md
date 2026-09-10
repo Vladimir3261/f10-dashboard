@@ -221,8 +221,9 @@ more reason the database is gitignored.
 
 ## Licence, contributing, security
 
-No LICENSE file yet — the owner is choosing one; until then nothing
-here is licensed for reuse. `CONTRIBUTING.md` (code),
+The code is MIT-licensed (`LICENSE`); the vehicle data is not
+relicensed by it — every mapping fact carries its own source and
+terms, see the scope note in `LICENSE`. `CONTRIBUTING.md` (code),
 `CONTRIBUTING_DATA.md` (mapping evidence and provenance),
 `THIRD_PARTY.md` (where every cited fact came from, and under what
 licence) and `SECURITY.md` (scope and reporting) are the policy; CI
