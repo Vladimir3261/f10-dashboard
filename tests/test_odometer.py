@@ -57,7 +57,8 @@ def touch_forward(path: str, seconds: float = 5.0) -> None:
 #: The contract's body keys, docs/ODOMETER_API.md.
 CONTRACT_KEYS = {
     "t", "epoch", "odometer_m", "odometer_t", "speed_kmh", "speed_t",
-    "connected", "clock_synced", "resets", "source", "mapping_ver",
+    "connected", "clock_synced", "resets", "rejected", "source",
+    "mapping_ver",
 }
 
 
@@ -89,6 +90,7 @@ class TheAccumulator(unittest.TestCase):
         self.assertFalse(snap["connected"])
         self.assertIsNone(snap["clock_synced"])
         self.assertEqual(snap["resets"], 0)
+        self.assertEqual(snap["rejected"], 0)
         self.assertEqual(snap["source"], "n47d_odometer_m")
         self.assertIsNone(snap["mapping_ver"])
         self.assertEqual(set(snap) | {"t"}, CONTRACT_KEYS)
@@ -143,6 +145,194 @@ class TheAccumulator(unittest.TestCase):
         self.assertEqual(odo.current()[1]["resets"], 3)
         #: 4 + 31 (first run) + 2 + 1 + 97 + 0 + 1 + 249 + 0 + 7
         self.assertEqual(last, 392)
+
+    def test_an_unflagged_sentinel_is_refused_not_accumulated(self):
+        """
+        0xFFFFFFFF as metres is 4.29 million km. `odometer_m` can never
+        be corrected downwards, so accumulating it once would poison the
+        value for the life of the process - it was measured doing exactly
+        that: 1000, 0xFFFFFFFF, 1100 -> odometer_m = 4294967395, for ever.
+
+        The mapping now flags this raw as `clipped` (see the mapping test
+        below) so it never even reaches here as usable; this covers the
+        second layer, for a sentinel that arrives unflagged anyway.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=0xFFFFFFFF, at=2.0)))
+            odo.feed(*cycle(raw=1100, at=3.0))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 100)
+        self.assertEqual(snap["resets"], 0)
+        self.assertEqual(snap["rejected"], 1)
+        #: The anchor never moved, so the good sample after it is a plain
+        #: 100 m delta from 1000, not a delta from 0xFFFFFFFF.
+        self.assertEqual(snap["odometer_t"], 3.0)
+
+    def test_a_value_over_the_declared_ceiling_is_refused(self):
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(
+                odo.feed(*cycle(raw=live.ODOMETER_MAX_M + 1, at=2.0))
+            )
+            #: Exactly at the ceiling is IN range - but it is still a
+            #: forward jump of 2,000 km in a second, so the delta bound
+            #: refuses it. Two independent layers.
+            self.assertFalse(odo.feed(*cycle(raw=live.ODOMETER_MAX_M, at=3.0)))
+
+        self.assertEqual(odo.current()[1]["odometer_m"], 0)
+        self.assertEqual(odo.current()[1]["rejected"], 2)
+
+    def test_a_small_backwards_blip_is_refused_not_credited_as_a_reset(self):
+        """
+        Measured on the unbounded version: 500000 then 499999 - a ONE
+        METRE dip - was read as a regeneration and added 499,999 m. A
+        regeneration restarts the counter at zero; this did not.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=500000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=499999, at=2.0)))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        self.assertEqual(snap["resets"], 0)
+        self.assertEqual(snap["rejected"], 1)
+
+    def test_a_large_backwards_step_is_refused_not_credited_as_a_reset(self):
+        """900000 -> 800000 credited 800 km of travel. It is a glitch."""
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=900000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=800000, at=2.0)))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        self.assertEqual(snap["resets"], 0)
+        self.assertEqual(snap["rejected"], 1)
+
+    def test_an_impossible_forward_jump_is_refused(self):
+        """A one-second gap cannot contain 100 km."""
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=101000, at=2.0)))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        self.assertEqual(snap["rejected"], 1)
+
+        #: A real 1 Hz step at any speed this car reaches still lands.
+        odo.feed(*cycle(raw=1036, at=3.0))
+        self.assertEqual(odo.current()[1]["odometer_m"], 36)
+        self.assertEqual(odo.current()[1]["rejected"], 1)
+
+    def test_the_forward_bound_follows_the_elapsed_time_not_a_constant(self):
+        """
+        The same delta is refused across one second and accepted across
+        ten minutes - because across ten minutes of link outage the
+        ECU's counter really did advance by real driven distance, and
+        refusing that would break the reconnect bridge the API promises.
+        """
+        near = live.Odometer()
+        near.feed(*cycle(raw=0, at=1000.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(near.feed(*cycle(raw=20000, at=1001.0)))
+
+        far = live.Odometer()
+        far.feed(*cycle(raw=0, at=1000.0))
+        self.assertTrue(far.feed(*cycle(raw=20000, at=1600.0)))
+        self.assertEqual(far.current()[1]["odometer_m"], 20000)
+        self.assertEqual(far.current()[1]["rejected"], 0)
+
+    def test_a_clock_step_backwards_does_not_open_the_bound(self):
+        """
+        The Pi has no RTC. A negative span is clamped to zero rather
+        than trusted - a negative ceiling would refuse everything, and a
+        trusted one would be a bound computed from a lie.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=2000.0))
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(odo.feed(*cycle(raw=101000, at=1000.0)))
+
+        #: A plausible step still lands, even with the stamp gone backwards.
+        self.assertTrue(odo.feed(*cycle(raw=1030, at=1000.0)))
+        self.assertEqual(odo.current()[1]["odometer_m"], 30)
+        self.assertEqual(odo.current()[1]["rejected"], 1)
+
+    def test_a_legitimate_reset_to_a_small_value_is_still_bridged(self):
+        """
+        The thing the bounds must NOT break: a real regeneration. The
+        counter restarts near zero, and what it counts now was driven
+        after the restart, so it is added and counted as a reset.
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=384000, at=1.0))
+        odo.feed(*cycle(raw=384020, at=2.0))
+        self.assertTrue(odo.feed(*cycle(raw=8, at=3.0)))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 28)
+        self.assertEqual(snap["resets"], 1)
+        self.assertEqual(snap["rejected"], 0)
+
+    def test_normal_accumulation_resumes_straight_after_a_reset(self):
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=384000, at=1.0))
+        odo.feed(*cycle(raw=8, at=2.0))          # the regeneration
+        odo.feed(*cycle(raw=30, at=3.0))
+        odo.feed(*cycle(raw=55, at=4.0))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 55)
+        self.assertEqual(snap["resets"], 1)
+        self.assertEqual(snap["rejected"], 0)
+        self.assertEqual(snap["odometer_t"], 4.0)
+
+    def test_refusals_are_counted_published_and_logged_only_a_few_times(self):
+        """
+        The whole point is that the client can TELL. `rejected` is in
+        the body, and the journal gets a bounded number of lines - not
+        one per second for a channel that is broken (this runs on an SD
+        card).
+        """
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+        buf = io.StringIO()
+
+        with redirect_stdout(buf):
+            for i in range(40):
+                odo.feed(*cycle(raw=0xFFFFFFFF, at=2.0 + i))
+
+        snap = odo.current()[1]
+        self.assertEqual(snap["rejected"], 40)
+        self.assertEqual(snap["odometer_m"], 0)
+
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), live.ODOMETER_LOG_REJECTS, lines)
+        self.assertIn("further refusals counted, not logged", lines[-1])
+
+    def test_a_refusal_is_published_so_a_client_hears_about_it(self):
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+        version = odo.current()[0]
+
+        with redirect_stdout(io.StringIO()):
+            odo.feed(*cycle(raw=0xFFFFFFFF, at=2.0))
+
+        self.assertGreater(odo.current()[0], version)
+        self.assertEqual(odo.current()[1]["rejected"], 1)
 
     def test_a_flagged_reading_is_ignored(self):
         odo = live.Odometer()
@@ -290,6 +480,9 @@ class TheTokenStore(unittest.TestCase):
                 for i, t in enumerate(tokens)
             ]}, fh)
 
+        #: What tools/api_token.py writes, so the store's mode warning
+        #: stays out of these tests - it has one of its own below.
+        os.chmod(self.path, 0o600)
         #: Each rewrite lands strictly later than the one before, even
         #: inside one filesystem tick and at the same size.
         self.writes = getattr(self, "writes", 0) + 1
@@ -320,6 +513,129 @@ class TheTokenStore(unittest.TestCase):
                     "Bearer alpha", "Basic alpha-token", "alpha-token",
                     "Token alpha-token", "Bearer ALPHA-TOKEN"):
             self.assertFalse(store.validate(bad), repr(bad))
+
+    def test_validate_is_total_and_never_raises(self):
+        """
+        `validate` answers True or False for ANY header value. It is
+        called on an internet-reachable path with no credential in front
+        of it, so an exception there is a remote denial of service (no
+        response at all) plus a remote log flood.
+
+        The high-byte cases are what `hmac.compare_digest` refuses when
+        both sides are `str`: the store holds BYTES and encodes the
+        presented value the same way, which is what makes them a plain
+        False instead of a TypeError.
+        """
+        self.write(["alpha-token"])
+        store = live.ApiTokens(self.path)
+
+        #: The comparison is on bytes, both sides. This is the property
+        #: the crash came from not having.
+        self.assertTrue(all(isinstance(t, bytes) for t in store._tokens))
+
+        hostile = [
+            None, "", " ", "\x00", "Bearer", "Bearer ", "Bearer    ",
+            "bearer\talpha-token",                  # tab, not a space
+            "Bearerlpha-token",                     # no separator
+            "Basic alpha-token", "Token alpha-token", "alpha-token",
+            "Bearer \xfc\xfd\xfe",                  # latin-1 high bytes
+            "Bearer ÿ",                         # the top of latin-1
+            "Bearer \U0001f697",                     # beyond latin-1
+            "Bearer " + "中" * 40,               # CJK, beyond latin-1
+            "Bearer \x01\x02\x03\x0b",               # control characters
+            "Bearer " + "A" * 100000,                # absurd length
+            "Bearer " + "\xff" * 100000,
+            "\xff" * 100000,
+            "Bearer alpha-token\x00",                # a real token, plus
+            "Bearer \x00alpha-token",
+            "Bearer alpha-token" + " " * 600,        # padded past the cap
+        ]
+
+        for value in hostile:
+            with self.subTest(value=repr(value)[:60]):
+                self.assertIs(store.validate(value), False)
+
+        #: And the real one still works, after all of that.
+        self.assertTrue(store.validate("Bearer alpha-token"))
+
+    def test_an_authorization_value_past_the_cap_is_refused_outright(self):
+        """
+        A cap on the header length bounds the work an unauthenticated
+        caller can ask for. It is an order of magnitude above a real
+        credential, so it can only ever refuse rubbish.
+        """
+        self.write(["alpha-token"])
+        store = live.ApiTokens(self.path)
+        header = "Bearer alpha-token"
+
+        self.assertGreater(live.MAX_AUTH_HEADER_LEN, 4 * len(header))
+        self.assertTrue(store.validate(header))
+        #: Exactly at the cap: still parsed (and refused on its merits).
+        at_cap = "Bearer " + "A" * (live.MAX_AUTH_HEADER_LEN - 7)
+        self.assertEqual(len(at_cap), live.MAX_AUTH_HEADER_LEN)
+        self.assertFalse(store.validate(at_cap))
+        self.assertFalse(store.validate(at_cap + "A"))
+
+    def test_a_token_beyond_latin1_is_dropped_not_a_store_wide_failure(self):
+        """
+        A hand-edited store holding a codepoint no request could carry
+        loses THAT entry, not every other token with it.
+        """
+        self.write(["alpha-token", "\U0001f697-token", "beta-token"])
+        store = live.ApiTokens(self.path)
+
+        self.assertEqual(store.count(), 2)
+        self.assertTrue(store.validate("Bearer alpha-token"))
+        self.assertTrue(store.validate("Bearer beta-token"))
+        self.assertFalse(store.validate("Bearer \U0001f697-token"))
+
+    def test_a_rewrite_that_keeps_the_mtime_second_and_size_is_seen(self):
+        """
+        The re-read key is `st_mtime_ns`, not the float `st_mtime`: a
+        rewrite of the same size inside one second used to leave a
+        revoked token working.
+        """
+        self.write(["alpha-token"])
+        store = live.ApiTokens(self.path)
+        self.assertTrue(store.validate("Bearer alpha-token"))
+
+        st = os.stat(self.path)
+        #: Same size (same-length token), same whole second, one ns later.
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"tokens": [
+                {"name": "t0", "token": "gamma-token",
+                 "created": "2026-09-10T00:00:00Z"}
+            ]}, fh)
+
+        os.chmod(self.path, 0o600)
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+        after = os.stat(self.path)
+        self.assertEqual(after.st_size, st.st_size)
+        self.assertEqual(int(after.st_mtime), int(st.st_mtime))
+
+        self.assertFalse(store.validate("Bearer alpha-token"))
+        self.assertTrue(store.validate("Bearer gamma-token"))
+
+    def test_a_world_readable_store_is_used_but_says_so_once(self):
+        """
+        docs/ODOMETER_API.md states mode 0600 as a property of the
+        system. A store loosened by hand still works - failing closed on
+        a mode would lock the owner out of their own car for a chmod -
+        but it is not silent, and it is not noisy either.
+        """
+        self.write(["alpha-token"])
+        os.chmod(self.path, 0o644)
+        buf = io.StringIO()
+
+        with redirect_stdout(buf):
+            store = live.ApiTokens(self.path)
+            self.assertTrue(store.validate("Bearer alpha-token"))
+            self.assertTrue(store.validate("Bearer alpha-token"))
+            self.assertEqual(store.count(), 1)
+
+        said = buf.getvalue()
+        self.assertEqual(said.count("mode 0644"), 1, said)
+        self.assertNotIn("alpha-token", said)
 
     def test_a_rewrite_is_picked_up_without_a_restart(self):
         self.write(["alpha-token"])
@@ -362,6 +678,7 @@ class TheTokenStore(unittest.TestCase):
             json.dump({"tokens": [{"name": "blank", "token": ""},
                                   {"name": "none"}, "junk", None]}, fh)
 
+        os.chmod(self.path, 0o600)
         store = live.ApiTokens(self.path)
         self.assertEqual(store.count(), 0)
         self.assertFalse(store.validate("Bearer "))
@@ -506,6 +823,47 @@ class EndpointCase(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(), dict(exc.headers)
 
+    def raw_get(self, path, auth_bytes):
+        """
+        `GET path` with a hand-built `Authorization:` line, so a value
+        urllib would refuse to send (a high byte, an absurd length) still
+        reaches the handler. Returns (status line, whole response bytes)
+        and the stderr the server produced while answering - a request
+        that is answered by an unhandled exception writes a traceback
+        there and nothing at all to the socket.
+        """
+        buf = io.StringIO()
+        request = b"GET " + path.encode() + b" HTTP/1.1\r\n"
+        request += b"Host: 127.0.0.1\r\nConnection: close\r\n"
+        request += b"Authorization: " + auth_bytes + b"\r\n\r\n"
+
+        with redirect_stderr(buf):
+            sock = socket.create_connection(("127.0.0.1", self.port),
+                                            timeout=5)
+
+            try:
+                sock.sendall(request)
+                chunks = []
+
+                while True:
+                    chunk = sock.recv(65536)
+
+                    if not chunk:
+                        break
+
+                    chunks.append(chunk)
+            finally:
+                sock.close()
+
+            #: The handler thread writes its traceback after the socket
+            #: closes; give it a moment to land inside the redirect.
+            time.sleep(0.2)
+
+        raw = b"".join(chunks)
+        status = raw.split(b"\r\n", 1)[0].decode("latin-1") if raw else ""
+
+        return status, raw, buf.getvalue()
+
     def open_stream(self, headers):
         """
         A raw socket on the stream, for reading it frame by frame with
@@ -619,6 +977,57 @@ class TheEndpoint(EndpointCase):
                 self.assertEqual(headers.get("WWW-Authenticate"), "Bearer")
                 self.assertEqual(json.loads(body), {"error": "unauthorized"})
 
+    def test_a_hostile_authorization_value_is_the_documented_401(self):
+        """
+        Every shape of rubbish an unauthenticated caller can put in the
+        header gets the SAME 401 the contract promises - a response, not
+        a dropped connection, and not one line of traceback.
+
+        The non-ASCII case is the one that used to crash: http.server
+        decodes header values as latin-1, and `hmac.compare_digest`
+        refuses two `str` that are not both ASCII, so a single high byte
+        raised TypeError inside do_GET. The caller got no HTTP response
+        at all and the Pi's journal got ~24 lines per request - reachable
+        from the internet with no credential, since these are the two
+        nginx locations with `auth_basic off` and the two paths the panel
+        passes through ahead of its own login.
+        """
+        hostile = {
+            "a high byte": b"Bearer \xfc\xfd\xfe",
+            "high bytes only": b"\x80\x81\x82",
+            "a utf-8 emoji": "Bearer 🚗".encode(),
+            "an empty bearer value": b"Bearer ",
+            "bearer with no space": b"Bearer",
+            "a wrong scheme": b"Basic Zm9vOmJhcg==",
+            "an empty value": b"",
+            "control characters": b"Bearer \x01\x02\x07\x0b\x0c",
+            "an oversized value": b"Bearer " + b"A" * 8000,
+            "an oversized non-ascii value": b"Bearer " + b"\xe9" * 8000,
+        }
+
+        for name, value in hostile.items():
+            for path in ("/api/odometer", "/api/odometer/stream"):
+                status, raw, err = self.raw_get(path, value)
+
+                with self.subTest(header=name, path=path):
+                    self.assertIn(" 401 ", status, (name, path, raw[:200]))
+                    self.assertIn(b"WWW-Authenticate: Bearer", raw)
+                    self.assertIn(b'{"error": "unauthorized"}', raw)
+                    #: Names nothing: not the token, not the store.
+                    self.assertNotIn(self.token.encode(), raw)
+                    self.assertNotIn(b"api-tokens", raw)
+                    #: And no traceback, on any of them.
+                    self.assertNotIn("Traceback", err, (name, path, err))
+                    self.assertNotIn("TypeError", err, (name, path, err))
+
+    def test_a_hostile_value_leaves_the_endpoint_working(self):
+        """The crash also closed the connection; the server survives."""
+        self.raw_get("/api/odometer", b"Bearer \xff\xff\xff")
+        code, body, _ = self.get("/api/odometer", self.bearer())
+
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["source"], "n47d_odometer_m")
+
     def test_a_revoked_token_is_401_on_the_next_request(self):
         code, body, headers = self.get("/api/odometer", self.bearer())
         self.assertEqual(code, 200)
@@ -652,6 +1061,7 @@ class TheEndpoint(EndpointCase):
         self.assertFalse(doc["connected"])
         self.assertIsNone(doc["clock_synced"])
         self.assertEqual(doc["resets"], 0)
+        self.assertEqual(doc["rejected"], 0)
         self.assertEqual(doc["source"], "n47d_odometer_m")
         self.assertEqual(doc["mapping_ver"], 4)
 
@@ -674,6 +1084,23 @@ class TheEndpoint(EndpointCase):
         self.assertFalse(doc["connected"])
         self.assertEqual(doc["odometer_m"], 750)
         self.assertEqual(doc["speed_kmh"], 61)
+
+    def test_the_body_reports_refused_samples_so_a_client_can_see_them(self):
+        self.odometer.feed(*cycle(raw=5000, speed=42, at=1000.0),
+                           connected=True)
+        doc = json.loads(self.get("/api/odometer", self.bearer())[1])
+        self.assertEqual(doc["rejected"], 0)
+
+        with redirect_stdout(io.StringIO()):
+            self.odometer.feed(*cycle(raw=0xFFFFFFFF, at=1001.0))
+            #: Backwards, but nowhere near a post-reset value.
+            self.odometer.feed(*cycle(raw=4000, at=1002.0))
+
+        doc = json.loads(self.get("/api/odometer", self.bearer())[1])
+        #: The total did not move, and the body says why it did not.
+        self.assertEqual(doc["odometer_m"], 0)
+        self.assertEqual(doc["rejected"], 2)
+        self.assertEqual(doc["resets"], 0)
 
     def test_the_body_carries_nothing_of_the_vehicle_or_the_session(self):
         self.odometer.feed(*cycle(raw=5000, speed=42, at=1000.0),
@@ -857,6 +1284,123 @@ class TheDiagnosticsView(unittest.TestCase):
         diag.clear("link down")
         self.assertEqual(diag.loaded()["api_tokens"], 2)
 
+    def test_the_refusal_count_is_visible_in_the_diagnostics_view(self):
+        """
+        "sent with no ok is a channel the car is not answering" - and a
+        channel answering with impossible values is the same class of
+        problem. The count is the number only, no distance, no epoch.
+        """
+        diag = live.Diagnostics()
+        self.assertEqual(diag.loaded()["odometer_rejected"], 0)
+
+        odo = live.Odometer()
+        diag.publish(odometer=odo)
+        odo.feed(*cycle(raw=1000, at=1.0))
+        self.assertEqual(diag.loaded()["odometer_rejected"], 0)
+
+        with redirect_stdout(io.StringIO()):
+            odo.feed(*cycle(raw=0xFFFFFFFF, at=2.0))
+
+        self.assertEqual(diag.loaded()["odometer_rejected"], 1)
+
+        #: A cleared session (link down) keeps it, like the token count.
+        diag.clear("link down")
+        self.assertEqual(diag.loaded()["odometer_rejected"], 1)
+        self.assertNotIn(odo.epoch, json.dumps(diag.loaded()))
+
+
+class TheMappingBounds(unittest.TestCase):
+    """
+    The first of the two layers: the mapping declares the plausibility
+    ceiling, so an absurd read arrives already flagged and the
+    accumulator's "flagged readings are ignored" guard has something to
+    do. Without it that guard was vacuous for this channel - nothing in
+    the file could ever set a flag.
+    """
+
+    @staticmethod
+    def signals():
+        from bmwdiag.mapping.loader import load_file
+
+        mapping = load_file(os.path.join(
+            support.ROOT, "mappings", "candidates", "bmw", "dde", "n47",
+            "d72n47a0_dpf_egr.yaml",
+        ))
+        request = next(r for r in mapping.requests
+                       if any(s.key == live.ODOMETER_SOURCE for s in r.signals))
+
+        return {s.key: s for s in request.signals}
+
+    def decode(self, key, raw):
+        from bmwdiag.mapping.decoder import read_value
+
+        return read_value(self.signals()[key].decode,
+                          raw.to_bytes(4, "big"))
+
+    def test_the_metre_channel_declares_the_ceiling_live_py_mirrors(self):
+        decode = self.signals()[live.ODOMETER_SOURCE].decode
+
+        self.assertEqual(decode.valid_max, float(live.ODOMETER_MAX_M))
+        self.assertEqual(decode.valid_max, 2000000.0)
+        #: No invented sentinel: no `invalid:` value for this signal is
+        #: known from any source, and an all-ones read is caught by the
+        #: ceiling as `clipped` instead.
+        self.assertEqual(decode.invalid, ())
+        #: A uint32 with no offset cannot decode below zero, so a
+        #: valid_min could never fire.
+        self.assertIsNone(decode.valid_min)
+
+    def test_an_out_of_range_read_arrives_flagged(self):
+        self.assertEqual(self.decode(live.ODOMETER_SOURCE, 0).quality, "ok")
+        self.assertEqual(
+            self.decode(live.ODOMETER_SOURCE, 2000000).quality, "ok")
+        self.assertEqual(
+            self.decode(live.ODOMETER_SOURCE, 2000001).quality, "clipped")
+        self.assertEqual(
+            self.decode(live.ODOMETER_SOURCE, 0xFFFFFFFF).quality, "clipped")
+
+    def test_a_flagged_read_never_reaches_the_accumulator(self):
+        """The two layers joined up: the decoder's label, the guard."""
+        odo = live.Odometer()
+        odo.feed(*cycle(raw=1000, at=1.0))
+        reading = self.decode(live.ODOMETER_SOURCE, 0xFFFFFFFF)
+
+        self.assertFalse(reading.usable)
+        self.assertFalse(odo.feed(
+            {live.ODOMETER_SOURCE: reading}, {live.ODOMETER_SOURCE: 2.0}
+        ))
+        snap = odo.current()[1]
+        self.assertEqual(snap["odometer_m"], 0)
+        #: Dropped by quality, before the accumulator's own bounds - so
+        #: it is not counted as a refusal. The recorded sample carries
+        #: the `clipped` label, which is where that fact lives.
+        self.assertEqual(snap["rejected"], 0)
+
+    def test_the_km_channel_is_untouched_by_the_metre_channel_s_bound(self):
+        """
+        `n47d_dist_since_regen` is sgbd_derived and verified, and its
+        decode is a frozen contract - value, type AND quality label. The
+        bound went on the new metre signal only; nothing was added to
+        this one, so every input decodes exactly as it did before.
+        """
+        decode = self.signals()["n47d_dist_since_regen"].decode
+
+        self.assertIsNone(decode.valid_max)
+        self.assertIsNone(decode.valid_min)
+        self.assertEqual(decode.invalid, ())
+        self.assertEqual(decode.saturated, ())
+
+        for raw in (0, 1, 999, 1000, 29100, 37100, 2000000, 2000001,
+                    0xFFFFFFFE, 0xFFFFFFFF):
+            reading = self.decode("n47d_dist_since_regen", raw)
+
+            with self.subTest(raw=raw):
+                #: Bit-exact: the same float the divide+round produces,
+                #: and `ok` even where the metre channel is `clipped`.
+                self.assertEqual(repr(reading.value),
+                                 repr(round(raw / 1000.0, 2)))
+                self.assertEqual(reading.quality, "ok")
+
 
 class TheWiring(unittest.TestCase):
     """The poll loop feeds the accumulator; a static check, no car."""
@@ -874,7 +1418,8 @@ class TheWiring(unittest.TestCase):
     def test_main_builds_one_odometer_and_one_store_and_hands_them_over(self):
         self.assertEqual(self.main.count("Odometer()"), 1)
         self.assertIn("ApiTokens(args.api_tokens)", self.main)
-        self.assertIn("diag.publish(api_tokens=api_tokens)", self.main)
+        self.assertIn("diag.publish(api_tokens=api_tokens, odometer=odometer)",
+                      self.main)
 
     def test_the_source_is_a_channel_the_run_car_set_declares(self):
         from bmwdiag.mapping.loader import load_file

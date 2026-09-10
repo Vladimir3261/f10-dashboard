@@ -44,14 +44,74 @@ says, not what a survey measured.
 life of the runtime process**:
 
 - each accepted 44BF sample adds `raw - prev_raw` when that is ≥ 0;
-- when `raw < prev_raw` — the ECU counter restarted at zero, which is
-  what a successful regeneration looks like from here — it adds `raw`
-  (the distance driven after the reset) and counts one `resets` event.
+- when `raw < prev_raw` **and `raw` is small enough to be a post-reset
+  value** — the ECU counter restarted at zero, which is what a
+  successful regeneration looks like from here — it adds `raw` (the
+  distance driven after the reset) and counts one `resets` event.
   The metres driven between the last sample and the reset are lost:
   one sample's worth at 1 Hz;
 - a quality-flagged reading (`Reading.quality != "ok"`) is ignored,
   never accumulated;
 - the first accepted sample of a process is `odometer_m = 0`.
+
+### Refused samples
+
+Because the total is monotonic **and can never be corrected
+downwards**, a single implausible sample would poison the value for the
+life of the process. Two independent layers stop that, and everything
+they refuse is counted in **`rejected`** and published in the body:
+
+1. **The mapping declares the range.** `n47d_odometer_m` carries
+   `valid_max: 2000000` (2,000 km) in
+   `d72n47a0_dpf_egr.yaml` — this is *distance since the last
+   successful regeneration*, and the interval between regens on this car
+   is a few hundred km, so 2,000 km leaves the largest plausible
+   interval several times over. A read outside it decodes to its
+   bit-exact number with quality `clipped`, so the "flagged readings are
+   ignored" rule above catches it before the accumulator does; the
+   recorded sample keeps the `clipped` label
+   ([`DATA_QUALITY.md`](DATA_QUALITY.md)). A `0xFFFFFFFF` (4.29 million
+   km) is three orders of magnitude outside the bound. No `invalid:`
+   sentinel is declared — none is known from any source, and inventing
+   one would be inventing BMW data. The km channel
+   `n47d_dist_since_regen` is deliberately **not** bounded: it is
+   verified, `sgbd_derived`, and its decode and quality label are a
+   frozen contract.
+2. **The accumulator refuses a transition physics cannot produce**, and
+   counts it:
+   - a raw value outside `0 .. 2,000,000` m (the same ceiling, mirrored
+     in `live.py` as `ODOMETER_MAX_M`, so the guarantee does not depend
+     on a mapping file the runtime may be started without);
+   - a **backwards step that is not to a post-reset value**. A
+     regeneration restarts the counter at zero; a step from 900 km to
+     800 km does not, and crediting it as 800 km of travel would be
+     absurd. The threshold is the same time-based window as below, so a
+     reset seen one second later must land within ~1 km of zero;
+   - a **forward step larger than the elapsed time between the two
+     acquisition timestamps could hold** at a 300 km/h ceiling plus
+     1 km of slack. A one-second gap cannot contain 100 km. The bound
+     is on *time*, not a constant, so a long link outage — during which
+     the ECU's counter really did advance by real driven distance —
+     still bridges correctly. A host clock that stepped backwards
+     yields a negative span, which is clamped to zero rather than
+     trusted.
+
+The slack is a kilometre rather than a hundred metres for one honest
+reason: **the rate at which the DDE itself updates 44BF is unknown** —
+it has never been measured. If the ECU refreshes the counter in steps,
+a step arrives as one jump carrying the whole interval's distance, and
+refusing that would be refusing the truth. 1 km allows an update
+interval up to ~27 s at this car's real top speed, while still being
+100× below the smallest bogus forward step worth catching.
+
+A refused sample **does not move the anchor**: the next credible sample
+carries on from the last one that was believed, so a single blip costs
+nothing. The first few refusals get one log line each (bounded — this
+runs on an SD card), and `rejected` is also reported as
+`odometer_rejected` in `/api/diagnostics`. **A `rejected` that keeps
+climbing on a healthy car means the channel is misbehaving and the
+total has stopped following the car** — and it is the signal to go and
+measure that ECU update rate.
 
 `epoch` is a random id minted when `live.py` starts. It changes
 **only** when the process restarts. An ECU reconnect keeps it — the
@@ -71,11 +131,12 @@ as one reset, not as a jump backwards.
   "epoch": "9f3a1c6e",
   "odometer_m": 37104,
   "odometer_t": 1789060085.364,
-  "speed_kmh": 47,
+  "speed_kmh": 47.0,
   "speed_t": 1789060085.751,
   "connected": true,
   "clock_synced": true,
   "resets": 0,
+  "rejected": 0,
   "source": "n47d_odometer_m",
   "mapping_ver": 4
 }
@@ -93,11 +154,27 @@ as one reset, not as a jump backwards.
   (`null` before the first connection). The Pi has no RTC; an unsynced
   `odometer_t` is still monotonic but not comparable to anything else.
 - `resets`: how many ECU counter resets this epoch has bridged.
+- `rejected`: how many 44BF samples this epoch **refused** as not
+  physically possible (see "Refused samples" above). `0` on a healthy
+  channel. Non-zero means the car answered with a value the accumulator
+  would not believe, so `odometer_m` did **not** advance across it — a
+  client that sees this climbing should treat the distance as
+  untrustworthy rather than assume the car stopped moving.
+- `speed_kmh` is a JSON number, not an integer: PID `0x0D` decodes
+  through the mapping engine, which returns a float, so an integer
+  km/h reads as `47.0`.
 - `source` / `mapping_ver`: the channel and the mapping-file version it
   decoded through — the same provenance every recorded sample carries.
 - Errors: **401** with `WWW-Authenticate: Bearer` for a missing,
   malformed, unknown or revoked token — one JSON body,
-  `{"error": "unauthorized"}`, that names nothing; **503**
+  `{"error": "unauthorized"}`, that names nothing. **Any** header value
+  gets that answer: a non-ASCII byte, an empty bearer value, a wrong
+  scheme, no space after the scheme, control characters, or a value past
+  the length cap (`MAX_AUTH_HEADER_LEN`, 512 — an order of magnitude
+  above a real credential). Never a dropped connection, and never more
+  than the one response — these two paths are reachable from the
+  internet with no credential in front of them, so a crash here would be
+  both a denial of service and a remote log flood. **503**
   `{"error": "odometer channel not loaded"}` when this run has no
   odometer channel (a bare `live.py`, or the DPF/EGR file not loaded —
   `./run_car.sh` loads it). Auth is checked first: an anonymous caller
@@ -140,6 +217,12 @@ these two paths and nothing else (not the dashboard, not the panel).
    continues.
 5. **Judge staleness by `t - odometer_t`**, both server timestamps —
    the phone's clock need not agree with the Pi's.
+6. **Watch `rejected`.** It should stay at 0. If it climbs, the car is
+   answering with values the runtime would not believe and `odometer_m`
+   is not advancing across them: the distance is untrustworthy, and
+   `odometer_t` standing still is the confirmation. This is the one
+   field that distinguishes "the car is stationary" from "the channel is
+   broken".
 
 ## Drive modes
 
@@ -159,8 +242,13 @@ python3 tools/api_token.py revoke android-nav
 ```
 
 The store is `local/api-tokens.json` (gitignored, mode 0600; `live.py
---api-tokens <path>` to move it). `live.py` re-reads it whenever the
-file changes, so a mint or a revoke takes effect without a restart.
+--api-tokens <path>` to move it). A store whose mode is looser than
+0600 is still used — failing closed on a mode would lock the owner out
+of their own car for a `chmod` — but it says so once, on stdout, naming
+the mode and not the token. `live.py` re-reads it whenever the file
+changes (keyed on `st_mtime_ns` and size, so a same-second rewrite of
+the same length still revokes), so a mint or a revoke takes effect
+without a restart.
 Tokens are compared in constant time, never logged, and
 `/api/diagnostics` reports only how many there are. A missing file
 means no token is valid — the endpoint fails closed.
