@@ -25,7 +25,8 @@ Two kinds of file are versioned this way, in one ledger:
   never changed.
 - The version tracks the **mapping data, never the code.** Editing
   `loader.py`, `live.py`, or anything else in the program does *not* change
-  any mapping version. Only editing a file under `mappings/` does.
+  any mapping version. Only editing a file under `mappings/` (or the
+  mode table, `config/modes.yaml`) does.
 - Versions only ever go **up**. There is no v0; a brand-new mapping starts
   at 1.
 
@@ -138,11 +139,22 @@ Two guards keep this honest:
   ```
 - **`tools/check_mapping_versions.py`** — a git-diff guard: if a mapping
   file's content changed versus a ref (default `HEAD`) without its version
-  increasing, it fails. Run it locally or in CI:
+  increasing, it fails. It watches `mappings/**/*.yaml` **and
+  `config/modes.yaml`** (the mode table is versioned data too — until
+  2026-09-10 it was not watched, and a multiplier could have changed
+  under `drive-modes@3`). "Content" is what the loader sees: both sides
+  are parsed with the runtime's own YAML subset and compared, in
+  declaration order, with the version removed, so a **comment-only edit
+  passes without a bump** — the rule above, enforced rather than trusted
+  — while a `#` inside a quoted string or block scalar counts as content,
+  and so does **reordering requests** (the loader numbers them by
+  position; the rotation is sorted by it). Run it locally or in CI:
   ```bash
   python3 tools/check_mapping_versions.py                 # vs HEAD
   python3 tools/check_mapping_versions.py --against origin/master
   ```
+  `tests/test_check_mapping_versions.py` exercises it in a throwaway git
+  repository (content change / comment edit / bump / `#` in a string).
 
 ## Why integer versions, and not a content hash
 

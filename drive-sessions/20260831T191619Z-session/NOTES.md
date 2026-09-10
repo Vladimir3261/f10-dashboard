@@ -1,7 +1,7 @@
 # Drive 11 (2026-08-31, evening) — first drive on the data-quality layer
 
 **101,420 samples, 31.1 km, 50.8 min, 4 runs, 1,997 samples/min.**
-Recorded on `acf91dd` (master head), which carries Stage 1. Report covers
+Recorded on `e707263` (master head), which carries Stage 1. Report covers
 **run 2** — 78,444 samples, 43.3 min, the main continuous stretch.
 
 This is the acceptance test for the data-quality layer against the car,

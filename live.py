@@ -2495,7 +2495,7 @@ class Diagnostics:
                 #: Counted in `ok` (the exchange worked); this says how
                 #: many of those ok's carry a suspect value.
                 "ambiguous": st.get("ambiguous", 0),
-                #: From the resting mechanism (cfbabd4): seconds this
+                #: From the resting mechanism (4664854): seconds this
                 #: request is standing down after repeated faults, and
                 #: the consecutive-fault count that caused it. A snapshot
                 #: at report time - the page must render it as a state

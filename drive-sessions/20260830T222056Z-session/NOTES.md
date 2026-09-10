@@ -147,7 +147,7 @@ the fragmentation fix landed and a session became ONE run, it became
 *When you stop work being split into units, anything that was only wrong
 on the first unit becomes wrong on all of it.*
 
-Fixed in `67adee5` (metadata snapshot now travels in the payload rather
+Fixed in `14f4be6` (metadata snapshot now travels in the payload rather
 than being read from shared state at pop time; a run that cannot say what
 it is recording no longer opens silently). Verified live immediately
 after: the next session's run 1 carries a full `mapping_set` and 6

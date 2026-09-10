@@ -252,7 +252,7 @@ identifier read or printed:
   the 1.0 s tolerance and the model reports "the pair never aligned … a
   schedule fact, not a car fact". The tolerance was not loosened; the
   fix is on the polling side: the flow mapping has declared
-  `polling: {pair: rail}` since v3 (commit `21bc171`, authored
+  `polling: {pair: rail}` since v3 (commit `c0c1f2e`, authored
   2026-09-01), so the two reads share
   one rotation slot on drives recorded after that; the clock-synced
   sessions in the lake all predate it (flow v2).

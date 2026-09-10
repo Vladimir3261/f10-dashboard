@@ -113,7 +113,7 @@ is clearly alive; its top of range is now the open question.
 - **Warm start, not cold** — run 1 opens at 45 °C. The generated report's
   cold-start section is about a warm restart and its 3.0 min to 80 °C is
   not comparable with session 9's 33.6 min from 21 °C.
-- **The report generator fix is verified.** `e20914c` now renders *"Oil
+- **The report generator fix is verified.** `95f266d` now renders *"Oil
   ran +0.3 °C against coolant through the ramp, so no lag was seen"*
   where the old code asserted a lag unconditionally. Correct, and the
   first artifact produced by the fixed generator.
