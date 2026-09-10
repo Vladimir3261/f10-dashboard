@@ -29,10 +29,28 @@ mapping:
   id: guard-fixture
   version: 3            # the data version
   description: "fixture #1"   # a '#' inside a string is content
+requests:
+  - id: rpm_read        # declaration order is the rotation order
+    pid: 0x0C
+  - id: speed_read
+    pid: 0x0D
 channels:
   - id: rpm
     scale: 0.25         # quarter-rpm per bit
 """
+
+REQUESTS_SWAPPED = MAPPING.replace(
+    """  - id: rpm_read        # declaration order is the rotation order
+    pid: 0x0C
+  - id: speed_read
+    pid: 0x0D
+""",
+    """  - id: speed_read
+    pid: 0x0D
+  - id: rpm_read        # declaration order is the rotation order
+    pid: 0x0C
+""")
+assert REQUESTS_SWAPPED != MAPPING
 
 MODES = """\
 schema_version: 1
@@ -149,6 +167,25 @@ class VersionGuard(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("mappings/obd/engine.yaml: comments/version only", out)
 
+    def test_reordering_requests_is_content(self):
+        """
+        The loader numbers requests by position and the rotation is
+        sorted by that number: swapping two requests changes the order
+        the car is polled in (B1 on PR #47 - a dict comparison missed it).
+        """
+        self.write("mappings/obd/engine.yaml", REQUESTS_SWAPPED)
+        code, out = self.run_guard()
+        self.assertEqual(code, 1, out)
+        self.assertIn("mappings/obd/engine.yaml", out)
+        self.assertIn("was 3, now 3", out)
+
+    def test_reordering_requests_with_a_bump_passes(self):
+        self.write("mappings/obd/engine.yaml",
+                   REQUESTS_SWAPPED.replace("version: 3", "version: 4"))
+        code, out = self.run_guard()
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 changed file(s) properly bumped", out)
+
     def test_a_hash_inside_a_string_is_content(self):
         """`description: "fixture #1"` -> "#2": the loader sees that."""
         self.write("mappings/obd/engine.yaml", MAPPING.replace('"fixture #1"', '"fixture #2"'))
@@ -197,21 +234,29 @@ class ContentFunction(unittest.TestCase):
         b = self.tool.content(MAPPING.replace("version: 3", "version: 9")
                                      .replace("# quarter-rpm per bit", ""))
         self.assertEqual(a, b)
-        self.assertNotIn("version", a["mapping"])
+        self.assertNotIn('"version"', a)          # schema_version stays; it is data
+        self.assertIn('"schema_version": 1', a)
+        self.assertNotIn("quarter-rpm", a)
         m = self.tool.content(MODES)
-        self.assertNotIn("version", m)
-        self.assertEqual(m["modes"]["normal"]["multipliers"]["motion"], 1.0)
+        self.assertNotIn('"version"', m)
+        self.assertIn('"motion": 1.0', m)
+
+    def test_content_sees_declaration_order(self):
+        self.assertNotEqual(self.tool.content(MAPPING),
+                            self.tool.content(REQUESTS_SWAPPED))
 
     def test_content_keeps_a_hash_inside_a_string(self):
         self.assertNotEqual(self.tool.content(MAPPING),
                             self.tool.content(MAPPING.replace("#1", "#2")))
 
     def test_the_real_files_parse_to_a_document(self):
-        """The guard must be able to read what it guards."""
+        """The guard must be able to read what it guards (not fall back to text)."""
         for rel in ("config/modes.yaml", "mappings/obd/engine.yaml"):
             with open(os.path.join(support.ROOT, rel), encoding="utf-8") as fh:
-                doc = self.tool.content(fh.read())
-            self.assertIsInstance(doc, dict, rel)
+                text = fh.read()
+            doc = self.tool.content(text)
+            self.assertTrue(doc.startswith("{"), rel)
+            self.assertNotEqual(doc, self.tool.strip_version(text), rel)
 
 
 if __name__ == "__main__":

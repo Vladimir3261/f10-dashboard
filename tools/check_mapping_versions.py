@@ -15,11 +15,13 @@ mapping set). Code changes (loader, live.py, ...) never require a version
 bump; the version tracks the data, not the program.
 
 "Content" is what the loader sees: both sides are parsed with the
-runtime's own YAML subset and compared with the version removed. So a
-comment-only edit - a `#` line, a trailing `# ...` - is not a content
-change and needs no bump (docs/DATA_VERSIONING.md: "bump for content, not
-comments"), while a `#` inside a quoted string or a block scalar is
-content, because the loader would see it. A side that fails to parse is
+runtime's own YAML subset and compared, in declaration order, with the
+version removed. So a comment-only edit - a `#` line, a trailing `# ...`
+- is not a content change and needs no bump (docs/DATA_VERSIONING.md:
+"bump for content, not comments"), while a `#` inside a quoted string or
+a block scalar is content, because the loader would see it - and so is
+the order of requests, because the loader numbers them by position and
+the rotation is sorted by that number. A side that fails to parse is
 compared as text (minus the version line) so a broken file cannot slip
 through as "unchanged".
 
@@ -33,6 +35,7 @@ git on PATH.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -99,12 +102,19 @@ def strip_version(text: str) -> str:
     return VERSION_RE.sub("", text or "")
 
 
-def content(text: str):
+def content(text: str) -> str:
     """
     The file as the loader sees it, minus its version: the parsed document
     with `mapping.version` (mapping files) / top-level `version` (the mode
-    table) removed. Comments are gone because the parser drops them; a `#`
-    inside a quoted string or block scalar survives because it is data.
+    table) removed, serialized in declaration order. Comments are gone
+    because the parser drops them; a `#` inside a quoted string or block
+    scalar survives because it is data.
+
+    Order is data. The loader assigns each request its `order` from its
+    position in the file and the rotation is sorted by it, so swapping two
+    requests changes what the car is asked and when - a dict `==` would
+    not see that, which is why this returns the JSON text of the document
+    (`sort_keys=False`), not the document.
 
     If the text does not parse, fall back to the raw text minus the version
     line - the conservative side: a broken file compares as changed.
@@ -113,14 +123,13 @@ def content(text: str):
         doc = loads(text or "")
     except Exception:
         return strip_version(text)
-    if not isinstance(doc, dict):
-        return doc
-    doc = dict(doc)
-    doc.pop("version", None)
-    mapping = doc.get("mapping")
-    if isinstance(mapping, dict):
-        doc["mapping"] = {k: v for k, v in mapping.items() if k != "version"}
-    return doc
+    if isinstance(doc, dict):
+        doc = dict(doc)
+        doc.pop("version", None)
+        mapping = doc.get("mapping")
+        if isinstance(mapping, dict):
+            doc["mapping"] = {k: v for k, v in mapping.items() if k != "version"}
+    return json.dumps(doc, sort_keys=False, default=str)
 
 
 def changed_mappings(ref: str):

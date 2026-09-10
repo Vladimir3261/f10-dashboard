@@ -143,10 +143,12 @@ Two guards keep this honest:
   `config/modes.yaml`** (the mode table is versioned data too — until
   2026-09-10 it was not watched, and a multiplier could have changed
   under `drive-modes@3`). "Content" is what the loader sees: both sides
-  are parsed with the runtime's own YAML subset and compared with the
-  version removed, so a **comment-only edit passes without a bump** — the
-  rule above, enforced rather than trusted — while a `#` inside a quoted
-  string or block scalar counts as content. Run it locally or in CI:
+  are parsed with the runtime's own YAML subset and compared, in
+  declaration order, with the version removed, so a **comment-only edit
+  passes without a bump** — the rule above, enforced rather than trusted
+  — while a `#` inside a quoted string or block scalar counts as content,
+  and so does **reordering requests** (the loader numbers them by
+  position; the rotation is sorted by it). Run it locally or in CI:
   ```bash
   python3 tools/check_mapping_versions.py                 # vs HEAD
   python3 tools/check_mapping_versions.py --against origin/master
