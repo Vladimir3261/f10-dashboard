@@ -667,7 +667,10 @@ class TheCandidatesScheduleBesideTheCarSet(unittest.TestCase):
         numbers so a comment cannot drift from the plan it describes.
         """
         counts = self.plan.counts()
-        self.assertEqual(counts["dde_dyn"], 23 + 3 + 7 + 1)   # egr, airpath, ibs current
+        #: 22 in the verified set since dpf-egr v4 moved 44BF to its
+        #: own `odometer` class (issue #49).
+        self.assertEqual(counts["dde_dyn"], 22 + 3 + 7 + 1)   # egr, airpath, ibs current
+        self.assertEqual(counts["odometer"], 1)
         self.assertEqual(counts["dde_slow"], 9 + 5 + 1)       # injectors, ibs, tank
         self.assertEqual(counts["egs"], 2)
         self.assertEqual(counts["egs_slow"], 1)

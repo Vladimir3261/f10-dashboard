@@ -98,6 +98,7 @@ common cadence to be correlated: ClickHouse joins on nearest timestamp
 | `slow` | 10 s | coolant, oil, iat, voltage, fuelrate, cattemp, egr, egrerr | thermal mass and electrics: minutes, not seconds |
 | `rare` | 60 s | ambient, baro, fuel, runtime, distance | weather and counters: hours, or monotonic |
 | `dde_dyn` | 0.5 s x 22 | the 22 proprietary DDE reads | round-robin: one per firing, so ~11 s per channel |
+| `odometer` | 1 s | the 44BF distance counter (`n47d_odometer_m`, integer metres) | the anchor for the odometer API (issue #49, [`ODOMETER_API.md`](ODOMETER_API.md)); was one of the `dde_dyn` members, ~1 sample per 11 s, far too slow to navigate on. Costs 3 exchanges a poll — see "The odometer class" below |
 | `egs` | 0.5 s | engaged gear | was 0.25 s; the EGS is the ECU that sleeps |
 | `dde_slow` | 10 s x n | the #15 candidates' adaptation/state reads (injector corrections, IBS state, tank content) | round-robin, one per firing: 15 members when every candidate is loaded, so ~150 s per channel; a value that moves over minutes has no business on the 0.5 s rotation. Only present when a candidate file is loaded (`./run_car.sh --candidate …`) |
 | `egs_slow` | 10 s | EGS ATF temperature (raw, candidate) | the EGS's own slow read; candidate-only, as above |
@@ -173,7 +174,9 @@ Switch from the dashboard's `mode` chip, or start in one with
   worth catching on a long drive — a thermal excursion, a regeneration
   — are exactly the ones that would start and finish inside a sleep
   window, and a 150 s rotation that slept 600 s in 720 would never
-  complete inside one burst.
+  complete inside one burst. The `odometer` class (`modes.yaml` v4,
+  same day) is deliberately **not** exempt: a quiet bus is what
+  `sampling` is for, so navigation needs `normal` or `long`.
 - **`sampling` is quieter than `long`**, which is not obvious and was
   measured rather than assumed: it silences the fast tiers entirely for
   ten minutes in twelve, where `long` merely slows them. They are
@@ -284,6 +287,51 @@ count.
 **Logical requests are not wire exchanges.** Any future scheduling change
 must be judged in exchanges; `tests/test_polling_pairs.py` encodes the
 6-PID rule so that accounting is available without a car.
+
+## The odometer class (2026-09-10, issue #49)
+
+The odometer API needs the 44BF distance counter often enough to
+navigate on. On the `dde_dyn` rotation it was one of 23 members at one
+slot per 0.5 s — one sample every ~11 s. dpf-egr v4 moves that one
+request into a class of its own, **`odometer`, 1 s**, at x1.0 in
+`normal`, `long` and `debug` (`modes.yaml` v4) and not exempt from
+`sampling`'s duty cycle.
+
+**Each odometer poll costs three exchanges, not one.** 44BF is read
+through the F303 dynamic DID, and `MappingExecutor` re-arms F303 (two
+setup frames) whenever the last request on that ECU armed it for
+something else. The `dde_dyn` rotation fires twice between consecutive
+odometer polls and re-arms the DID for its own member every time, so
+the odometer read never finds F303 already pointing at 44BF: 2 setup +
+1 read, 3 exchanges a second, ~180 a minute in every mode that runs it.
+
+Measured the same way as the burst above — the plan simulation in
+`tests/test_polling_pairs.py`, 600 simulated seconds at the 10 Hz loop
+rate, F303 setup counted, the `./run_car.sh` set (**synthetic, not
+on-car**; the first drive with the class live should be compared):
+
+| mode | requests/min | exchanges/min | 44BF samples/min | worst cycle |
+|---|---|---|---|---|
+| `normal` | 2,854 → 2,915 | 1,132 → **1,314 (+16%)** | 5.7 → 60 | 11 → 11 |
+| `long` | 679 → 739 | 357 → **538 (+51%)** | 2.9 → 60 | 11 → 11 |
+| `sampling` | 720 → 732 | 552 → 590 (+7%) | 5.7 → 12.1 (awake windows only) | 11 → 11 |
+| `debug` | 7,987 → 8,050 | 3,492 → 3,680 (+5%) | 28.6 → 60 | 11 → 11 |
+
+`dde_dyn` goes from 23 members to 22 (the rotation gets ~0.5 s
+shorter), which is the small drop hiding inside the totals.
+
+**1 Hz was kept.** The absolute numbers are well inside what the link
+has already carried: `debug` has run at ~3,500 exchanges/min on the
+car for whole drives. The cost that stands out is relative: `long`
+exists to reduce link load, and a flat 180 exchanges/min is half again
+its budget. It was still left at x1.0 there because continuity is the
+point of the class — a motorway run is exactly when the navigation
+client needs it — and `sampling` remains the mode for a genuinely quiet
+bus. If a drive shows the DDE minding the extra re-arms (fault rates
+in `channel_errors` are the place to look), 0.5 Hz halves the cost to
+~90 exchanges/min and the class period is one number in the mapping
+file. The wire-budget tripwire in `tests/test_polling_pairs.py` was
+re-based once for this change and only this change.
 
 ## Acquisition timestamps
 

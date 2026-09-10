@@ -215,7 +215,24 @@ locally verified mappings  →  runtime telemetry (--extra-mappings)
   (`samples.quality`); the display suppresses them and derived channels
   drop with their flagged inputs. engine.yaml v4 declares lambda's
   0xFFFF sentinel and MAP's 255 saturation. See `docs/DATA_QUALITY.md`.
-- 1,095 tests, no car / no network / no BMW data required
+- **The odometer API** (2026-09-10, issue #49): `GET /api/odometer` and
+  `/api/odometer/stream` (SSE) give a navigation client a
+  process-lifetime **monotonic metre counter** built from the DDE's
+  44BF distance-since-regen (resets bridged, flagged readings ignored,
+  `epoch` re-minted only on restart) plus the latest speed, behind a
+  bearer token of their own (`tools/api_token.py`, store in
+  `local/api-tokens.json`) — no Basic Auth, no session, no VIN, not on
+  the share allowlist. 44BF sits in its own `odometer` class at 1 Hz
+  (dpf-egr v4, modes v4; ~+180 exchanges/min, synthetic). Needs
+  `normal` or `long`; `sampling` sleeps it. Because the total can never
+  be corrected downwards, a sample that is not physically possible is
+  **refused and counted** (`rejected` in the body,
+  `odometer_rejected` in `/api/diagnostics`) rather than accumulated —
+  the mapping declares `valid_max` and the accumulator bounds the step
+  against elapsed time. And because a *wrong anchor* would then refuse
+  everything, five refusals in a row re-anchor without crediting the
+  gap: distance is dropped, never guessed. `docs/ODOMETER_API.md`.
+- 1,397 tests, no car / no network / no BMW data required
   (`python3 tools/run_tests.py` prints the skip count; 3 skip without the
   research source cache). CI runs the same checks on every PR —
   `docs/CI.md`.

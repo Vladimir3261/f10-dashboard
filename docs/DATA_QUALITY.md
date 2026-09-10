@@ -241,6 +241,49 @@ now surfaces saturation nobody has declared **yet** — which is how the
 MAF 222.22 g/s artifact was found. It is a lead to investigate, never a
 finding.
 
+### A third consumer: the odometer accumulator
+
+`n47d_odometer_m` (dpf-egr v4, the source of `/api/odometer` — see
+[`ODOMETER_API.md`](ODOMETER_API.md)) is the first channel where a
+quality label is **load-bearing rather than descriptive**. Its consumer
+accumulates, and the API's contract says the total can never be
+corrected downwards, so one flagged reading treated as a measurement
+poisons the value for the life of the process. The channel therefore
+declares `valid_max: 2000000` — 2,000 km, the largest plausible distance
+since a successful regeneration on this car — and a read outside it
+arrives as `clipped`, which the accumulator drops.
+
+Two things worth carrying forward from that:
+
+- **A quality guard is vacuous unless the mapping declares something.**
+  `Odometer.feed` skipped every non-`ok` reading from the day it was
+  written, and the guard could never fire, because nothing in the
+  mapping file could set a label. "Flagged readings are ignored" is a
+  property of a *pair* — the guard and a declaration — not of the code
+  alone.
+- **"Ignored" is not the same as "unreported".** Dropping a flagged
+  reading silently made the accumulator's own `rejected` counter read 0
+  for the single most likely garbage value on the channel — while the
+  API's documented client rule pointed at that counter to tell "the car
+  is stationary" from "the channel is broken". A consumer that acts on a
+  label owes its own caller a count of how often it acted.
+- **The declaration is not the whole defence.** The accumulator also
+  bounds the raw value and the step between two samples in its own code
+  (`ODOMETER_MAX_M`, and a delta window from the elapsed time), because
+  a mapping file can be absent — the runtime may be started without
+  `--extra-mappings` — and because a mis-correlated F303 response can
+  deliver another channel's four bytes *inside* the declared range,
+  where no `valid_max` can catch it. Bounds in a mapping are a data
+  contract, not a substitute for a consumer that knows what it is
+  accumulating.
+
+The sibling counters in the same file (`n47d_regen_count`,
+`n47d_dist_since_regen`, the operating-mode word) are deliberately left
+unbounded: they feed a display and a trend, not an irreversible total,
+and `n47d_dist_since_regen` in particular is verified with a frozen
+decode contract — value, type and quality label — that a new
+declaration would change.
+
 ### The derived-channel corner
 
 `boost = map - baro` is computed from MAP. When MAP is saturated, boost

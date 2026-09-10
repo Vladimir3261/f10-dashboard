@@ -19,11 +19,22 @@ schema_version: 1
 # Every row: SG_ADR 12, SERVICE 22;2C. Widths per DATENTYP (u16=02,
 # u32/unsigned long=04) - reflected in both the define frame and
 # data_length.
+#
+# CHANGES
+#
+#   v4 (2026-09-10)  Issue #49 (odometer API): the 0x44BF read moves out
+#                    of the `dde_dyn` round-robin into its own `odometer`
+#                    class at 1 Hz, and gains a second signal decoding
+#                    the same four bytes as integer metres
+#                    (`n47d_odometer_m`). No frame, scale or other
+#                    channel changed; the km channel is untouched. Cost
+#                    measured in docs/POLLING_AND_SAFETY.md.
+#   v3 and earlier   see git history.
 # ======================================================================
 
 mapping:
   id: candidate-n47-d72-dpf-egr
-  version: 3
+  version: 4
   production: false
   description: >
     F-series N47 DPF/emissions dynamic (0xF303) measurements from the
@@ -82,6 +93,15 @@ defaults:
 
 polling_classes:
   dde_dyn: {seconds: 0.5, priority: 5, stagger: true}
+  # The odometer read (0x44BF) on its own, every second, for the
+  # navigation client behind /api/odometer (issue #49). A member of the
+  # round-robin was sampled every ~11 s; dead reckoning needs a fix
+  # every second. Not staggered: one request, due every period. Priority
+  # between `control_ctx` and `egs` so it goes out early in a cycle.
+  # Each poll costs three exchanges (the F303 re-define + the read),
+  # because the round-robin re-arms the same DID in between - measured
+  # in docs/POLLING_AND_SAFETY.md.
+  odometer: {seconds: 1.0, priority: 3}
 
 requests:
 
@@ -135,9 +155,19 @@ requests:
   # -- distance since last successful regen (IDSLRE 0x44BF, u32 metres) -
   #    raw is metres (MUL 1); divided to km for display (unit conversion,
   #    the underlying 1 m/bit scale is preserved).
+  #
+  #    Polled in its own 1 Hz `odometer` class since v4: it is the
+  #    distance source of the odometer API (docs/ODOMETER_API.md). The
+  #    same four bytes decode twice - as km (rounded to 10 m, the
+  #    display channel that has always existed) and as whole metres
+  #    (`n47d_odometer_m`, what the API accumulates; the km channel's
+  #    rounding would lose the metre). Monotonic between regenerations,
+  #    reset to 0 by a successful one - the accumulator in live.py
+  #    bridges the reset. How closely it tracks true ground distance is
+  #    UNKNOWN until it has been logged next to GPS.
   n47.d72.dyn.44BF:
     setup: ["2C 03 F3 03", "2C 01 F3 03 44 BF 01 04"]
-    polling: {class: dde_dyn}
+    polling: {class: odometer}
     response: {data_length: 4}
     signals:
       n47d_dist_since_regen:
@@ -145,6 +175,41 @@ requests:
         unit: km
         display: {digits: 1, min: 0, max: 2000}
         decode: {type: uint32_be, divide: 1000.0, round: 2}
+      #    `valid_max` on the metre channel, and only on it: it is what
+      #    the odometer API accumulates, and that total is contractually
+      #    monotonic - it can never be corrected downwards, so ONE
+      #    absurd reading would poison the value for the life of the
+      #    process. 2,000,000 m = 2,000 km is the channel's own display
+      #    ceiling, and it is chosen from what the signal means: this is
+      #    distance since the last SUCCESSFUL regeneration, and on this
+      #    car (no particulate filter, but the ECU still commands regens
+      #    against its model) the interval between them is a few hundred
+      #    km. 2,000 km leaves the largest plausible interval several
+      #    times over while still rejecting the two things worth
+      #    rejecting - a u32 all-ones (4,294,967,295 m ~ 4.29 million
+      #    km, three orders of magnitude out) and four bytes of some
+      #    other dynamic read that a mis-correlated F303 response
+      #    delivered here (the executor cannot tell two F303 reads apart
+      #    by identifier). No `invalid:` is declared: no sentinel value
+      #    for this signal is known from any source, and inventing one
+      #    would be inventing BMW data - an all-ones read is caught by
+      #    `valid_max` as `clipped`, which is the honest label for "the
+      #    number is outside the range this channel can mean".
+      #    No `valid_min` either: a `uint32_be` with no offset or scale
+      #    cannot decode below zero, so a bound there could never fire.
+      #    live.py refuses a negative raw anyway, and mirrors this
+      #    ceiling as `ODOMETER_MAX_M` so the accumulator's guarantee
+      #    does not rest on a mapping file the runtime may be started
+      #    without.
+      #    The km channel above is deliberately left alone: it is
+      #    `sgbd_derived` and verified, its decode and its quality label
+      #    are a frozen contract, and it feeds a display, not an
+      #    accumulator.
+      n47d_odometer_m:
+        label: Distance since regen (metres)
+        unit: m
+        display: {digits: 0, min: 0, max: 2000000}
+        decode: {type: uint32_be, round: 0, valid_max: 2000000}
 
   # -- successful-regeneration count (PFltRgn_ctRgnSucEEP_mp 0x44B8) ----
   n47.d72.dyn.44B8:

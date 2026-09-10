@@ -192,8 +192,10 @@ class CriticalPairsAreScheduledTogether(unittest.TestCase):
         members = len(self.plan.by_class("dde_dyn"))
         slots = len(self.plan._slots["dde_dyn"])
 
-        self.assertEqual(members, 23)
-        self.assertEqual(slots, 21, "two pairs collapse four slots into two")
+        #: 22 since dpf-egr v4 (issue #49) lifted 44BF out of the
+        #: rotation into the 1 Hz `odometer` class; it was 23.
+        self.assertEqual(members, 22)
+        self.assertEqual(slots, 20, "two pairs collapse four slots into two")
 
 
 class ContextIsFastEnoughToConditionControlLoops(unittest.TestCase):
@@ -307,7 +309,7 @@ class DriveModesStillBehave(unittest.TestCase):
         _, plan = car_plan(mode=self.table.get("normal"))
         plan.set_mode(self.table.get("long"))
 
-        self.assertEqual(len(plan._slots["dde_dyn"]), 21)
+        self.assertEqual(len(plan._slots["dde_dyn"]), 20)
 
 
 class TheConfigurationChangeIsRecorded(unittest.TestCase):
@@ -345,14 +347,15 @@ class TheConfigurationChangeIsRecorded(unittest.TestCase):
         # sampled drives compare as equal.
         #
         # drive-modes@3 since 2026-09-10: v3 named `dde_slow` and
-        # `egs_slow` (the #15 candidates' 10 s classes) in every mode.
-        # The number here is the shipped table's, so this test also
-        # notices a bump nobody wrote down.
+        # `egs_slow` (the #15 candidates' 10 s classes) in every mode;
+        # v4 (issue #49, same day) named `odometer` at x1.0 in `long`
+        # and `debug`. The number here is the shipped table's, so this
+        # test also notices a bump nobody wrote down.
         profile, _ = car_plan()
         fingerprint = profile.mapping_set([load_modes().fingerprint()])
 
         self.assertIn("sae-obd-engine@5", fingerprint)
-        self.assertIn("drive-modes@3", fingerprint)
+        self.assertIn("drive-modes@4", fingerprint)
 
 
 class TheWireCostIsAccountedFor(unittest.TestCase):
@@ -486,11 +489,26 @@ class TheWireCostIsAccountedFor(unittest.TestCase):
         #
         table = load_modes()
         #
-        # Measured with F303 setup counted; master is 1098 / 340 / 518 /
-        # 3320. Headroom is deliberately tight so a change that adds a
-        # fifth to the wire traffic fails here rather than on the car.
+        # Measured with F303 setup counted. Before the odometer class
+        # (dpf-egr v3 / drive-modes v3) this was 1133 / 358 / 552 /
+        # 3492; the `odometer` class (issue #49: the 44BF distance
+        # counter at 1 Hz in normal, long AND debug, 3 exchanges a poll
+        # because the dde_dyn rotation re-arms F303 in between) adds
+        # ~181 exchanges/min flat, and the plan now measures 1314 / 538
+        # / 590 / 3680 (docs/POLLING_AND_SAFETY.md has the table). The
+        # budgets were re-based for that one deliberate change, and
+        # only that one. Headroom stays deliberately tight so a change
+        # that adds a tenth to the wire traffic fails here rather than
+        # on the car.
         #
-        budgets = {"normal": 1250, "long": 400, "sampling": 620, "debug": 3800}
+        # On the stale figures this replaces: the comment here used to
+        # give the pre-change baseline as 1098 / 340 / 518 / 3320, which
+        # had drifted - master itself measures 1132 / 357 / 552 / 3492,
+        # the numbers quoted above. So this re-base is the odometer
+        # class's cost alone; it is not absorbing an earlier unrecorded
+        # increase. Re-measure, do not copy, when re-basing again.
+        #
+        budgets = {"normal": 1420, "long": 590, "sampling": 650, "debug": 3950}
 
         for name, budget in budgets.items():
             with self.subTest(mode=name):

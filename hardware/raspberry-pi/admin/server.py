@@ -58,6 +58,13 @@ they are never forwarded - and under `/s/` live.py stays the authority:
 the panel adds no login there and dispatches none of its own routes
 for that prefix, so nothing management-shaped is reachable through it.
 
+The odometer API (`/api/odometer`, `/api/odometer/stream`; issue #49,
+docs/ODOMETER_API.md) is the second such surface: the navigation client
+carries live.py's own bearer token, not the panel's login, so those two
+exact paths go through without the panel's auth and WITH their
+`Authorization` header - the one place it is forwarded. Everything
+else keeps stripping it. No panel route is dispatched for them.
+
 Stdlib only, like the rest of the runtime.
 """
 
@@ -174,6 +181,12 @@ HOP_BY_HOP = frozenset({
 #: body length it restates.
 DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {"authorization", "host",
                                         "content-length"}
+#: The odometer API - live.py's own bearer token is the credential, so
+#: these two exact paths are proxied without the panel's login and are
+#: the ONLY ones whose Authorization header reaches live.py. Exact
+#: paths, not a prefix: nothing else under /api/odometer exists, and a
+#: lookalike must not ride through on it.
+ODOMETER_PATHS = frozenset({"/api/odometer", "/api/odometer/stream"})
 #: What live.py believes about the client - the address, the scheme and
 #: the public name a share link is minted against. This panel SETS
 #: them; a copy the client sent is replaced, never forwarded ahead of
@@ -197,8 +210,10 @@ CONNECT_TIMEOUT_S = 3.0
 #: refresh, for good. A JSON answer takes milliseconds; a stream is
 #: silent for as long as the car is, and gets no deadline at all.
 READ_TIMEOUT_S = 15.0
-#: The paths that are streams - the owner's and the share viewer's.
-STREAM_PATHS = frozenset({"/api/stream", SHARE_PREFIX + "/api/stream"})
+#: The paths that are streams - the owner's, the share viewer's and the
+#: navigation client's.
+STREAM_PATHS = frozenset({"/api/stream", SHARE_PREFIX + "/api/stream",
+                          "/api/odometer/stream"})
 #: The largest body a proxied POST may carry. live.py reads 4 KiB.
 MAX_PROXY_BODY = 16384
 #: A listen address that is not there yet (wg0 comes up after the
@@ -1305,14 +1320,19 @@ def make_handler(cfg: Dict[str, Any]):
             retry = {"Retry-After": "5"}
 
             try:
-                if under_share(urlsplit(self.path).path):
-                    #: The public prefix: a viewer who was handed a
-                    #: link learns that the car is not answering, and
-                    #: nothing about the box - not the upstream, not
-                    #: its address, not the errno. A browser gets a
-                    #: page; anything else the same shape as the owner
-                    #: body, minus the internals.
-                    if "text/html" in (self.headers.get("Accept") or ""):
+                path = urlsplit(self.path).path
+
+                if under_share(path) or path in ODOMETER_PATHS:
+                    #: The public prefix, and the odometer paths that
+                    #: are open at this hop too: a viewer who was
+                    #: handed a link learns that the car is not
+                    #: answering, and nothing about the box - not the
+                    #: upstream, not its address, not the errno. A
+                    #: browser under /s/ gets a page; anything else the
+                    #: same shape as the owner body, minus the
+                    #: internals.
+                    if under_share(path) and "text/html" in (
+                            self.headers.get("Accept") or ""):
                         self._send(503, "text/html; charset=utf-8",
                                    SHARE_DOWN_HTML.encode("utf-8"), retry)
                     else:
@@ -1358,7 +1378,14 @@ def make_handler(cfg: Dict[str, Any]):
             host = target.hostname or "127.0.0.1"
             port = target.port or 80
             body = b""
-            is_stream = urlsplit(self.path).path in STREAM_PATHS
+            path = urlsplit(self.path).path
+            is_stream = path in STREAM_PATHS
+            #: The bearer token for live.py rides through on the
+            #: odometer paths only, and only if it IS a bearer token
+            #: (see the scheme test below); everywhere else, and for any
+            #: other scheme, the header is the panel's own login and
+            #: stops here.
+            forward_auth = path in ODOMETER_PATHS
             peer = self.client_address[0]
             #: Through the same parser as `bind`: the environment
             #: override is one string, and a substring test on it would
@@ -1391,6 +1418,23 @@ def make_handler(cfg: Dict[str, Any]):
 
                 for name, value in self.headers.items():
                     lower = name.lower()
+
+                    if lower == "authorization":
+                        #
+                        # Only a Bearer credential rides through, and
+                        # only on the odometer paths. `auth_basic off`
+                        # stops nginx ASKING for the vhost realm, not a
+                        # browser already holding it from SENDING it -
+                        # so without this scheme test the panel's own
+                        # Basic login would be forwarded to live.py,
+                        # which has no use for it. The docstring above
+                        # promises it stops here; this is what makes
+                        # that true.
+                        #
+                        if forward_auth and value.strip()[:7].lower() == "bearer ":
+                            conn.putheader(name, value)
+
+                        continue
 
                     if lower in DROPPED_REQUEST_HEADERS:
                         continue
@@ -1520,6 +1564,16 @@ def make_handler(cfg: Dict[str, Any]):
             # answers.
             #
             if under_share(path):
+                self._proxy("GET")
+                return
+
+            #
+            # The odometer API, likewise before the login: live.py's
+            # bearer token is the credential and live.py judges it (a
+            # request without one gets ITS 401, with the Bearer
+            # challenge, not the panel's Basic one). Exact paths.
+            #
+            if path in ODOMETER_PATHS:
                 self._proxy("GET")
                 return
 

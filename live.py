@@ -62,6 +62,7 @@ from bmwdiag.mapping import (
     ResolvedProfile,
     load_tree,
 )
+from bmwdiag.mapping.decoder import Reading
 from bmwdiag.mapping.model import PollingClassDef
 from bmwdiag.mapping.modes import DEFAULT_MODE_CONFIG, ModeTable, load_modes
 from bmwdiag.mapping.polling import resolve_classes
@@ -2286,7 +2287,7 @@ class Diagnostics:
         with self._lock:
             keep = {
                 k: v for k, v in self._state.items()
-                if k in ("registry", "extra_ids")
+                if k in ("registry", "extra_ids", "api_tokens", "odometer")
             }
             keep["status"] = status
             self._state = keep
@@ -2310,9 +2311,24 @@ class Diagnostics:
         """
         state = self._get()
         registry = state.get("registry")
+        #: The odometer API's token store: the COUNT and nothing else.
+        #: No token, no name, no path - the view is reachable by anyone
+        #: behind the panel's login, which is not the same audience.
+        tokens = state.get("api_tokens")
+        api_tokens = tokens.count() if tokens is not None else 0
+        #: The odometer accumulator's refusal count - samples the
+        #: accumulator would not believe (docs/ODOMETER_API.md
+        #: "Refused samples"). Nonzero means the 44BF channel is
+        #: answering with values physics does not allow, and the total
+        #: has stopped following the car. The number only; no distance,
+        #: no epoch, nothing a share viewer could not already see.
+        odo = state.get("odometer")
+        odometer_rejected = odo.rejected if odo is not None else 0
 
         if registry is None:
-            return {"mappings": [], "classes": [], "channels": 0}
+            return {"mappings": [], "classes": [], "channels": 0,
+                    "api_tokens": api_tokens,
+                    "odometer_rejected": odometer_rejected}
 
         extra_ids = set(state.get("extra_ids") or ())
         classes = {c.name: c for c in registry.polling_classes()}
@@ -2324,6 +2340,8 @@ class Diagnostics:
             ) + 1
 
         return {
+            "api_tokens": api_tokens,
+            "odometer_rejected": odometer_rejected,
             "mappings": [{
                 "id": m.id,
                 "version": m.version,
@@ -3010,6 +3028,7 @@ def poll_loop(
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
     diag: Optional[Diagnostics] = None,
+    odometer: Optional["Odometer"] = None,
 ) -> None:
     diag = diag if diag is not None else Diagnostics()
     #: The caller normally supplies this; constructing one here keeps
@@ -3226,6 +3245,19 @@ def poll_loop(
             tel.set_meta(profile.meta())
 
             #
+            # What THIS run can offer the odometer API: the source
+            # channel is in the profile or it is not (the file was not
+            # loaded, or the ECU did not prove the profile it needs).
+            # The accumulator itself is never reset here - it lives as
+            # long as the process, and a reconnect carries on.
+            #
+            if odometer is not None:
+                odometer.configure(
+                    ODOMETER_SOURCE in profile.signal_keys(),
+                    profile.channel_version(ODOMETER_SOURCE),
+                )
+
+            #
             # Everything the diagnostics view needs, published once per
             # connection. References, not copies: the report is built on
             # demand so a page nobody opens costs nothing per cycle.
@@ -3330,6 +3362,13 @@ def poll_loop(
                     key: r for key, r in readings.items() if not r.usable
                 }
                 values.update(fresh)
+
+                #: Before the carried-forward view is touched: the
+                #: accumulator wants exactly what landed this cycle,
+                #: with its own acquisition time, and skips the flagged.
+                if odometer is not None:
+                    odometer.feed(readings, stamps, connected=True,
+                                  clock_synced=synced)
 
                 #
                 # A channel that answered with something unusable this
@@ -3466,6 +3505,11 @@ def poll_loop(
             #: would keep reading as if the link were live.
             diag.clear(msg)
 
+            if odometer is not None:
+                #: The values stay - they are the last known - but the
+                #: client is told the link is down.
+                odometer.set_connected(False)
+
             if rec is not None:
                 rec.event("error", msg)
         finally:
@@ -3482,6 +3526,7 @@ def demo_loop(
     registry: Optional[MappingRegistry] = None,
     modes: Optional[ModeControl] = None,
     diag: Optional[Diagnostics] = None,
+    odometer: Optional["Odometer"] = None,
 ) -> None:
     #: The demo synthesises values rather than scheduling requests, so a
     #: mode has nothing to scale here - it is accepted and reported so the
@@ -3505,6 +3550,18 @@ def demo_loop(
 
     tel.set_meta(profile.meta())
 
+    #
+    # The odometer API works in --demo too. Without this the endpoint
+    # answered 200 with nulls and `connected: false` for ever, which
+    # makes the one surface that has no dashboard to look at the one
+    # surface you cannot try without a car.
+    #
+    if odometer is not None:
+        odometer.configure(
+            ODOMETER_SOURCE in profile.signal_keys(),
+            profile.channel_version(ODOMETER_SOURCE),
+        )
+
     if rec is not None:
         rec.set_metadata(profile, [modes.table.fingerprint()])
         #: see the note at the other call site - configuration is
@@ -3521,6 +3578,12 @@ def demo_loop(
                       clock_is_synced())
 
     t0 = time.monotonic()
+    #: Synthetic distance-since-regen, in metres, integrated from the
+    #: synthetic speed below. It wraps at 500 km, which stands in for a
+    #: successful regeneration - so a --demo run exercises the reset
+    #: bridge as well as plain accumulation.
+    demo_m = 12345.0
+    demo_last = 0.0
 
     while True:
         wanted = modes.take()
@@ -3535,6 +3598,11 @@ def demo_loop(
 
         t = time.monotonic() - t0
         drive = 0.5 + 0.5 * math.sin(t / 7.0)
+        demo_m += (drive * 130.0 / 3.6) * max(0.0, t - demo_last)
+        demo_last = t
+
+        if demo_m > 500_000.0:
+            demo_m = 0.0
         rpm = 780 + drive * 3200
         boost = max(-0.05, (drive ** 2) * 1.6)
         baro = 99.0
@@ -3575,10 +3643,25 @@ def demo_loop(
             "n47d_maf_per_cyl": round(240 + drive * 900, 1),
             "n47d_dpf_dp": round(drive * 45, 1),
             "distance": round(1000 + t * 0.02, 1),
+            "n47d_odometer_m": int(demo_m),
         }
 
         if rec is not None:
             rec.write(time.time(), numeric_only(values, profile))
+
+        #
+        # The odometer accumulator, fed the way the poll loop feeds it:
+        # Readings with their own acquisition stamps, not the values
+        # dict. Synthetic distance, integrated from the synthetic speed.
+        #
+        if odometer is not None:
+            now = time.time()
+            odometer.feed(
+                {ODOMETER_SOURCE: Reading(int(demo_m)),
+                 ODOMETER_SPEED: Reading(float(values["speed"]))},
+                {ODOMETER_SOURCE: now, ODOMETER_SPEED: now},
+                connected=True, clock_synced=clock_is_synced(),
+            )
 
         tel.update(
             values=values, latency_ms=round(6 + drive * 4, 1), hz=10.0,
@@ -3851,6 +3934,649 @@ class ShareTokens:
             self._tokens.pop(token, None)
 
 
+# --------------------------------------------------------------- odometer
+#
+# The odometer API (docs/ODOMETER_API.md, issue #49): a monotonic distance
+# counter plus the latest speed, for a navigation client that dead-
+# reckons without GPS. Nothing here knows what a PID is - the source is a
+# mapping channel like any other; this is the accumulation and the
+# transport of it.
+#
+
+#: The channel the accumulator reads: the ECU's "distance since the last
+#: successful regeneration" counter in whole metres (0x44BF on the d72
+#: DDE, `mappings/candidates/bmw/dde/n47/d72n47a0_dpf_egr.yaml`). It
+#: counts up between regenerations and is reset to zero by a successful
+#: one; the accumulator below bridges the reset. The km channel on the
+#: same bytes is rounded to 10 m, which is why the API has a channel of
+#: its own.
+ODOMETER_SOURCE = "n47d_odometer_m"
+#: The speed channel: SAE PID 0x0D, integer km/h, `motion` class.
+ODOMETER_SPEED = "speed"
+#: The stream sends at most this many events per second; samples that
+#: land closer together are coalesced into the latest state.
+ODOMETER_STREAM_MAX_HZ = 10.0
+#: A comment line goes out after this long without an event, so a proxy
+#: and the client can tell a quiet link from a dead one.
+ODOMETER_KEEPALIVE_S = 15.0
+
+#
+# The plausibility bounds. `odometer_m` is contractually monotonic and
+# can never be corrected downwards, so ONE bad sample would poison the
+# rest of the process's life. Two independent layers stop that: the
+# mapping flags an out-of-range raw as `clipped` (valid_max on
+# `n47d_odometer_m` in d72n47a0_dpf_egr.yaml, mirrored below so the
+# accumulator does not depend on a mapping file it does not own), and
+# the accumulator refuses a transition physics cannot produce. Anything
+# refused is COUNTED and published, never silently dropped: a client
+# that sees `rejected` climbing knows the channel is misbehaving.
+#
+#: The largest raw 44BF value the accumulator will accept, in metres.
+#: The same 2,000 km as the channel's `display.max` and the mapping's
+#: `valid_max` - see the comment on the signal for why that number.
+#: 0xFFFFFFFF (4,294,967,295 m ~ 4.29 million km) is three orders of
+#: magnitude outside it.
+ODOMETER_MAX_M = 2_000_000
+#: Ceiling road speed for the forward-delta bound, km/h. Not this car's
+#: top speed but a bound well above it: whatever the elapsed time
+#: between two accepted samples, more distance than this could not have
+#: been driven in it. At the class's 1 Hz that caps a single step at
+#: ~83 m, so a one-second gap can never carry the 100 km an unbounded
+#: delta happily credited.
+#: Deliberately generous - after a long link outage the ECU's counter
+#: really has advanced by real driven distance, and the bound has to
+#: allow that.
+ODOMETER_MAX_SPEED_KMH = 300.0
+#: Slack added to every delta window, in metres. It covers acquisition-
+#: timestamp granularity, a stamp that fell back to `time.time()`, two
+#: samples that share a timestamp (span 0), and - the reason it is a
+#: kilometre and not a hundred metres - **the rate at which the DDE
+#: itself updates 44BF, which is UNKNOWN**: it has never been measured.
+#: If the ECU refreshes the counter in steps rather than continuously,
+#: a step arrives as one jump whose size is the whole interval's
+#: distance, and refusing that would be refusing the truth. 1,000 m
+#: allows an update interval up to ~27 s at this car's real top speed,
+#: far beyond anything plausible for a counter the ECU uses to schedule
+#: regenerations - while still being 100x below the smallest bogus
+#: FORWARD step worth catching and 800x below the largest credit the
+#: unbounded version produced. If `rejected` climbs steadily on a
+#: healthy car, that update rate is the thing to go and measure.
+ODOMETER_DELTA_SLACK_M = 1000
+#: How many refusals get a log line before the accumulator goes quiet.
+#: The point is to leave a trace in the journal on the Pi's SD card, not
+#: to write one line per second for a channel that is broken.
+ODOMETER_LOG_REJECTS = 5
+#: After this many refusals IN A ROW against the same anchor, the anchor
+#: is what is wrong - not the readings - and it is re-synced to the
+#: current value without crediting the gap (`Odometer._resync`).
+#:
+#: Why a resync is needed at all: a glitch that lands inside the reset
+#: window is believed to be a regeneration and becomes the anchor, and
+#: because a refusal deliberately does NOT move the anchor, every
+#: genuine sample afterwards is an impossible forward jump until the
+#: growing span admits it. Measured on the version without this: one
+#: read decoding to 2 m froze the odometer for 3,934 s while the car
+#: drove 78.7 km, and it scales with the true value - ~100 min at
+#: 500 km since regen, ~6.7 h at the ceiling.
+#:
+#: 5 at the class's 1 Hz caps that at ~5 s and at most ~170 m of
+#: distance DROPPED (never invented - a resync credits nothing). Five
+#: consecutive impossible transitions are strong evidence about the
+#: anchor: a single glitch against a good anchor is refused once and the
+#: very next genuine sample is accepted, which resets this counter.
+ODOMETER_RESYNC_AFTER = 5
+
+#: The longest `Authorization` value the token store will even look at.
+#: A minted token is 43 characters of urlsafe base64, so "Bearer " plus
+#: one is 50; this is an order of magnitude of headroom and still caps
+#: the work an unauthenticated caller can ask for. These two paths are
+#: reachable from the internet with no credential in front of them
+#: (nginx has `auth_basic off` on them and the Pi panel passes them
+#: through ahead of its own login), so the cap is not academic.
+MAX_AUTH_HEADER_LEN = 512
+
+#: Where the bearer tokens live by default (gitignored).
+DEFAULT_API_TOKENS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "local", "api-tokens.json"
+)
+
+
+def _stamp(stamps: Dict[str, float], key: str) -> float:
+    """
+    A signal's acquisition time, or now if the cycle carried none.
+
+    `is None`, not truthiness: an acquisition stamp of exactly 0.0 is a
+    timestamp, not a missing one - and substituting `time.time()` for it
+    would make the very next delta window nonsensical.
+    """
+    at = stamps.get(key)
+
+    return time.time() if at is None else at
+
+
+class Odometer:
+    """
+    The in-memory, process-lifetime odometer.
+
+    `odometer_m` only ever grows for as long as this process lives: each
+    accepted sample of the source channel adds `raw - prev_raw` when
+    that is non-negative, and adds `raw` itself when the ECU's counter
+    went backwards to somewhere it plausibly could have been reset to -
+    which is what a successful regeneration looks like from here (the
+    counter restarts at zero; the metres driven between the last sample
+    and the reset are the only thing lost, one sample's worth). A
+    reading the decoder flagged (`Reading.quality != "ok"`) is ignored,
+    never accumulated.
+
+    **Because the total can never be corrected downwards, a sample that
+    is not physically possible is REFUSED rather than accumulated.**
+    Three ways a sample can fail, all counted in `rejected` and the
+    first few logged:
+
+    - the raw value is outside `0 .. ODOMETER_MAX_M` - a `0xFFFFFFFF`
+      that arrived unflagged would otherwise add 4.29 million km, for
+      good;
+    - the counter went backwards but NOT to near zero. A regeneration
+      restarts it at zero, so a step from 900 km to 800 km is a glitch
+      (a mis-correlated F303 response is a known wire path to one:
+      `execute.py` cannot tell two dynamic reads apart by identifier),
+      and crediting it as 800 km of travel would be absurd;
+    - the counter went forward by more than the elapsed time between
+      the two acquisition timestamps could hold at
+      `ODOMETER_MAX_SPEED_KMH`. A one-second gap cannot contain 100 km.
+      The bound is on TIME, not a constant, precisely so that a long
+      link outage - during which the ECU's counter really did advance
+      by real driven distance - still bridges correctly.
+
+    A refused sample does not move `_prev_raw` either: the anchor stays
+    where the last *credible* reading put it, so a single blip costs
+    nothing and the next good sample carries on from the right place.
+
+    **But an anchor can itself be wrong**, and then not moving it is a
+    trap: a glitch small enough to look like a post-reset value is
+    believed, becomes the anchor, and every genuine sample after it is
+    an impossible forward jump - the odometer freezes for as long as it
+    takes the span to catch up, measured at 66 minutes and 78.7 km of
+    lost distance. So after `ODOMETER_RESYNC_AFTER` refusals **in a
+    row** the anchor is the thing that gets replaced: `_resync` adopts
+    the current reading and credits **nothing**. Distance across the gap
+    is dropped, never invented, and service resumes in seconds instead
+    of hours. A sample the *decoder* flagged does not count towards that
+    total - it says nothing about the anchor - though it is counted in
+    `rejected`, which is every sample that did not make it into the
+    total, whatever refused it.
+
+    `epoch` is minted once, here, and changes only when the process
+    restarts. An ECU reconnect keeps it - the counter carries straight
+    on, and if the ECU regenerated while the link was down that shows
+    as one reset - so a client counts deltas within one epoch and
+    re-bases when the epoch changes.
+
+    Thread-safe: the poll loop feeds it, the HTTP threads read it and
+    wait on it.
+    """
+
+    def __init__(self, epoch: Optional[str] = None) -> None:
+        self.epoch = epoch or secrets.token_hex(4)
+        self.cond = threading.Condition()
+        self.version = 0
+        #: Whether the source channel is in the running profile - the
+        #: endpoint answers 503 while it is not.
+        self.loaded = False
+        self.mapping_ver: Optional[int] = None
+        self.odometer_m: Optional[int] = None
+        self.odometer_t: Optional[float] = None
+        self._prev_raw: Optional[int] = None
+        self.speed_kmh: Optional[float] = None
+        self.speed_t: Optional[float] = None
+        self.connected = False
+        self.clock_synced: Optional[bool] = None
+        self.resets = 0
+        #: Every sample that did not make it into the total - flagged by
+        #: the decoder, or refused here as not physically possible.
+        #: Published, so a client and /api/diagnostics can see the
+        #: channel misbehaving instead of trusting a total that quietly
+        #: stopped growing.
+        self.rejected = 0
+        #: Refusals since the last accepted sample, counting only the
+        #: ones that are evidence about `_prev_raw`. ODOMETER_RESYNC_AFTER
+        #: of them means the anchor is wrong.
+        self._refused_in_a_row = 0
+        #: Log lines spent on refusals so far (capped, see
+        #: ODOMETER_LOG_REJECTS).
+        self._logged_rejects = 0
+        #: Log lines spent on re-anchoring, on its own budget.
+        self._logged_resyncs = 0
+
+    def configure(self, loaded: bool, mapping_ver: Optional[int]) -> None:
+        """What this run can offer: called once per resolved profile."""
+        with self.cond:
+            self.loaded = bool(loaded)
+            self.mapping_ver = mapping_ver
+            self._bump()
+
+    def set_connected(self, connected: bool,
+                      clock_synced: Optional[bool] = None) -> None:
+        with self.cond:
+            changed = connected != self.connected
+
+            if clock_synced is not None and clock_synced != self.clock_synced:
+                self.clock_synced = clock_synced
+                changed = True
+
+            self.connected = connected
+
+            if changed:
+                self._bump()
+
+    def feed(self, readings: Dict[str, Any], stamps: Dict[str, float],
+             connected: bool = True,
+             clock_synced: Optional[bool] = None) -> bool:
+        """
+        One poll cycle's readings. Returns True when a sample landed.
+
+        `readings` is what the executor decoded this cycle (key ->
+        Reading); `stamps` the per-signal acquisition times, wall clock.
+        A cycle that carried neither channel changes nothing but the
+        link state.
+        """
+        with self.cond:
+            landed = False
+            refused_before = self.rejected
+            reading = readings.get(ODOMETER_SOURCE)
+
+            if reading is not None:
+                if reading.usable:
+                    landed = self._feed_distance(
+                        reading, _stamp(stamps, ODOMETER_SOURCE)
+                    )
+                else:
+                    #
+                    # The decoder or the executor already said this is
+                    # not a measurement (`clipped` from the mapping's
+                    # valid_max, `sentinel`, `saturated`, `stale`). It is
+                    # not accumulated - and it IS counted, because
+                    # `rejected` is what tells a client "the channel is
+                    # producing garbage" apart from "the car is not
+                    # moving", and the mapping's ceiling catching a
+                    # 0xFFFFFFFF is the single most likely way for that
+                    # to happen. It does not count against the anchor:
+                    # a flagged read says nothing about whether
+                    # `_prev_raw` is still right.
+                    #
+                    self._reject("a %s reading" % reading.quality,
+                                 reading.value, against_anchor=False)
+
+            speed = readings.get(ODOMETER_SPEED)
+
+            if speed is not None and speed.usable:
+                landed = True
+                self.speed_kmh = speed.value
+                self.speed_t = _stamp(stamps, ODOMETER_SPEED)
+
+            #: A refusal is published too: `rejected` moved, and a
+            #: stream client watching for the channel to misbehave should
+            #: not have to wait for the next good sample to hear it.
+            changed = (landed or connected != self.connected
+                       or self.rejected != refused_before)
+
+            if clock_synced is not None and clock_synced != self.clock_synced:
+                self.clock_synced = clock_synced
+                changed = True
+
+            self.connected = connected
+
+            if changed:
+                self._bump()
+
+            return landed
+
+    def _feed_distance(self, reading: Any, at: float) -> bool:
+        """
+        One usable 44BF reading. True when it was accepted.
+
+        Caller holds the lock. Every path out of here either accumulates
+        or counts a refusal - there is no third outcome, because a
+        sample that is neither is a sample the client was never told
+        about.
+        """
+        try:
+            raw = int(reading.value)
+        except (TypeError, ValueError):
+            #: Not a number at all. Cannot happen through the u32
+            #: decode, but this is the one place that would accumulate
+            #: it if it did.
+            return self._reject("not a number", reading.value)
+
+        if raw < 0 or raw > ODOMETER_MAX_M:
+            return self._reject("out of range", raw)
+
+        if self._prev_raw is None:
+            #: The first credible sample of the epoch is the origin. The
+            #: range check above is the ONLY guard on it - there is no
+            #: previous value to bound a delta against.
+            self.odometer_m = 0
+            self._prev_raw = raw
+            self.odometer_t = at
+            self._refused_in_a_row = 0
+
+            return True
+
+        delta = raw - self._prev_raw
+        #
+        # What could have been driven since the last accepted sample.
+        # A negative span (the host clock stepped backwards mid-run -
+        # the Pi has no RTC) is clamped to zero rather than trusted:
+        # the slack alone still admits a real metre.
+        #
+        #: `is None`, not truthiness: an acquisition stamp of exactly 0.0
+        #: is a timestamp, not a missing one.
+        prev_t = at if self.odometer_t is None else self.odometer_t
+        span = max(0.0, at - prev_t)
+        ceiling = span * (ODOMETER_MAX_SPEED_KMH / 3.6) + ODOMETER_DELTA_SLACK_M
+
+        if delta >= 0:
+            if delta > ceiling:
+                return self._refuse_or_resync(
+                    "forward jump of %d m in %.3f s" % (delta, span), raw, at
+                )
+
+            self.odometer_m += delta
+        elif raw <= ceiling:
+            #: The ECU's counter went backwards to somewhere it could
+            #: have reached from zero in the elapsed time: a successful
+            #: regeneration restarted it, and what it counts now was
+            #: driven after that.
+            self.odometer_m += raw
+            self.resets += 1
+        else:
+            #: Backwards, but not to a post-reset value. A regeneration
+            #: restarts the counter at zero; this did not.
+            return self._refuse_or_resync(
+                "backwards step of %d m to %d m" % (-delta, raw), raw, at
+            )
+
+        self._prev_raw = raw
+        self.odometer_t = at
+        self._refused_in_a_row = 0
+
+        return True
+
+    def _refuse_or_resync(self, why: str, raw: int, at: float) -> bool:
+        """
+        Refuse this sample - unless the ANCHOR is what looks wrong.
+
+        Caller holds the lock. A glitch against a good anchor is refused
+        once and the next genuine sample is accepted, so a run of
+        refusals means the value we are measuring against is the
+        implausible one. After ODOMETER_RESYNC_AFTER of them the anchor
+        is replaced by this reading and NOTHING is credited: the distance
+        driven across the gap is lost rather than guessed, which is the
+        only direction that cannot break monotonicity or invent metres.
+
+        `raw` is already known to be inside `0 .. ODOMETER_MAX_M` (the
+        range check runs first and never reaches here), so a resync can
+        never adopt an out-of-range value.
+        """
+        if self._refused_in_a_row < ODOMETER_RESYNC_AFTER:
+            return self._reject(why, raw)
+
+        #
+        # Its own log budget: by the time a resync happens the refusal
+        # budget is spent, and this is the more informative line of the
+        # two - it says the accumulator noticed and recovered rather
+        # than sitting there refusing for an hour.
+        #
+        if self._logged_resyncs < ODOMETER_LOG_REJECTS:
+            self._logged_resyncs += 1
+            print("[!] odometer: re-anchoring to %r after %d refusals in a "
+                  "row (%s); the gap is dropped, not credited"
+                  % (raw, self._refused_in_a_row, why), flush=True)
+
+        #: Counted like any other sample that did not make it into the
+        #: total - it did not.
+        self.rejected += 1
+        self._refused_in_a_row = 0
+        self._prev_raw = raw
+        self.odometer_t = at
+
+        return False
+
+    def _reject(self, why: str, value: Any,
+                against_anchor: bool = True) -> bool:
+        """
+        Count a refused sample and, for the first few, say so.
+
+        Caller holds the lock. Always returns False, so a caller can
+        `return self._reject(...)`. The anchor is deliberately NOT
+        moved: the next credible sample carries on from the last one
+        that was believed.
+
+        `against_anchor` is whether this refusal is evidence that
+        `_prev_raw` is wrong. A transition we judged impossible is; a
+        reading the DECODER flagged is not - it says nothing about the
+        anchor, and letting a run of sentinels trigger a re-anchor would
+        throw away a perfectly good one.
+        """
+        self.rejected += 1
+
+        if against_anchor:
+            self._refused_in_a_row += 1
+
+        self._log_reject("refused " + why, value)
+
+        return False
+
+    def _log_reject(self, message: str, value: Any) -> None:
+        """One bounded log line. Caller holds the lock."""
+        if self._logged_rejects >= ODOMETER_LOG_REJECTS:
+            return
+
+        self._logged_rejects += 1
+        tail = ("" if self._logged_rejects < ODOMETER_LOG_REJECTS
+                else " (further refusals counted, not logged)")
+        print("[!] odometer: %s (%s: %r, prev %r)%s"
+              % (message, ODOMETER_SOURCE, value, self._prev_raw, tail),
+              flush=True)
+
+    def _bump(self) -> None:
+        """Caller holds the lock."""
+        self.version += 1
+        self.cond.notify_all()
+
+    def _snapshot(self) -> Dict[str, Any]:
+        """Caller holds the lock. The API body, minus `t`."""
+        return {
+            "epoch": self.epoch,
+            "odometer_m": self.odometer_m,
+            "odometer_t": self.odometer_t,
+            "speed_kmh": self.speed_kmh,
+            "speed_t": self.speed_t,
+            "connected": self.connected,
+            "clock_synced": self.clock_synced,
+            "resets": self.resets,
+            "rejected": self.rejected,
+            "source": ODOMETER_SOURCE,
+            "mapping_ver": self.mapping_ver,
+        }
+
+    def current(self) -> Tuple[int, Dict[str, Any]]:
+        with self.cond:
+            return self.version, self._snapshot()
+
+    def wait(self, seen: int, timeout: float) -> Tuple[int, Dict[str, Any]]:
+        """Block until the state moved past `seen`, or `timeout`."""
+        with self.cond:
+            if self.version == seen:
+                self.cond.wait(timeout)
+
+            return self.version, self._snapshot()
+
+
+def _latin1(text: Any) -> Optional[bytes]:
+    """
+    One credential as bytes, or None if it cannot be one.
+
+    latin-1 is THE encoding both sides of the token comparison use, and
+    it is chosen because it is the one `http.server` decodes header
+    values with: every byte sequence a request could carry in
+    `Authorization` round-trips through it exactly, so a comparison on
+    latin-1 bytes is a comparison on the bytes that arrived. A stored
+    token holding a codepoint above 0xFF cannot be presented by any
+    request at all, so it is not a token - it is dropped rather than
+    allowed to fail the whole store closed.
+    """
+    try:
+        return str(text).encode("latin-1")
+    except (UnicodeEncodeError, ValueError):
+        return None
+
+
+class ApiTokens:
+    """
+    The bearer tokens the odometer API accepts, from a JSON file.
+
+    `{"tokens": [{"name": ..., "token": ..., "created": ...}, ...]}`,
+    minted and revoked by `tools/api_token.py` (which also keeps the
+    file at mode 0600). Re-read whenever the file changes, so a
+    revocation takes effect without restarting the runtime. Compared in
+    constant time, and no token is ever logged or reported - the
+    diagnostics view sees the count.
+
+    A missing or unreadable file means NO token is valid: the endpoint
+    fails closed rather than open.
+
+    Tokens are held as BYTES, encoded once at load. `validate` compares
+    bytes to bytes: `hmac.compare_digest` refuses two `str` that are not
+    both ASCII, and the header it is handed comes off the wire.
+    """
+
+    def __init__(self, path: Optional[str]) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._tokens: List[bytes] = []
+        self._stamp: Optional[Tuple[int, int]] = None
+        self._warned_mode = False
+
+    def _load(self) -> None:
+        """Caller holds the lock."""
+        if not self.path:
+            self._tokens = []
+            return
+
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            self._tokens = []
+            self._stamp = None
+            return
+
+        #
+        # st_mtime_ns, not st_mtime: the float loses the low bits of a
+        # nanosecond timestamp, so a rewrite that kept the size could
+        # leave a revoked token working. This is stat'd on every request
+        # anyway - there is nothing to save by comparing less of it.
+        #
+        stamp = (st.st_mtime_ns, st.st_size)
+
+        if stamp == self._stamp:
+            return
+
+        #
+        # docs/ODOMETER_API.md states 0600 as a property of the system,
+        # and tools/api_token.py writes it that way. A store loosened by
+        # hand is still USED - failing closed on a mode would lock the
+        # owner out of their own car for a chmod - but it says so, once.
+        #
+        if st.st_mode & 0o077 and not self._warned_mode:
+            self._warned_mode = True
+            print("[!] api tokens: %s is mode %04o, not 0600 - any local "
+                  "user can read the bearer token" %
+                  (self.path, st.st_mode & 0o7777), flush=True)
+
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+
+            entries = doc.get("tokens") if isinstance(doc, dict) else None
+            self._tokens = [
+                encoded for encoded in (
+                    _latin1(e["token"]) for e in (entries or [])
+                    if isinstance(e, dict) and e.get("token")
+                ) if encoded is not None
+            ]
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._tokens = []
+
+        self._stamp = stamp
+
+    def count(self) -> int:
+        with self._lock:
+            self._load()
+
+            return len(self._tokens)
+
+    def validate(self, header: Optional[str]) -> bool:
+        """
+        `Authorization: Bearer <token>` - anything else is a no.
+
+        **This never raises, for any header value whatsoever.** The
+        header is attacker-controlled and arrives here with no
+        credential in front of it, from the internet: `auth_basic off`
+        on the two nginx locations, and the Pi panel passes the same two
+        paths through ahead of its own login. An exception thrown here
+        unwinds `do_GET`, answers the caller NOTHING at all (not the 401
+        the contract promises) and writes a traceback per request into
+        the Pi's journal, on an SD card - a remote log flood with no
+        credential and no rate limit. So: a length cap first, then a
+        total parse, then a bytes comparison.
+
+        `http.server` decodes header values as latin-1, so any high byte
+        arrives as a `str` that `hmac.compare_digest` refuses to compare
+        ("comparing strings with non-ASCII characters is not
+        supported"). Encoding both sides to bytes with one fixed
+        encoding is what makes the comparison total AND keeps it
+        byte-for-byte.
+
+        The early returns are all about the SHAPE of the header - too
+        long, wrong scheme, no space, empty value. None of them depends
+        on the length of the presented token: a token of any length that
+        parses at all goes through the same loop over every stored
+        token, so the answer's timing says neither which token matched
+        nor how long the right one is.
+        """
+        if not header or len(header) > MAX_AUTH_HEADER_LEN:
+            return False
+
+        scheme, sep, presented = header.strip().partition(" ")
+
+        #: No separator is "Bearer" with nothing after it, or a scheme
+        #: run together with its credential - neither is a token.
+        if not sep or scheme.lower() != "bearer":
+            return False
+
+        presented = presented.strip()
+
+        if not presented:
+            return False
+
+        candidate = _latin1(presented)
+
+        if candidate is None:
+            return False
+
+        with self._lock:
+            self._load()
+            #: Every token is compared, whatever the first one said, so
+            #: the answer's timing does not say which one matched.
+            ok = False
+
+            for token in self._tokens:
+                ok |= hmac.compare_digest(token, candidate)
+
+            return ok
+
+
 def db_runs(path: str) -> List[Dict]:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
@@ -3936,6 +4662,8 @@ def make_handler(
     share_base_url: str = "",
     modes: Optional["ModeControl"] = None,
     diag: Optional["Diagnostics"] = None,
+    odometer: Optional["Odometer"] = None,
+    api_tokens: Optional["ApiTokens"] = None,
 ):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -4121,6 +4849,90 @@ def make_handler(
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
 
+        # -- odometer API -------------------------------------------
+
+        def _odometer_authorised(self) -> bool:
+            """
+            Bearer token, or a 401 that names nothing.
+
+            One answer for "no header", "wrong scheme", "unknown token"
+            and "revoked": a caller learns only that it is not in. The
+            challenge header is what the contract promises a client it
+            can key on.
+            """
+            if api_tokens is not None and api_tokens.validate(
+                    self.headers.get("Authorization")):
+                return True
+
+            payload = json.dumps({"error": "unauthorized"}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+            return False
+
+        def _odometer_loaded(self) -> bool:
+            """503 when this run has no odometer channel to offer."""
+            if odometer is not None and odometer.loaded:
+                return True
+
+            self._json_body({"error": "odometer channel not loaded"}, 503)
+
+            return False
+
+        @staticmethod
+        def _odometer_body(snap: Dict[str, Any]) -> Dict[str, Any]:
+            """The contract's JSON: `t` is when this body was built."""
+            body = {"t": time.time()}
+            body.update(snap)
+
+            return body
+
+        def _odometer_stream(self) -> None:
+            """
+            SSE: one `data:` line per new sample, coalesced to at most
+            ODOMETER_STREAM_MAX_HZ events per second, a keepalive
+            comment after ODOMETER_KEEPALIVE_S of quiet.
+
+            Coalescing works by waiting out the minimum gap and THEN
+            taking the state, so a burst of samples inside one gap
+            becomes one event carrying the latest of them.
+            """
+            self._headers("text/event-stream", {"Connection": "close"})
+            self.close_connection = True
+            self.end_headers()
+
+            seen = -1
+            gap = 1.0 / ODOMETER_STREAM_MAX_HZ
+            last_sent = -gap
+
+            try:
+                while True:
+                    version, snap = odometer.wait(seen, ODOMETER_KEEPALIVE_S)
+
+                    if version == seen:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        continue
+
+                    wait_for = gap - (time.monotonic() - last_sent)
+
+                    if wait_for > 0:
+                        time.sleep(wait_for)
+                        version, snap = odometer.current()
+
+                    seen = version
+                    msg = "data: " + json.dumps(self._odometer_body(snap)) + "\n\n"
+                    self.wfile.write(msg.encode())
+                    self.wfile.flush()
+                    last_sent = time.monotonic()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
         def do_GET(self):
             raw = self.path
             path = raw.split("?")[0]
@@ -4136,6 +4948,28 @@ def make_handler(
             #
             if path == SHARE_PREFIX or path.startswith(SHARE_PREFIX + "/"):
                 self._serve_share(path, query)
+                return
+
+            #
+            # The odometer API: its own bearer token, nothing of the
+            # session in the body, and not on the share allowlist (a
+            # share viewer asking for /s/api/odometer gets the 404
+            # above). Auth is decided before anything else is said -
+            # the 503 for a run without the channel is for callers who
+            # are in.
+            #
+            if path in ("/api/odometer", "/api/odometer/stream"):
+                if not self._odometer_authorised():
+                    return
+
+                if not self._odometer_loaded():
+                    return
+
+                if path == "/api/odometer/stream":
+                    self._odometer_stream()
+                    return
+
+                self._json_body(self._odometer_body(odometer.current()[1]))
                 return
 
             if path == "/api/share":
@@ -4436,6 +5270,12 @@ def main() -> int:
                          "https://f10.example.com. Defaults to the Host the "
                          "request arrived on, which is right behind the "
                          "server's reverse proxy.")
+    ap.add_argument("--api-tokens", default=DEFAULT_API_TOKENS,
+                    metavar="PATH",
+                    help="bearer-token file for /api/odometer (default "
+                         "local/api-tokens.json next to live.py; mint one "
+                         "with tools/api_token.py). Re-read when it "
+                         "changes. Missing file: every token is refused.")
     ap.add_argument("--ecu", type=lambda s: int(s, 0), default=None,
                     help="ECU diagnostic address, e.g. 0x12")
     ap.add_argument("--rate", type=float, default=10.0,
@@ -4566,9 +5406,24 @@ def main() -> int:
     #: absent, and before the first connection attempt.
     diag.publish(registry=registry, extra_ids=extra_ids)
 
+    #
+    # The odometer API's state and its token store. The epoch is minted
+    # here, once per process. Until a profile is resolved the endpoint
+    # answers from what was LOADED: with the mapping file present a
+    # client gets `connected: false` and nulls rather than a 503 that
+    # would only mean "not connected yet".
+    #
+    odometer = Odometer()
+    odometer.configure(
+        ODOMETER_SOURCE in {s.key for s in registry.signals},
+        None,
+    )
+    api_tokens = ApiTokens(args.api_tokens)
+    diag.publish(api_tokens=api_tokens, odometer=odometer)
+
     worker = threading.Thread(
         target=demo_loop if args.demo else poll_loop,
-        args=(tel, args, rec, registry, modes, diag),
+        args=(tel, args, rec, registry, modes, diag, odometer),
         daemon=True,
     )
     worker.start()
@@ -4584,6 +5439,8 @@ def main() -> int:
             args.share_base_url,
             modes,
             diag,
+            odometer,
+            api_tokens,
         ),
     )
     server.daemon_threads = True
@@ -4601,6 +5458,14 @@ def main() -> int:
            f"{args.share_base_url or '<this host>'}{SHARE_PREFIX}/")
     )
     print(f"[+] logging:   {args.db if rec else 'disabled'}")
+    print(
+        "[+] odometer:  /api/odometer - "
+        + (f"{api_tokens.count()} token(s) in {args.api_tokens}"
+           if api_tokens.count() else
+           f"no tokens ({args.api_tokens}); mint one with tools/api_token.py")
+        + ("" if odometer.loaded else
+           f"; source channel {ODOMETER_SOURCE} is not loaded (503)")
+    )
     print(
         f"[+] mappings:  {args.mappings} "
         f"({len(registry.mappings)} file(s), {len(registry.requests)} requests, "

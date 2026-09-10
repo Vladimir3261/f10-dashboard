@@ -31,6 +31,13 @@
 # endpoints. nginx never sees the tokens and needs no reload when one is
 # minted or revoked.
 #
+# The other exception is the odometer API: exactly `/api/odometer` and
+# `/api/odometer/stream` (docs/ODOMETER_API.md). The navigation client
+# carries live.py's own bearer token in `Authorization`, so Basic Auth
+# is off on those two paths and the header goes upstream as it is; the
+# Pi's panel forwards it on those paths alone, and live.py judges it.
+# Exact-match locations, so nothing else under /api/ is opened.
+#
 # X-Forwarded-For / -Proto / -Host are SET here on every proxied location,
 # replacing whatever the client sent ($remote_addr, never
 # $proxy_add_x_forwarded_for): the panel trusts this hop's values as the
@@ -154,5 +161,50 @@ server {
         proxy_cache         off;
         proxy_read_timeout  1h;
         chunked_transfer_encoding off;
+    }
+
+    # -- the odometer API ----------------------------------------------
+    #
+    # Bearer token, judged by live.py; no Basic Auth here or a client
+    # would need both. Exact matches: `location =` wins over the prefix
+    # locations above and opens nothing else.
+    location = /api/odometer {
+        auth_basic off;
+
+        proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        proxy_read_timeout 120s;
+
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+    }
+
+    location = /api/odometer/stream {
+        auth_basic off;
+
+        proxy_pass http://{{ pi_wg_ip }}:{{ pi_dashboard_port }};
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Connection        "";
+
+        proxy_buffering     off;
+        proxy_cache         off;
+        proxy_read_timeout  1h;
+        chunked_transfer_encoding off;
+
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
     }
 }
