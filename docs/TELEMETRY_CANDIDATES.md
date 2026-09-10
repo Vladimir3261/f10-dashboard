@@ -67,17 +67,21 @@ member), `egs` 1 → 2 at 2 Hz, `egs_slow` 1. That is a **validation
 load**, chosen to prove scales, not a set to drive with; the per-domain
 plans below load one file at a time.
 
-**Under the drive modes** (`config/modes.yaml` v2): the two new classes
-`dde_slow` and `egs_slow` are not named there, so every mode scales
-them by **1.0** — `long` does not slow them, `debug` does not speed them
-up, and `sampling` does **not** exempt them from the duty cycle (they
-sleep with the burst: 120 s awake covers 12 of the 15 `dde_slow`
-members, the rest wait for the next burst 600 s later); `off` sends
-nothing, as for every class. The classes that already exist behave as
-before: `dde_dyn` ×2 in `long`, ×0.2 in `debug`, exempt in `sampling`;
-`egs` ×4 in `long`, ×0.5 in `debug`. That is acceptable for a
-validation-only load and is the thing to revisit (name the classes in
-`modes.yaml`, bump it to v3) before any of these files is promoted.
+**Under the drive modes** (`config/modes.yaml` **v3**, 2026-09-10): the
+two new classes `dde_slow` and `egs_slow` are named in every mode that
+names anything and treated exactly like `slow` — **exempt** from
+`sampling`'s sleep (a 150 s rotation that slept 600 s in 720 would
+never complete inside one burst), ×1.0 in `long` (named, so the choice
+is visible), ×0.1 in `debug` (one member per second); `off` sends
+nothing, as for every class. Under v2 they were unnamed — every mode
+scaled them ×1.0 and `sampling` put them to sleep with the burst, so
+120 s awake covered 12 of the 15 `dde_slow` members and the rest waited
+600 s. The classes that already existed behave as before: `dde_dyn` ×2
+in `long`, ×0.2 in `debug`, exempt in `sampling`; `egs` ×4 in `long`,
+×0.5 in `debug`. A launch that loads no candidate file declares neither
+class, and `live.py`'s startup note that the multipliers do nothing is
+expected there. `./run_car.sh --candidate <name>` is how a validation
+drive loads a file (see [`FINAL_TEST.md`](FINAL_TEST.md)).
 
 ## How every candidate is validated (common part)
 

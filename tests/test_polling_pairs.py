@@ -344,11 +344,15 @@ class TheConfigurationChangeIsRecorded(unittest.TestCase):
         # cadence changes but the fingerprint does not, two differently
         # sampled drives compare as equal.
         #
+        # drive-modes@3 since 2026-09-10: v3 named `dde_slow` and
+        # `egs_slow` (the #15 candidates' 10 s classes) in every mode.
+        # The number here is the shipped table's, so this test also
+        # notices a bump nobody wrote down.
         profile, _ = car_plan()
-        fingerprint = profile.mapping_set(["drive-modes@2"])
+        fingerprint = profile.mapping_set([load_modes().fingerprint()])
 
         self.assertIn("sae-obd-engine@5", fingerprint)
-        self.assertIn("drive-modes@2", fingerprint)
+        self.assertIn("drive-modes@3", fingerprint)
 
 
 class TheWireCostIsAccountedFor(unittest.TestCase):
